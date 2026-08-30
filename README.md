@@ -210,6 +210,14 @@ If you use this work in your research, please cite:
   howpublished= {\url{https://github.com/jiangxinke/Agentic-RAG-R1}},
   note        = {GitHub repository},
 }
+
+@inproceedings{jiang2026agenticrag,
+  title={AgenticRag-R1: Agentic Reinforcement Learning with Stack Memory for Multi-Step Reasoning, Retrieval and Memorizing},
+  author={Jiang, Xinke and Fang, Yue and Yang, Zhibang and Gao, Jiaran and Zhang, Zhixin and Feng, Tao and Qiu, Rihong and Zhang, Wentao and Ding, Hongxin and Zhang, Ruizhe and others},
+  booktitle={EMNLP},
+  url={https://github.com/jiangxinke/Agentic-RAG-R1},
+  year={2026}
+}
 ```
 
 ## 🌟 Star History
