@@ -222,7 +222,7 @@ If you use this work in your research, please cite:
 
 ## 🌟 Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=jiangxinke/Agentic-RAG-R1&type=Date)](https://star-history.com/#jiangxinke/Agentic-RAG-R1&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=jiangxinke/Agentic-RAG-R1&type=Date)](https://star-history.dera.page/#jiangxinke/Agentic-RAG-R1&Date)
 
 ## License 📄
 
