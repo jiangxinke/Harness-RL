@@ -1,0 +1,9 @@
+{
+  "source_dataset": "inclusionAI/ASearcher-test-data",
+  "source_revision": "46678e7f483a84d7437d575629e3464b33e30505",
+  "seed": 20260811,
+  "samples_per_dataset": 90,
+  "judge_model": "Qwen/Qwen2.5-3B-Instruct",
+  "judge_temperature": 0,
+  "datasets": ["2WikiMultiHopQA", "HotpotQA", "Bamboogle", "FRAMES", "MuSiQue", "NQ", "TriviaQA"]
+}

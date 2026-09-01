@@ -1,0 +1,16 @@
+# Direct packages shared by the trainer, SGLang, and StackPlanner graph
+# runtime.  Resolve this together with the harness pyproject via
+# `make lock-training-runtime`; do not add the DeerFlow server extra here.
+cuda-bindings==12.9.7
+cuda-python==12.9.7
+grpcio==1.83.0
+grpcio-health-checking==1.83.0
+grpcio-reflection==1.83.0
+numpy==1.26.4
+openai==2.54.0
+pillow==11.3.0
+protobuf==7.35.1
+pytest==9.0.3
+ruff==0.14.11
+setuptools==80.9.0
+tifffile==2025.5.10

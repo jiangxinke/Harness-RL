@@ -1,0 +1,28 @@
+{
+  "training": {
+    "dataset": "inclusionAI/ASearcher-train-data",
+    "revision": "2e1b758bd53a36c28cbe1d49776af35f95a9a4b0",
+    "file": "ASearcher-LRM-35k.jsonl",
+    "source_bytes": 13278900,
+    "source_sha256": "971d59a51b6c604b5b5eff5dcdaadf5d4624bc376cf610995d27e5017f660bfb",
+    "converted_rows": 35054,
+    "converted_sha256": "356773b1096df2aa2a36084efd2adff9a8a1197c7cf3c641f0699b8f79602b65"
+  },
+  "evaluation": {
+    "dataset": "inclusionAI/ASearcher-test-data",
+    "revision": "46678e7f483a84d7437d575629e3464b33e30505",
+    "seed": 20260811,
+    "samples_per_dataset": 90,
+    "sample_count": 630,
+    "manifest_sha256": "e7f7cbc702a103d684850db006daf06fa27867e6be0ac4b29ec51f58cf9ac46d",
+    "source_sha256": {
+      "2WikiMultiHopQA": "5e06ba3e90566b37f7f6282fde8327d18164f8c63b2743c9c150998fa4a09546",
+      "HotpotQA": "f20ebb273fe5fad27e113f8a353c1f8fbc9548d7eeeb8d6c5e7b16867d3033ac",
+      "Bamboogle": "60b732ed98c9906f24d98aae67b9280302f8584c1a65d001b55e1a0aab1b5caf",
+      "FRAMES": "660b24542df9ea4e84248be59042a3d82ce6cd6203279a3c659a991e01b97f63",
+      "MuSiQue": "64973914d7c06f7aa6ee0aa12d2fc286c2d15c9d088f794fde4f59ddb41ebd9b",
+      "NQ": "849a4eaf27e3a9b698889012cf0da529a228965866a799ccda2171da2638889e",
+      "TriviaQA": "493da3d77be23340047e2a157b7dc6df1c81e3bc93c296f4f7159f9a9783dc5d"
+    }
+  }
+}

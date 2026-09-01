@@ -1,0 +1,34 @@
+{
+  "mcpInterceptors": [
+    "my_package.mcp.auth:build_auth_interceptor"
+  ],
+  "mcpServers": {
+    "github": {
+      "enabled": false,
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_TOKEN": "$GITHUB_TOKEN"
+      },
+      "tool_call_timeout": 60,
+      "description": "GitHub MCP server for repository operations"
+    },
+    "postgres": {
+      "enabled": false,
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-postgres",
+        "postgresql://localhost/mydb"
+      ],
+      "env": {},
+      "description": "PostgreSQL database access"
+    }
+  },
+  "skills": {}
+}

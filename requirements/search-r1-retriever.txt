@@ -1,0 +1,9 @@
+# Runtime lock for slime/examples/search-r1/local_dense_retriever/retrieval_server.py.
+# Torch and FAISS are installed separately from their CUDA wheel indexes.
+datasets==3.6.0
+fastapi==0.139.0
+numpy==1.26.4
+pydantic==2.12.5
+tqdm==4.67.1
+transformers==4.56.2
+uvicorn==0.51.0

@@ -1,0 +1,977 @@
+import asyncio
+import os
+import re
+import time
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+from _router_auth_helpers import make_authed_test_app
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.base import empty_checkpoint
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.store.memory import InMemoryStore
+
+from app.gateway.routers import threads
+from deerflow.config.paths import Paths
+from deerflow.persistence.thread_meta import InvalidMetadataFilterError
+from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
+
+_ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+
+
+class _PermissiveThreadMetaStore(MemoryThreadMetaStore):
+    """Memory store that skips user-id filtering for router tests.
+
+    Owner isolation is exercised separately in
+    ``test_memory_thread_meta_isolation.py``. Router tests need to drive
+    the FastAPI surface end-to-end with a single fixed app user, but the
+    stub auth middleware in ``_router_auth_helpers`` stamps a fresh UUID
+    on every request, so the production filtering would reject every
+    pre-seeded record. Bypass that filter so the test can focus on the
+    timestamp wire format.
+    """
+
+    async def _get_owned_record(self, thread_id, user_id, method_name):  # type: ignore[override]
+        item = await self._store.aget(THREADS_NS, thread_id)
+        return dict(item.value) if item is not None else None
+
+    async def check_access(self, thread_id, user_id, *, require_existing=False):  # type: ignore[override]
+        item = await self._store.aget(THREADS_NS, thread_id)
+        if item is None:
+            return not require_existing
+        return True
+
+    async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None):  # type: ignore[override]
+        return await super().create(thread_id, assistant_id=assistant_id, user_id=None, display_name=display_name, metadata=metadata)
+
+    async def search(self, *, metadata=None, status=None, limit=100, offset=0, user_id=None):  # type: ignore[override]
+        return await super().search(metadata=metadata, status=status, limit=limit, offset=offset, user_id=None)
+
+
+def _build_thread_app() -> tuple[FastAPI, InMemoryStore, InMemorySaver]:
+    """Build a stub-authed FastAPI app wired with an in-memory ThreadMetaStore.
+
+    The thread_store on ``app.state`` is a permissive subclass of
+    ``MemoryThreadMetaStore`` so tests can drive ``/api/threads``
+    end-to-end and pre-seed legacy records via the underlying BaseStore.
+
+    Returns ``(app, store, checkpointer)`` for direct seeding/inspection.
+    """
+    app = make_authed_test_app()
+    store = InMemoryStore()
+    checkpointer = InMemorySaver()
+    app.state.store = store
+    app.state.checkpointer = checkpointer
+    app.state.thread_store = _PermissiveThreadMetaStore(store)
+    app.include_router(threads.router)
+    return app, store, checkpointer
+
+
+async def _write_checkpoint(
+    checkpointer: InMemorySaver,
+    thread_id: str,
+    checkpoint_id: str,
+    messages: list[object],
+    *,
+    step: int,
+    channel_values: dict | None = None,
+) -> dict:
+    checkpoint = empty_checkpoint()
+    checkpoint["id"] = checkpoint_id
+    values = {"messages": messages, **(channel_values or {})}
+    checkpoint["channel_values"] = values
+    checkpoint["channel_versions"] = {key: step for key in values}
+    return await checkpointer.aput(
+        {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+        checkpoint,
+        {
+            "step": step,
+            "source": "loop",
+            "writes": {"test": {"messages": messages}},
+            "parents": {},
+            "created_at": f"2026-07-05T00:00:0{step}+00:00",
+        },
+        checkpoint["channel_versions"],
+    )
+
+
+def test_delete_thread_data_removes_thread_directory(tmp_path):
+    paths = Paths(tmp_path)
+    thread_dir = paths.thread_dir("thread-cleanup")
+    workspace = paths.sandbox_work_dir("thread-cleanup")
+    uploads = paths.sandbox_uploads_dir("thread-cleanup")
+    outputs = paths.sandbox_outputs_dir("thread-cleanup")
+
+    for directory in [workspace, uploads, outputs]:
+        directory.mkdir(parents=True, exist_ok=True)
+    (workspace / "notes.txt").write_text("hello", encoding="utf-8")
+    (uploads / "report.pdf").write_bytes(b"pdf")
+    (outputs / "result.json").write_text("{}", encoding="utf-8")
+
+    assert thread_dir.exists()
+
+    response = threads._delete_thread_data("thread-cleanup", paths=paths)
+
+    assert response.success is True
+    assert not thread_dir.exists()
+
+
+def test_delete_thread_data_is_idempotent_for_missing_directory(tmp_path):
+    paths = Paths(tmp_path)
+
+    response = threads._delete_thread_data("missing-thread", paths=paths)
+
+    assert response.success is True
+    assert not paths.thread_dir("missing-thread").exists()
+
+
+def test_delete_thread_data_rejects_invalid_thread_id(tmp_path):
+    paths = Paths(tmp_path)
+
+    with pytest.raises(HTTPException) as exc_info:
+        threads._delete_thread_data("../escape", paths=paths)
+
+    assert exc_info.value.status_code == 422
+    assert "Invalid thread_id" in exc_info.value.detail
+
+
+def test_delete_thread_route_cleans_thread_directory(tmp_path):
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    paths = Paths(tmp_path)
+    user_id = get_effective_user_id()
+    thread_dir = paths.thread_dir("thread-route", user_id=user_id)
+    paths.sandbox_work_dir("thread-route", user_id=user_id).mkdir(parents=True, exist_ok=True)
+    (paths.sandbox_work_dir("thread-route", user_id=user_id) / "notes.txt").write_text("hello", encoding="utf-8")
+
+    app = make_authed_test_app()
+    app.include_router(threads.router)
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-route")
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "message": "Deleted local thread data for thread-route"}
+    assert not thread_dir.exists()
+
+
+def test_delete_thread_route_rejects_invalid_thread_id(tmp_path):
+    paths = Paths(tmp_path)
+
+    app = make_authed_test_app()
+    app.include_router(threads.router)
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/../escape")
+
+    assert response.status_code == 404
+
+
+def test_delete_thread_route_returns_422_for_route_safe_invalid_id(tmp_path):
+    paths = Paths(tmp_path)
+
+    app = make_authed_test_app()
+    app.include_router(threads.router)
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread.with.dot")
+
+    assert response.status_code == 422
+    assert "Invalid thread_id" in response.json()["detail"]
+
+
+def test_delete_thread_data_returns_generic_500_error(tmp_path):
+    paths = Paths(tmp_path)
+
+    with (
+        patch.object(paths, "delete_thread_dir", side_effect=OSError("/secret/path")),
+        patch.object(threads.logger, "exception") as log_exception,
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            threads._delete_thread_data("thread-cleanup", paths=paths)
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "Failed to delete local thread data."
+    assert "/secret/path" not in exc_info.value.detail
+    log_exception.assert_called_once_with("Failed to delete thread data for %s", "thread-cleanup")
+
+
+# ── Server-reserved metadata key stripping ──────────────────────────────────
+
+
+def test_strip_reserved_metadata_removes_user_id():
+    """Client-supplied user_id is dropped to prevent reflection attacks."""
+    out = threads._strip_reserved_metadata({"user_id": "victim-id", "title": "ok"})
+    assert out == {"title": "ok"}
+
+
+def test_strip_reserved_metadata_passes_through_safe_keys():
+    """Non-reserved keys are preserved verbatim."""
+    md = {"title": "ok", "tags": ["a", "b"], "custom": {"x": 1}}
+    assert threads._strip_reserved_metadata(md) == md
+
+
+def test_strip_reserved_metadata_empty_input():
+    """Empty / None metadata returns same object — no crash."""
+    assert threads._strip_reserved_metadata({}) == {}
+
+
+def test_strip_reserved_metadata_strips_all_reserved_keys():
+    out = threads._strip_reserved_metadata({"user_id": "x", "keep": "me"})
+    assert out == {"keep": "me"}
+
+
+# ---------------------------------------------------------------------------
+# ISO 8601 timestamp contract (issue #2594)
+# ---------------------------------------------------------------------------
+#
+# Threads endpoints document ``created_at`` / ``updated_at`` as ISO
+# timestamps and that is the format LangGraph Platform uses
+# (``langgraph_sdk.schema.Thread.created_at: datetime`` JSON-encodes to
+# ISO 8601). The tests below pin that contract end-to-end and also
+# exercise the ``coerce_iso`` healing path for legacy unix-timestamp
+# records written by older Gateway versions.
+
+
+def test_create_thread_returns_iso_timestamps() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads", json={"metadata": {}})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert _ISO_TIMESTAMP_RE.match(body["created_at"]), body["created_at"]
+    assert _ISO_TIMESTAMP_RE.match(body["updated_at"]), body["updated_at"]
+    assert body["created_at"] == body["updated_at"]
+
+
+def test_put_goal_creates_missing_thread_checkpoint_and_returns_goal() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.put(
+            "/api/threads/goal-thread/goal",
+            json={"objective": "Finish the feature and make all tests pass"},
+        )
+        state_response = client.get("/api/threads/goal-thread/state")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["goal"]["objective"] == "Finish the feature and make all tests pass"
+    assert body["goal"]["status"] == "active"
+    assert body["goal"]["continuation_count"] == 0
+    assert body["goal"]["max_continuations"] == 8
+    assert state_response.status_code == 200, state_response.text
+    assert state_response.json()["values"]["goal"]["objective"] == "Finish the feature and make all tests pass"
+
+
+def test_goal_status_and_clear_round_trip() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        set_response = client.put(
+            "/api/threads/goal-thread/goal",
+            json={"objective": "Ship it", "max_continuations": 3},
+        )
+        get_response = client.get("/api/threads/goal-thread/goal")
+        clear_response = client.delete("/api/threads/goal-thread/goal")
+        after_clear_response = client.get("/api/threads/goal-thread/goal")
+        state_response = client.get("/api/threads/goal-thread/state")
+
+    assert set_response.status_code == 200, set_response.text
+    assert get_response.status_code == 200, get_response.text
+    assert get_response.json()["goal"]["objective"] == "Ship it"
+    assert get_response.json()["goal"]["max_continuations"] == 3
+    assert clear_response.status_code == 200, clear_response.text
+    assert clear_response.json()["goal"] is None
+    assert after_clear_response.status_code == 200, after_clear_response.text
+    assert after_clear_response.json()["goal"] is None
+    assert "goal" not in state_response.json()["values"]
+
+
+def test_internal_owner_header_assigns_thread_to_owner() -> None:
+    import asyncio
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    store = InMemoryStore()
+    checkpointer = InMemorySaver()
+    thread_store = MemoryThreadMetaStore(store)
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+        app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+    )
+
+    async def _scenario():
+        response = await threads.create_thread(
+            threads.ThreadCreateRequest(thread_id="channel-thread", metadata={}),
+            request,
+        )
+        owner_row = await thread_store.get("channel-thread", user_id="owner-1")
+        internal_row = await thread_store.get("channel-thread", user_id="default")
+        return response, owner_row, internal_row
+
+    response, owner_row, internal_row = asyncio.run(_scenario())
+
+    assert response.thread_id == "channel-thread"
+    assert owner_row is not None
+    assert owner_row["user_id"] == "owner-1"
+    assert internal_row is None
+
+
+def test_goal_thread_creation_uses_internal_owner_header() -> None:
+    import asyncio
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    store = InMemoryStore()
+    checkpointer = InMemorySaver()
+    thread_store = MemoryThreadMetaStore(store)
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+        app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+    )
+
+    async def _scenario():
+        await threads._ensure_thread_for_goal("channel-goal-thread", request)
+        owner_row = await thread_store.get("channel-goal-thread", user_id="owner-1")
+        internal_row = await thread_store.get("channel-goal-thread", user_id="default")
+        owner_threads = await thread_store.search(user_id="owner-1")
+        return owner_row, internal_row, owner_threads
+
+    owner_row, internal_row, owner_threads = asyncio.run(_scenario())
+
+    assert owner_row is not None
+    assert owner_row["user_id"] == "owner-1"
+    assert internal_row is None
+    assert [thread["thread_id"] for thread in owner_threads] == ["channel-goal-thread"]
+
+
+def test_get_thread_returns_iso_for_legacy_unix_record() -> None:
+    """A thread record written by older versions stores ``time.time()``
+    floats. ``get_thread`` must transparently surface them as ISO so the
+    frontend's ``new Date(...)`` parser does not break.
+    """
+    app, store, checkpointer = _build_thread_app()
+
+    legacy_thread_id = "legacy-thread"
+    legacy_ts = "1777252410.411327"
+
+    async def _seed() -> None:
+        await store.aput(
+            THREADS_NS,
+            legacy_thread_id,
+            {
+                "thread_id": legacy_thread_id,
+                "status": "idle",
+                "created_at": legacy_ts,
+                "updated_at": legacy_ts,
+                "metadata": {},
+            },
+        )
+        from langgraph.checkpoint.base import empty_checkpoint
+
+        await checkpointer.aput(
+            {"configurable": {"thread_id": legacy_thread_id, "checkpoint_ns": ""}},
+            empty_checkpoint(),
+            {"step": -1, "source": "input", "writes": None, "parents": {}},
+            {},
+        )
+
+    import asyncio
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/{legacy_thread_id}")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert _ISO_TIMESTAMP_RE.match(body["created_at"]), body["created_at"]
+    assert _ISO_TIMESTAMP_RE.match(body["updated_at"]), body["updated_at"]
+
+
+def test_patch_thread_returns_iso_and_advances_updated_at() -> None:
+    app, store, _checkpointer = _build_thread_app()
+    thread_id = "patch-target"
+
+    legacy_created = "1777000000.000000"
+    legacy_updated = "1777000000.000000"
+
+    async def _seed() -> None:
+        await store.aput(
+            THREADS_NS,
+            thread_id,
+            {
+                "thread_id": thread_id,
+                "status": "idle",
+                "created_at": legacy_created,
+                "updated_at": legacy_updated,
+                "metadata": {"k": "v0"},
+            },
+        )
+
+    import asyncio
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        response = client.patch(f"/api/threads/{thread_id}", json={"metadata": {"k": "v1"}})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert _ISO_TIMESTAMP_RE.match(body["created_at"]), body["created_at"]
+    assert _ISO_TIMESTAMP_RE.match(body["updated_at"]), body["updated_at"]
+    # Patch issues a fresh ``updated_at`` via ``MemoryThreadMetaStore.update_metadata``,
+    # so it must be > the migrated legacy ``created_at`` (both ISO strings
+    # sort lexicographically by time when the format is consistent).
+    assert body["updated_at"] > body["created_at"]
+    assert body["metadata"] == {"k": "v1"}
+
+
+def test_search_threads_normalizes_legacy_unix_seconds_to_iso() -> None:
+    """``MemoryThreadMetaStore`` may hold legacy ``time.time()`` floats
+    written by older Gateway versions. ``/search`` must surface them as
+    ISO via ``coerce_iso`` so the frontend's ``new Date(...)`` parser
+    does not break.
+    """
+    app, store, _checkpointer = _build_thread_app()
+
+    async def _seed() -> None:
+        # Legacy unix-second float (the literal value from issue #2594).
+        await store.aput(
+            THREADS_NS,
+            "legacy",
+            {
+                "thread_id": "legacy",
+                "status": "idle",
+                "created_at": 1777000000.0,
+                "updated_at": 1777000000.0,
+                "metadata": {},
+            },
+        )
+        # Modern ISO string, slightly later.
+        await store.aput(
+            THREADS_NS,
+            "modern",
+            {
+                "thread_id": "modern",
+                "status": "idle",
+                "created_at": "2026-04-27T00:00:00+00:00",
+                "updated_at": "2026-04-27T00:00:00+00:00",
+                "metadata": {},
+            },
+        )
+
+    import asyncio
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/search", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    items = response.json()
+    assert {item["thread_id"] for item in items} == {"legacy", "modern"}
+    for item in items:
+        assert _ISO_TIMESTAMP_RE.match(item["created_at"]), item
+        assert _ISO_TIMESTAMP_RE.match(item["updated_at"]), item
+
+
+def test_memory_thread_meta_store_writes_iso_on_create() -> None:
+    """``MemoryThreadMetaStore.create`` must emit ISO so newly created
+    threads serialize correctly without depending on the router's
+    ``coerce_iso`` heal path.
+    """
+    import asyncio
+
+    store = InMemoryStore()
+    repo = MemoryThreadMetaStore(store)
+
+    async def _scenario() -> dict:
+        await repo.create("fresh", user_id=None, metadata={"a": 1})
+        record = (await store.aget(THREADS_NS, "fresh")).value
+        return record
+
+    record = asyncio.run(_scenario())
+    assert _ISO_TIMESTAMP_RE.match(record["created_at"]), record
+    assert _ISO_TIMESTAMP_RE.match(record["updated_at"]), record
+
+
+def test_get_thread_state_returns_iso_for_legacy_checkpoint_metadata() -> None:
+    """Checkpoints written by older Gateway versions stored
+    ``created_at`` as a unix-second float in their metadata. The
+    ``/state`` endpoint must surface that value as ISO so the frontend's
+    ``new Date(...)`` parser does not break — same root cause as the
+    thread-record bug fixed in #2594, but on the checkpoint side.
+    """
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "legacy-state"
+
+    async def _seed() -> None:
+        from langgraph.checkpoint.base import empty_checkpoint
+
+        await checkpointer.aput(
+            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+            empty_checkpoint(),
+            {"step": -1, "source": "input", "writes": None, "parents": {}, "created_at": 1777252410.411327},
+            {},
+        )
+
+    import asyncio
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/{thread_id}/state")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert _ISO_TIMESTAMP_RE.match(body["created_at"]), body["created_at"]
+    assert _ISO_TIMESTAMP_RE.match(body["checkpoint"]["ts"]), body["checkpoint"]
+
+
+def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None:
+    """``/history`` walks ``checkpointer.alist`` and emits one entry per
+    checkpoint. Each entry's ``created_at`` must come out as ISO even if
+    older checkpoints stored a unix-second float in their metadata.
+    """
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "legacy-history"
+
+    async def _seed() -> None:
+        from langgraph.checkpoint.base import empty_checkpoint
+
+        await checkpointer.aput(
+            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+            empty_checkpoint(),
+            {"step": -1, "source": "input", "writes": None, "parents": {}, "created_at": 1777252410.411327},
+            {},
+        )
+
+    import asyncio
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    entries = response.json()
+    assert entries, "expected at least one history entry"
+    for entry in entries:
+        assert _ISO_TIMESTAMP_RE.match(entry["created_at"]), entry
+
+
+# ── branch threads from completed assistant turns ─────────────────────────────
+
+
+def test_branch_thread_from_older_assistant_turn_creates_truncated_thread() -> None:
+    app, store, checkpointer = _build_thread_app()
+    source_thread_id = "source-thread"
+
+    human_1 = HumanMessage(id="human-1", content="First question")
+    ai_1 = AIMessage(id="ai-1", content="First answer")
+    human_2 = HumanMessage(id="human-2", content="Second question")
+    ai_2 = AIMessage(id="ai-2", content="Second answer")
+    human_3 = HumanMessage(id="human-3", content="Third question")
+    ai_3 = AIMessage(id="ai-3", content="Third answer")
+
+    async def _seed() -> None:
+        await _write_checkpoint(checkpointer, source_thread_id, "0001", [human_1, ai_1], step=1)
+        await _write_checkpoint(checkpointer, source_thread_id, "0002", [human_1, ai_1, human_2, ai_2], step=2)
+        await _write_checkpoint(checkpointer, source_thread_id, "0003", [human_1, ai_1, human_2, ai_2, human_3, ai_3], step=3)
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": source_thread_id, "metadata": {}, "assistant_id": "agent"})
+        assert created.status_code == 200, created.text
+        asyncio.run(
+            store.aput(
+                THREADS_NS,
+                source_thread_id,
+                {
+                    "thread_id": source_thread_id,
+                    "assistant_id": "agent",
+                    "user_id": None,
+                    "status": "idle",
+                    "created_at": "2026-07-05T00:00:00Z",
+                    "updated_at": "2026-07-05T00:00:00Z",
+                    "display_name": "Original chat",
+                    "metadata": {},
+                },
+            )
+        )
+
+        response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-2", "message_ids": ["ai-2"]},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        new_thread_id = body["thread_id"]
+        state_response = client.get(f"/api/threads/{new_thread_id}/state")
+        search_response = client.post("/api/threads/search", json={"limit": 10})
+
+    assert body["parent_thread_id"] == source_thread_id
+    assert body["parent_checkpoint_id"] == "0002"
+    assert body["branched_from_message_id"] == "ai-2"
+    assert body["workspace_clone_mode"] == "skipped_historical_turn"
+
+    assert state_response.status_code == 200, state_response.text
+    messages = state_response.json()["values"]["messages"]
+    assert [message["id"] for message in messages] == ["human-1", "ai-1", "human-2", "ai-2"]
+    assert "Third answer" not in [message.get("content") for message in messages]
+    assert search_response.status_code == 200, search_response.text
+    branch_entry = next(item for item in search_response.json() if item["thread_id"] == new_thread_id)
+    assert branch_entry["values"]["title"] == "Original chat"
+
+
+def test_branch_display_name_strips_legacy_branch_prefix_only_for_branch_sources() -> None:
+    assert threads._default_branch_display_name("Original chat") == "Original chat"
+    assert threads._default_branch_display_name("Branch: Original chat") == "Branch: Original chat"
+    assert threads._default_branch_display_name("Branch: Branch: Original chat", source_is_branch=True) == "Original chat"
+
+
+def test_branch_thread_rejects_sidecar_threads() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": "sidecar-thread", "metadata": {"deerflow_sidecar": True}},
+        )
+        assert created.status_code == 200, created.text
+
+        response = client.post(
+            "/api/threads/sidecar-thread/branches",
+            json={"message_id": "ai-1", "message_ids": ["ai-1"]},
+        )
+
+    assert response.status_code == 409
+    assert "main conversation" in response.json()["detail"]
+
+
+def test_branch_thread_rejects_non_assistant_targets() -> None:
+    app, _store, checkpointer = _build_thread_app()
+    source_thread_id = "source-human-target"
+    human = HumanMessage(id="human-1", content="Question")
+    ai = AIMessage(id="ai-1", content="Answer")
+
+    async def _seed() -> None:
+        await _write_checkpoint(checkpointer, source_thread_id, "0001", [human, ai], step=1)
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": source_thread_id, "metadata": {}})
+        assert created.status_code == 200, created.text
+
+        response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "human-1", "message_ids": ["human-1"]},
+        )
+
+    assert response.status_code == 409
+    assert "can no longer be branched" in response.json()["detail"]
+
+
+def test_branch_thread_best_effort_copies_current_workspace(tmp_path) -> None:
+    paths = Paths(tmp_path)
+    app, _store, checkpointer = _build_thread_app()
+    source_thread_id = "source-with-files"
+    user_id = "branch-user"
+
+    source_user_data = paths.sandbox_user_data_dir(source_thread_id, user_id=user_id)
+    source_outputs = paths.sandbox_outputs_dir(source_thread_id, user_id=user_id)
+    source_uploads = paths.sandbox_uploads_dir(source_thread_id, user_id=user_id)
+    source_outputs.mkdir(parents=True, exist_ok=True)
+    source_uploads.mkdir(parents=True, exist_ok=True)
+    (source_outputs / "result.txt").write_text("answer", encoding="utf-8")
+    (source_uploads / ".upload-stale.part").write_text("partial", encoding="utf-8")
+
+    human = HumanMessage(id="human-file", content="Make a file")
+    ai = AIMessage(id="ai-file", content="Done")
+
+    async def _seed() -> None:
+        await _write_checkpoint(checkpointer, source_thread_id, "0001", [human, ai], step=1)
+
+    asyncio.run(_seed())
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("app.gateway.routers.threads.get_effective_user_id", return_value=user_id),
+        TestClient(app) as client,
+    ):
+        created = client.post("/api/threads", json={"thread_id": source_thread_id, "metadata": {}})
+        assert created.status_code == 200, created.text
+
+        response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-file", "message_ids": ["ai-file"]},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["workspace_clone_mode"] == "current_thread_best_effort"
+
+    target_user_data = paths.sandbox_user_data_dir(body["thread_id"], user_id=user_id)
+    assert target_user_data.exists()
+    assert (target_user_data / "outputs" / "result.txt").read_text(encoding="utf-8") == "answer"
+    assert not (target_user_data / "uploads" / ".upload-stale.part").exists()
+    assert source_user_data.exists()
+
+
+def test_branch_thread_from_historical_turn_skips_workspace_clone(tmp_path) -> None:
+    """Branching from a non-latest turn must not clone the current workspace.
+
+    Workspace files are not checkpointed, so cloning them onto a branch rooted at
+    an older turn would leak files created after that turn (regression for the
+    historical-turn workspace-leak review on PR #3950).
+    """
+    paths = Paths(tmp_path)
+    app, _store, checkpointer = _build_thread_app()
+    source_thread_id = "source-historical"
+    user_id = "branch-user"
+
+    source_outputs = paths.sandbox_outputs_dir(source_thread_id, user_id=user_id)
+    source_outputs.mkdir(parents=True, exist_ok=True)
+    # ``future.txt`` only exists in the current (latest) workspace timeline.
+    (source_outputs / "future.txt").write_text("future", encoding="utf-8")
+
+    human_1 = HumanMessage(id="human-1", content="First question")
+    ai_1 = AIMessage(id="ai-1", content="First answer")
+    human_2 = HumanMessage(id="human-2", content="Second question")
+    ai_2 = AIMessage(id="ai-2", content="Second answer")
+
+    async def _seed() -> None:
+        await _write_checkpoint(checkpointer, source_thread_id, "0001", [human_1, ai_1], step=1)
+        await _write_checkpoint(checkpointer, source_thread_id, "0002", [human_1, ai_1, human_2, ai_2], step=2)
+
+    asyncio.run(_seed())
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("app.gateway.routers.threads.get_effective_user_id", return_value=user_id),
+        TestClient(app) as client,
+    ):
+        created = client.post("/api/threads", json={"thread_id": source_thread_id, "metadata": {}})
+        assert created.status_code == 200, created.text
+
+        response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-1", "message_ids": ["ai-1"]},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["parent_checkpoint_id"] == "0001"
+    assert body["workspace_clone_mode"] == "skipped_historical_turn"
+
+    target_user_data = paths.sandbox_user_data_dir(body["thread_id"], user_id=user_id)
+    assert not target_user_data.exists()
+
+
+def test_branch_thread_from_historical_turn_copies_checkpoint_files_only(tmp_path) -> None:
+    paths = Paths(tmp_path)
+    app, _store, checkpointer = _build_thread_app()
+    source_thread_id = "source-historical-artifacts"
+    user_id = "branch-user"
+
+    source_outputs = paths.sandbox_outputs_dir(source_thread_id, user_id=user_id)
+    source_uploads = paths.sandbox_uploads_dir(source_thread_id, user_id=user_id)
+    source_outputs.mkdir(parents=True, exist_ok=True)
+    source_uploads.mkdir(parents=True, exist_ok=True)
+    (source_outputs / "chart.png").write_bytes(b"checkpoint chart")
+    (source_outputs / "report.md").write_text("checkpoint report", encoding="utf-8")
+    (source_outputs / "overwritten.png").write_bytes(b"checkpoint version")
+    (source_uploads / "paper.pdf").write_bytes(b"checkpoint pdf")
+    (source_uploads / "paper.md").write_text("converted paper", encoding="utf-8")
+    (source_outputs / "future.txt").write_text("future", encoding="utf-8")
+
+    human_1 = HumanMessage(
+        id="human-1",
+        content="Analyze this paper",
+        additional_kwargs={"files": [{"filename": "paper.pdf", "size": 14}]},
+    )
+    ai_1 = AIMessage(id="ai-1", content="![Chart](/mnt/user-data/outputs/chart.png)")
+    human_2 = HumanMessage(id="human-2", content="Create another file")
+    ai_2 = AIMessage(id="ai-2", content="Done")
+
+    async def _seed() -> None:
+        await _write_checkpoint(
+            checkpointer,
+            source_thread_id,
+            "0001",
+            [human_1, ai_1],
+            step=1,
+            channel_values={
+                "artifacts": [
+                    "/mnt/user-data/outputs/chart.png",
+                    "/mnt/user-data/outputs/report.md",
+                    "/mnt/user-data/outputs/overwritten.png",
+                ]
+            },
+        )
+        await _write_checkpoint(
+            checkpointer,
+            source_thread_id,
+            "0002",
+            [human_1, ai_1, human_2, ai_2],
+            step=2,
+            channel_values={
+                "artifacts": [
+                    "/mnt/user-data/outputs/chart.png",
+                    "/mnt/user-data/outputs/report.md",
+                    "/mnt/user-data/outputs/future.txt",
+                ]
+            },
+        )
+
+    asyncio.run(_seed())
+    # The same virtual path was changed by a later turn. Its current bytes do
+    # not represent the target checkpoint and must not leak into the branch.
+    overwritten = source_outputs / "overwritten.png"
+    overwritten.write_bytes(b"future version")
+    future_mtime = time.time() + 60
+    os.utime(overwritten, (future_mtime, future_mtime))
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("app.gateway.routers.threads.get_effective_user_id", return_value=user_id),
+        TestClient(app) as client,
+    ):
+        created = client.post("/api/threads", json={"thread_id": source_thread_id, "metadata": {}})
+        assert created.status_code == 200, created.text
+
+        response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-1", "message_ids": ["ai-1"]},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["workspace_clone_mode"] == "checkpoint_files_best_effort"
+
+    target_user_data = paths.sandbox_user_data_dir(body["thread_id"], user_id=user_id)
+    assert (target_user_data / "outputs" / "chart.png").read_bytes() == b"checkpoint chart"
+    assert (target_user_data / "outputs" / "report.md").read_text(encoding="utf-8") == "checkpoint report"
+    assert (target_user_data / "uploads" / "paper.pdf").read_bytes() == b"checkpoint pdf"
+    assert (target_user_data / "uploads" / "paper.md").read_text(encoding="utf-8") == "converted paper"
+    assert not (target_user_data / "outputs" / "future.txt").exists()
+    assert not (target_user_data / "outputs" / "overwritten.png").exists()
+
+    threads._delete_thread_data(source_thread_id, paths=paths, user_id=user_id)
+    assert (target_user_data / "outputs" / "chart.png").read_bytes() == b"checkpoint chart"
+
+
+# ── Metadata filter validation at API boundary ────────────────────────────────
+
+
+def test_search_threads_rejects_invalid_key_at_api_boundary() -> None:
+    """Keys that don't match [A-Za-z0-9_-]+ are rejected by the Pydantic
+    validator on ThreadSearchRequest.metadata — 422 from both backends.
+    """
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/search", json={"metadata": {"bad;key": "x"}})
+
+    assert response.status_code == 422
+
+
+def test_search_threads_rejects_unsupported_value_type_at_api_boundary() -> None:
+    """Value types outside (None, bool, int, float, str) are rejected."""
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/search", json={"metadata": {"env": ["a", "b"]}})
+
+    assert response.status_code == 422
+
+
+def test_search_threads_returns_400_for_backend_invalid_metadata_filter() -> None:
+    """If the backend still raises InvalidMetadataFilterError (defense in
+    depth), the handler surfaces it as HTTP 400.
+    """
+    app, _store, _checkpointer = _build_thread_app()
+    thread_store = app.state.thread_store
+
+    async def _raise(**kwargs):
+        raise InvalidMetadataFilterError("rejected")
+
+    with TestClient(app) as client:
+        with patch.object(thread_store, "search", side_effect=_raise):
+            response = client.post("/api/threads/search", json={"metadata": {"valid_key": "x"}})
+
+    assert response.status_code == 400
+    assert "rejected" in response.json()["detail"]
+
+
+def test_search_threads_succeeds_with_valid_metadata() -> None:
+    """Sanity check: valid metadata passes through without error."""
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/search", json={"metadata": {"env": "prod"}})
+
+    assert response.status_code == 200
+
+
+# ── update_thread_state: each call inserts a new checkpoint (regression) ───────
+
+
+def test_update_thread_state_inserts_new_checkpoint_each_call() -> None:
+    """Each ``POST /state`` must INSERT a distinct, time-ordered checkpoint.
+
+    Regression for the in-place REPLACE bug: before the fix the new
+    checkpoint reused the previous checkpoint["id"], so InMemorySaver/SQLite
+    overwrote the existing row and history never grew. The fix assigns a
+    fresh uuid6 to checkpoint["id"] before aput.
+    """
+    app, _store, checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"metadata": {}})
+        assert created.status_code == 200, created.text
+        thread_id = created.json()["thread_id"]
+
+        r1 = client.post(f"/api/threads/{thread_id}/state", json={"values": {"title": "First"}})
+        assert r1.status_code == 200, r1.text
+        r2 = client.post(f"/api/threads/{thread_id}/state", json={"values": {"title": "Second"}})
+        assert r2.status_code == 200, r2.text
+
+    import asyncio
+
+    async def _collect():
+        return [cp async for cp in checkpointer.alist({"configurable": {"thread_id": thread_id}})]
+
+    history = asyncio.run(_collect())
+
+    # 1 empty checkpoint from create_thread + 1 per update call.
+    assert len(history) >= 3, f"expected >=3 checkpoints, got {len(history)}"
+
+    ids = [cp.config["configurable"]["checkpoint_id"] for cp in history]
+    assert len(ids) == len(set(ids)), f"duplicate checkpoint ids: {ids}"
+    # alist() returns newest-first; uuid6 is time-ordered so newest > oldest.
+    assert ids[0] > ids[-1], f"checkpoint ids not time-ordered (uuid4 instead of uuid6?): {ids}"
+
+    # aput must PRESERVE the endpoint-assigned checkpoint["id"], not mint its own
+    # and discard the payload's. If it generated a fresh id internally the fix
+    # would be a no-op (the bug would never have existed). Assert the id returned
+    # in each response round-tripped into the persisted history, and that the two
+    # update writes kept the endpoint's uuid6 time-ordering through aput.
+    resp_ids = [r1.json()["checkpoint_id"], r2.json()["checkpoint_id"]]
+    assert all(cid is not None for cid in resp_ids), f"response missing checkpoint_id: {resp_ids}"
+    assert set(resp_ids) <= set(ids), f"aput discarded endpoint-assigned id: returned {resp_ids}, stored {ids}"
+    assert resp_ids[1] > resp_ids[0], f"endpoint-assigned uuid6 not preserved/ordered through aput: {resp_ids}"

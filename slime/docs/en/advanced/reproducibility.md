@@ -1,0 +1,52 @@
+# Reproducibility
+
+Reproducibility is a bedrock of scientific progress. By combining [deterministic inference](https://lmsys.org/blog/2025-09-22-sglang-deterministic/) from SGLang with Megatron-LM deterministic mode, slime can provide bitwise experiment reproduction.
+
+To enable deterministic training, uninstall FlashAttention 3 with `pip uninstall flash_attn_3 -y`, then set:
+
+```bash
+  # sglang config
+  --sglang-enable-deterministic-inference
+  --sglang-attention-backend flashinfer
+
+  # megatron config
+  --deterministic-mode
+```
+
+Also set the following environment variables:
+
+```bash
+     "env_vars": {
+        ...,
+        "NCCL_ALGO": "Ring",
+        "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0",
+        "CUBLAS_WORKSPACE_CONFIG": ":4096:8"
+     }
+```
+
+We provide a fully deterministic GSM8K training script for Qwen2.5-0.5B.
+
+Use the following commands to initialize the training data and checkpoint:
+
+```bash
+# download
+hf download --repo-type dataset zhuzilin/gsm8k --local-dir /root/gsm8k
+hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir /root/Qwen2.5-0.5B-Instruct
+
+# convert ckpt
+cd slime/
+source scripts/models/qwen2.5-0.5B.sh
+PYTHONPATH=/root/Megatron-LM/ python \
+   tools/convert_hf_to_torch_dist.py \
+   ${MODEL_ARGS[@]} \
+   --hf-checkpoint /root/Qwen2.5-0.5B-Instruct \
+   --save /root/Qwen2.5-0.5B-Instruct_torch_dist/
+```
+
+Run training with:
+
+```bash
+bash script/run-qwen2.5-0.5B-reproducibility.sh
+```
+
+The wandb screenshots are recorded in [pull#370](https://github.com/THUDM/slime/pull/370).

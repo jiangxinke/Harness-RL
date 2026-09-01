@@ -1,0 +1,14 @@
+# Shared-package boundary between the embedded StackPlanner graph runtime and
+# SGLang.  These are direct, tested locks rather than a complete pip freeze;
+# native CUDA artifacts remain locked by slime/build_conda.sh.
+cuda-bindings==12.9.7
+cuda-python==12.9.7
+grpcio==1.83.0
+grpcio-health-checking==1.83.0
+grpcio-reflection==1.83.0
+numpy==1.26.4
+openai==2.54.0
+pillow==11.3.0
+protobuf==7.35.1
+setuptools==80.9.0
+tifffile==2025.5.10

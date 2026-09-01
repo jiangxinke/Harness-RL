@@ -1,0 +1,3 @@
+{"prompt": "Reply with exactly: stackplanner-smoke-ok", "label": "stackplanner-smoke-ok", "metadata": {"fixture": true, "episode_kind": "direct"}}
+{"prompt": "Delegate a calculation to the coder and report only the value of 19 * 23.", "label": "437", "metadata": {"fixture": true, "episode_kind": "single-delegate"}}
+{"prompt": "Ask the researcher for one fact and the coder to compute 31 * 17, then answer with only the product.", "label": "527", "metadata": {"fixture": true, "episode_kind": "two-role-delegate"}}

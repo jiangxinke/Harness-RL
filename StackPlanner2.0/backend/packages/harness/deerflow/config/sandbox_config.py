@@ -1,0 +1,106 @@
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class VolumeMountConfig(BaseModel):
+    """Configuration for a volume mount."""
+
+    host_path: str = Field(
+        ...,
+        description=(
+            "Source path for the mount. Resolution depends on the active provider: "
+            "``LocalSandboxProvider`` checks this path from the gateway process — in "
+            "``make dev`` that is the host machine, but in Docker deployments "
+            "(``make up`` / docker-compose) it is the path *inside* the "
+            "``deer-flow-gateway`` container, so the host directory must also be "
+            "bind-mounted into the gateway service for the mount to take effect. "
+            "``AioSandboxProvider`` (DooD) passes this value straight to ``docker -v`` "
+            "for the sandbox container, where it is resolved by the host Docker daemon "
+            "from the host machine's perspective."
+        ),
+    )
+    container_path: str = Field(..., description="Path inside the container")
+    read_only: bool = Field(default=False, description="Whether the mount is read-only")
+
+
+class SandboxConfig(BaseModel):
+    """Config section for a sandbox.
+
+    Common options:
+        use: Class path of the sandbox provider (required)
+        allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
+            Dangerous and intended only for fully trusted local workflows.
+
+    AioSandboxProvider and BoxliteProvider shared options:
+        image: Sandbox image to use (Docker/AIO image or BoxLite OCI image)
+        replicas: Maximum active + warm sandboxes/VMs per gateway process (default: 3). When the limit is reached, warm/least-recently-used sandboxes are evicted to make room; active sandboxes are not forcibly stopped.
+        idle_timeout: Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.
+        environment: Environment variables to inject into the sandbox (values starting with $ are resolved from host env)
+
+    AioSandboxProvider specific options:
+        port: Base port for sandbox containers (default: 8080)
+        container_prefix: Prefix for container names (default: deer-flow-sandbox)
+        mounts: List of volume mounts to share directories with the container
+    """
+
+    use: str = Field(
+        ...,
+        description="Class path of the sandbox provider (e.g. deerflow.sandbox.local:LocalSandboxProvider)",
+    )
+    allow_host_bash: bool = Field(
+        default=False,
+        description="Allow the bash tool to execute directly on the host when using LocalSandboxProvider. Dangerous; intended only for fully trusted local environments.",
+    )
+    image: str | None = Field(
+        default=None,
+        description="Sandbox image to use (Docker/AIO image or BoxLite OCI image)",
+    )
+    port: int | None = Field(
+        default=None,
+        description="Base port for sandbox containers",
+    )
+    replicas: int | None = Field(
+        default=None,
+        description="Maximum active + warm sandboxes/VMs per gateway process (default: 3). Warm/least-recently-used entries are evicted to make room; active sandboxes are not forcibly stopped.",
+    )
+    container_prefix: str | None = Field(
+        default=None,
+        description="Prefix for container names",
+    )
+    idle_timeout: int | None = Field(
+        default=None,
+        description="Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.",
+    )
+    mounts: list[VolumeMountConfig] = Field(
+        default_factory=list,
+        description="List of volume mounts to share directories between host and container",
+    )
+    environment: dict[str, str] = Field(
+        default_factory=dict,
+        description="Environment variables to inject into the sandbox container. Values starting with $ will be resolved from host environment variables.",
+    )
+
+    bash_output_max_chars: int = Field(
+        default=20000,
+        ge=0,
+        description="Maximum characters to keep from bash tool output. Output exceeding this limit is middle-truncated (head + tail), preserving the first and last half. Set to 0 to disable truncation.",
+    )
+    read_file_output_max_chars: int = Field(
+        default=50000,
+        ge=0,
+        description="Maximum characters to keep from read_file tool output. Output exceeding this limit is head-truncated. Set to 0 to disable truncation.",
+    )
+    ls_output_max_chars: int = Field(
+        default=20000,
+        ge=0,
+        description="Maximum characters to keep from ls tool output. Output exceeding this limit is head-truncated. Set to 0 to disable truncation.",
+    )
+    bash_command_timeout: int = Field(
+        default=120,
+        gt=0,
+        description=(
+            "Maximum wall-clock seconds a host bash command may run before it is terminated, process group and all (LocalSandboxProvider). "
+            "Keeps a blocking foreground command (e.g. an un-backgrounded server) from hanging the turn; background `&` processes return immediately."
+        ),
+    )
+
+    model_config = ConfigDict(extra="allow")

@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.deer-flow/
+
+# Generated datasets, checkpoints, reports, logs, and run artifacts.
+/data/
+/outputs/
+/artifacts/
+/checkpoints/
+/logs/
+/metrics/
+/results/
+/runs/
+/tensorboard/
+/wandb/
+*.log
+*.pid

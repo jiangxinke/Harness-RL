@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title description">
+  <title id="title">StackPlanner 2.0</title>
+  <desc id="description">Three connected task memory layers forming a forward planning path.</desc>
+  <path d="M28 25h68l12 12-12 12H28a8 8 0 0 1-8-8v-8a8 8 0 0 1 8-8Z" fill="#ff6b5e" stroke="#171717" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M32 53h68a8 8 0 0 1 8 8v8a8 8 0 0 1-8 8H32L20 65l12-12Z" fill="#22b8a7" stroke="#171717" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M28 81h68l12 12-12 12H28a8 8 0 0 1-8-8v-8a8 8 0 0 1 8-8Z" fill="#f5bd45" stroke="#171717" stroke-width="5" stroke-linejoin="round"/>
+  <circle cx="42" cy="37" r="5" fill="#171717"/>
+  <circle cx="86" cy="65" r="5" fill="#171717"/>
+  <circle cx="42" cy="93" r="5" fill="#171717"/>
+</svg>
