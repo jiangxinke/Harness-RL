@@ -77,6 +77,15 @@ Per-thread isolated execution with virtual path translation:
 - **File-write safety**: `str_replace` serializes read-modify-write per `(sandbox.id, path)` so isolated sandboxes keep concurrency even when virtual paths match
 - **Tools**: `bash`, `ls`, `read_file`, `write_file`, `str_replace` (`write_file` overwrites by default and exposes `append` for end-of-file writes; `bash` is disabled by default when using `LocalSandboxProvider`; use `AioSandboxProvider` for isolated shell access)
 
+### Search-R1 Retrieval
+
+The `community/search_r1` provider exposes a local Wikipedia retriever as
+`web_search`. Connection errors and invalid response payloads return retryable
+JSON errors. An optional episode-local failure context also reports these
+errors to the Harness-RL runner, so failures hidden inside specialist results
+cannot become policy training examples. Empty result sets remain ordinary
+search outcomes.
+
 ### Subagent System
 
 Async task delegation with concurrent execution:

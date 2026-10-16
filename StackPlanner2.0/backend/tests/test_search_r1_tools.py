@@ -1,5 +1,6 @@
 """Tests for the local Search-R1 retriever tool."""
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -101,3 +102,68 @@ async def test_web_search_rejects_malformed_retriever_payload() -> None:
     payload = json.loads(raw)
     assert payload["error"] == "WEB_SEARCH_INVALID_RESPONSE"
     assert payload["retryable"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["connection", "invalid_json", "invalid_shape", "invalid_root"])
+async def test_retryable_failures_are_recorded_in_episode_context(failure) -> None:
+    response = MagicMock()
+    if failure == "invalid_json":
+        response.json.side_effect = json.JSONDecodeError("invalid JSON", "oops", 0)
+    elif failure == "invalid_root":
+        response.json.return_value = []
+    else:
+        response.json.return_value = {"result": []}
+    failures = []
+    token = tools.SEARCH_R1_FAILURES.set(failures)
+    try:
+        with (
+            patch.object(tools, "_get_tool_config", return_value={}),
+            patch.object(tools.httpx, "AsyncClient") as client_cls,
+        ):
+            post = AsyncMock(return_value=response)
+            if failure == "connection":
+                post.side_effect = httpx.ConnectError("retriever offline")
+            client_cls.return_value.__aenter__.return_value.post = post
+            payload = json.loads(await tools.web_search_tool.ainvoke({"query": "test"}))
+        assert len(failures) == 1
+        assert failures[0]["kind"] == payload["error"]
+        assert failures[0]["detail"]
+    finally:
+        tools.SEARCH_R1_FAILURES.reset(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hits", [[], [{"title": "Ada", "text": "mathematician"}]])
+async def test_success_and_empty_results_do_not_mark_infrastructure_failure(hits) -> None:
+    response = MagicMock()
+    response.json.return_value = {"result": [hits]}
+    failures = []
+    token = tools.SEARCH_R1_FAILURES.set(failures)
+    try:
+        with (
+            patch.object(tools, "_get_tool_config", return_value={}),
+            patch.object(tools.httpx, "AsyncClient") as client_cls,
+        ):
+            client_cls.return_value.__aenter__.return_value.post = AsyncMock(return_value=response)
+            await tools.web_search_tool.ainvoke({"query": "test"})
+        assert failures == []
+    finally:
+        tools.SEARCH_R1_FAILURES.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_failure_context_is_bounded_and_propagates_to_specialist_thread() -> None:
+    failures = []
+    token = tools.SEARCH_R1_FAILURES.set(failures)
+    try:
+
+        def specialist():
+            for _ in range(20):
+                tools._record_infrastructure_failure("WEB_SEARCH_UNAVAILABLE", RuntimeError("x" * 1000))
+
+        await asyncio.to_thread(specialist)
+        assert len(failures) == 16
+        assert all(len(failure["detail"]) <= 300 for failure in failures)
+    finally:
+        tools.SEARCH_R1_FAILURES.reset(token)

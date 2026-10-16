@@ -190,10 +190,10 @@ def _reward_result(
     return result
 
 
-def _model_kwargs(config: TrainingConfig) -> dict[str, Any]:
+def _model_kwargs(config: TrainingConfig, *, evaluation: bool = False) -> dict[str, Any]:
     return {
-        "temperature": config.temperature,
-        "top_p": config.top_p,
+        "temperature": 0.0 if evaluation else config.temperature,
+        "top_p": 1.0 if evaluation else config.top_p,
         "max_tokens": config.max_response_tokens,
         "timeout": float(config.episode_timeout_seconds),
         "max_retries": 0,
@@ -262,6 +262,17 @@ def _adapter_service(args: Any, config: TrainingConfig) -> _WorkerAdapterService
         return service
 
 
+async def _abort_factory(factory: EpisodeModelFactory | None, *, episode_id: str) -> None:
+    if factory is None:
+        return
+    try:
+        await factory.abort(wait_timeout=30)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("StackPlanner episode %s could not abort its actor trajectories", episode_id)
+
+
 def _aborted_sample(sample: Any, *, episode_id: str, reason: str) -> list[Any]:
     from slime.utils.types import Sample
 
@@ -272,10 +283,12 @@ def _aborted_sample(sample: Any, *, episode_id: str, reason: str) -> list[Any]:
     sample.rollout_log_probs = [0.0]
     sample.reward = 0.0
     sample.remove_sample = True
+    sample.rollout_id = _rollout_id(sample, episode_id)
     sample.status = Sample.Status.ABORTED
     sample.metadata = {
         **(getattr(sample, "metadata", None) or {}),
         "episode_id": episode_id,
+        "rollout_id": sample.rollout_id,
         "infrastructure_failure": {
             "kind": reason,
             "retryable": True,
@@ -292,7 +305,7 @@ async def generate(
 ) -> list[Any]:
     """Run one token-correct production StackPlanner episode for slime."""
 
-    del sampling_params, evaluation
+    del sampling_params
     config = _load_training_config()
     prompt_text = _prompt_text(
         base_sample,
@@ -305,7 +318,12 @@ async def generate(
     thread_id = _runtime_id("thread", episode_id)
     run_id = _runtime_id("run", episode_id)
     factory: EpisodeModelFactory | None = None
+    search_failures: list[dict[str, str]] = []
+    search_failure_token = None
     try:
+        from deerflow.community.search_r1.tools import SEARCH_R1_FAILURES
+
+        search_failure_token = SEARCH_R1_FAILURES.set(search_failures)
         service = _adapter_service(args, config)
         app_config = _app_config(config)
         from deerflow.sp.runtime import SP_SUBAGENT_REGISTRY_NAMES, make_sp_agent
@@ -315,13 +333,13 @@ async def generate(
         actor_builder = make_openai_model_builder(
             base_url=actor_endpoint,
             model=config.actor_model_name,
-            model_kwargs=_model_kwargs(config),
+            model_kwargs=_model_kwargs(config, evaluation=evaluation),
         )
         frozen_builder = make_openai_model_builder(
             base_url=config.frozen_base_url,
             model=config.frozen_model,
             api_key_env=config.frozen_api_key_env or None,
-            model_kwargs=_model_kwargs(config),
+            model_kwargs=_model_kwargs(config, evaluation=evaluation),
             recover_qwen_tool_calls=True,
         )
         factory = EpisodeModelFactory(
@@ -378,6 +396,8 @@ async def generate(
             ),
             timeout=config.episode_timeout_seconds,
         )
+        if search_failures:
+            raise RuntimeError(f"search infrastructure failure: {search_failures[:3]}")
         policy_termination = _policy_termination(state)
         if policy_termination is not None:
             return await _finish_policy_failure(
@@ -394,7 +414,7 @@ async def generate(
             sample=base_sample,
         )
         if reward.infrastructure_failure:
-            await factory.abort(wait_timeout=30)
+            await _abort_factory(factory, episode_id=episode_id)
             return _aborted_sample(
                 base_sample,
                 episode_id=episode_id,
@@ -412,12 +432,11 @@ async def generate(
             raise RuntimeError("StackPlanner episode produced no actor trajectory")
         return samples
     except asyncio.CancelledError:
-        if factory is not None:
-            await factory.abort(wait_timeout=30)
+        await _abort_factory(factory, episode_id=episode_id)
         raise
-    except BaseException as exc:
+    except Exception as exc:
         policy_termination = _exception_policy_termination(exc)
-        if factory is not None and policy_termination is not None:
+        if factory is not None and policy_termination is not None and not search_failures:
             try:
                 return await _finish_policy_failure(
                     factory,
@@ -425,17 +444,25 @@ async def generate(
                     episode_id=episode_id,
                     termination=policy_termination,
                 )
-            except BaseException:
+            except asyncio.CancelledError:
+                await _abort_factory(factory, episode_id=episode_id)
+                raise
+            except Exception:
                 logger.exception(
                     "StackPlanner episode %s could not drain a %s trajectory",
                     episode_id,
                     policy_termination,
                 )
-        if factory is not None:
-            await factory.abort(wait_timeout=30)
+        await _abort_factory(factory, episode_id=episode_id)
         logger.exception("StackPlanner episode %s failed", episode_id)
         return _aborted_sample(
             base_sample,
             episode_id=episode_id,
-            reason=f"{type(exc).__name__}:{str(exc)[:160]}",
+            reason=f"search-infrastructure:{search_failures[:3]}" if search_failures else f"{type(exc).__name__}:{str(exc)[:160]}",
         )
+    except BaseException:
+        await _abort_factory(factory, episode_id=episode_id)
+        raise
+    finally:
+        if search_failure_token is not None:
+            SEARCH_R1_FAILURES.reset(search_failure_token)

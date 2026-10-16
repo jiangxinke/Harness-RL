@@ -2,6 +2,7 @@
 
 import json
 import logging
+from contextvars import ContextVar
 from typing import Any
 from urllib.parse import quote
 
@@ -15,6 +16,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_MAX_RESULTS = 5
 DEFAULT_TIMEOUT = 30.0
+
+# The episode runner binds a fresh list. Context propagation also reaches
+# delegated specialists whose tool messages never enter Central's state.
+SEARCH_R1_FAILURES: ContextVar[list[dict[str, str]] | None] = ContextVar("search_r1_episode_failures", default=None)
+
+
+def _record_infrastructure_failure(kind: str, exc: BaseException) -> None:
+    failures = SEARCH_R1_FAILURES.get()
+    if failures is not None and len(failures) < 16:
+        failures.append({"kind": kind, "detail": repr(exc)[:300]})
 
 
 def _get_tool_config(tool_name: str = "web_search") -> dict[str, Any]:
@@ -86,6 +97,8 @@ async def web_search_tool(query: str, max_results: int = DEFAULT_MAX_RESULTS) ->
             response.raise_for_status()
             payload = response.json()
 
+        if not isinstance(payload, dict):
+            raise ValueError("retriever response must be an object")
         result_batches = payload.get("result")
         if not isinstance(result_batches, list) or len(result_batches) != 1:
             raise ValueError("retriever response must contain exactly one result batch")
@@ -94,12 +107,14 @@ async def web_search_tool(query: str, max_results: int = DEFAULT_MAX_RESULTS) ->
             raise ValueError("retriever result batch must be a list")
         results = [_normalize_hit(hit) for hit in hits[:max_results]]
     except (httpx.HTTPError, TimeoutError) as exc:
+        _record_infrastructure_failure("WEB_SEARCH_UNAVAILABLE", exc)
         logger.error("Search-R1 request failed: %s", exc)
         return json.dumps(
             {"error": "WEB_SEARCH_UNAVAILABLE", "message": str(exc), "query": query, "retryable": True},
             ensure_ascii=False,
         )
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        _record_infrastructure_failure("WEB_SEARCH_INVALID_RESPONSE", exc)
         logger.error("Search-R1 returned an invalid response: %s", exc)
         return json.dumps(
             {"error": "WEB_SEARCH_INVALID_RESPONSE", "message": str(exc), "query": query, "retryable": True},

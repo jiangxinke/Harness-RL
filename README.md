@@ -88,6 +88,11 @@ topology, and the model architecture arguments in the selected file under
 Harness-RL uses the Search-R1 retriever through the standard StackPlanner
 `web_search` interface.
 
+Connection failures and malformed retriever responses invalidate the whole
+training episode, including errors handled inside frozen specialists. Such
+episodes receive zero loss masks and retryable infrastructure metadata;
+ordinary empty search results remain valid tool outcomes.
+
 ```bash
 make search-setup
 python scripts/prepare_search_r1_assets.py \
@@ -194,6 +199,11 @@ point the capability fields in the corresponding configuration to the generated
 directory.
 
 ## Evaluate
+
+slime's in-training evaluation uses greedy sampling (`temperature=0`,
+`top_p=1`) for both actor and frozen roles. Training keeps the configured
+sampling parameters. The upstream branch review and regression commands are
+recorded in [the bug-fix review](docs/upstream-bugfix-review.md).
 
 Generate predictions with the production StackPlanner graph:
 

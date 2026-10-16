@@ -444,6 +444,14 @@ Scheduled-task runtime note:
 - `image_search/` - Image search via DuckDuckGo
 - `search_r1/` - Adapts a separately hosted Search-R1 Wikipedia dense
   retriever's `POST /retrieve` endpoint to the standard `web_search` contract
+  and records retryable failures in the optional `SEARCH_R1_FAILURES`
+  ContextVar. The Harness-RL episode runner binds a fresh bounded list and
+  resets its token in `finally`; preserve context propagation through
+  delegated specialist execution. Backend outages and malformed JSON/object
+  shapes invalidate an episode before reward or policy-failure draining.
+  Empty results do not invalidate an episode. Coverage lives in
+  `tests/test_search_r1_tools.py` and the repository-root
+  `tests/test_sp_training_generate_lifecycle.py`.
 - `aio_sandbox/` - Docker-based isolation (`AioSandboxProvider`)
 
 Additional providers also live here (`boxlite`, `brave`, `browserless`, `crawl4ai`, `ddg_search`, `e2b_sandbox`, `exa`, `fastcrw`, `groundroute`, `infoquest`, `searxng`, `serper`); see each subpackage for specifics.
