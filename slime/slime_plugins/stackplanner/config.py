@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,11 @@ class TrainingConfig:
     optimizer: str = "adam"
     save_interval: int = 20
     eval_interval: int = 0
+    # Optional OLE prompt-group selection; defaults match ../OLE.
+    ole_enabled: bool = False
+    ole_threshold_percent: float = 0.4
+    ole_k: float = 1.0
+    ole_init_threshold: float = 0.0
     samples_per_prompt: int = 4
     rollout_batch_size: int = 4
     temperature: float = 0.8
@@ -173,6 +179,20 @@ class TrainingConfig:
             raise ValueError("run_id must not be empty")
         if self.train_steps < 1:
             raise ValueError("train_steps must be positive")
+        if not isinstance(self.ole_enabled, bool):
+            raise ValueError("ole_enabled must be a boolean")
+        for name in ("ole_threshold_percent", "ole_k", "ole_init_threshold"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number")
+        if not 0 < self.ole_threshold_percent <= 1:
+            raise ValueError("ole_threshold_percent must be in (0, 1]")
+        if self.ole_k < 0:
+            raise ValueError("ole_k must not be negative")
+        if self.ole_enabled:
+            reserved = {"--rollout-function-path", "--rollout-data-postprocess-path", "--data-source-path", "--disable-rollout-global-dataset"}
+            if any(arg.split("=", 1)[0] in reserved for arg in self.extra_slime_args):
+                raise ValueError("OLE owns the rollout and postprocess hooks and requires the checkpointed global data source")
         if self.base_checkpoint_sha256 and not re.fullmatch(r"[0-9a-f]{64}", self.base_checkpoint_sha256):
             raise ValueError("base_checkpoint_sha256 must be a lowercase SHA-256 digest")
         if self.num_nodes < 1 or self.gpus_per_node < 1:

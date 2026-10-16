@@ -154,6 +154,10 @@ def build_parser() -> argparse.ArgumentParser:
     add("train", "--optimizer")
     add("train", "--save-interval", type=int)
     add("train", "--eval-interval", type=int)
+    add("train", "--ole-enabled", action=argparse.BooleanOptionalAction)
+    add("train", "--ole-threshold-percent", type=float)
+    add("train", "--ole-k", type=float)
+    add("train", "--ole-init-threshold", type=float)
     add("rollout", "--samples-per-prompt", type=int)
     add("rollout", "--rollout-batch-size", type=int)
     add("rollout", "--temperature", type=float)
@@ -335,9 +339,7 @@ def _search_r1_config_check(config: TrainingConfig) -> CheckResult:
     return CheckResult(
         "Search-R1 configuration",
         True,
-        f"provider={identity['provider']}; endpoint={identity['endpoint']}; "
-        f"index_sha256={identity['index_sha256'] or 'not pinned'}; "
-        f"corpus_sha256={identity['corpus_sha256'] or 'not pinned'}",
+        f"provider={identity['provider']}; endpoint={identity['endpoint']}; index_sha256={identity['index_sha256'] or 'not pinned'}; corpus_sha256={identity['corpus_sha256'] or 'not pinned'}",
     )
 
 
@@ -590,6 +592,15 @@ def build_slime_command(config: TrainingConfig) -> tuple[str, ...]:
     ]
     if config.eval_interval > 0:
         args.extend(("--eval-interval", str(config.eval_interval)))
+    if config.ole_enabled:
+        args.extend(
+            (
+                "--rollout-function-path",
+                "slime_plugins.stackplanner.ole.generate_rollout",
+                "--rollout-data-postprocess-path",
+                "slime_plugins.stackplanner.ole.apply_selection_to_advantages",
+            )
+        )
     if config.capability_decoupling and not config.capability_probe_bootstrap:
         args.extend(
             (
@@ -646,6 +657,9 @@ def build_plan(config: TrainingConfig) -> LaunchPlan:
         _topology_check(config),
         _output_check(config),
     ]
+    if config.ole_enabled:
+        for name in ("generate_rollout", "apply_selection_to_advantages"):
+            checks.append(_function_check(f"OLE {name} hook", f"slime_plugins.stackplanner.ole.{name}", slime))
     try:
         roles = _discover_policy_roles(stackplanner)
         role_check = CheckResult("runtime policy registry", True, ", ".join(roles))

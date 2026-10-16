@@ -137,6 +137,44 @@ python train_stackplanner.py \
   --resume-from /path/to/torch-dist-checkpoint
 ```
 
+## Optional OLE sample selection
+
+OLE is disabled by default in all three templates. Enable it for A, B, or C
+with `ole_enabled: true` in the configuration or the CLI switch:
+
+```bash
+python train_stackplanner.py \
+  --config configs/experiment_a_central.yaml \
+  --ole-enabled --ole-threshold-percent 0.4 --ole-k 1.0 \
+  --ole-init-threshold 0.0
+```
+
+Use `--no-ole-enabled` to override an enabled configuration. The existing
+`dry_run` setting still applies. OLE adds two slime plugin hooks only when
+enabled; the disabled launch command and training behavior are unchanged.
+
+Following the reference implementation in `../OLE`, each prompt group is
+scored as `mean(episode_reward) + ole_k * std(episode_reward)` using the
+population standard deviation. Scores strictly below the **previous rollout
+batch's threshold** have their policy advantages set to zero after advantage
+computation and whitening. The current batch sets the next threshold to the
+`1 - ole_threshold_percent` quantile (0.4 targets the upper 40%; ties and
+batch-to-batch changes can change the actual retained fraction).
+
+Each episode counts once even when it produces many agent/session segments
+or CAPO children. Infrastructure failures and episodes without actor tokens
+are excluded from scoring. Rewards, critic returns, entropy/KL terms, loss
+masks, CAPO routes, and batch scheduling retain their existing behavior.
+Scores use the original episode rewards before GRPO normalization.
+
+Thresholds and discard counts are stored in the standard rollout data-source
+checkpoint under `checkpoints/rollout/`, and `--resume-from` restores them.
+Keep these files together with the model checkpoint. Evaluation bypasses OLE.
+Training-only replay with OLE requires rollout dumps collected with OLE enabled;
+it reuses their recorded selection decisions. The rollout log includes
+`ole/threshold`, `ole/next_threshold`, `ole/discarded_groups`,
+`ole/discarded_episodes`, and cumulative `ole/discarded_total`.
+
 ## Build CAPO routing artifacts
 
 Experiments B and C require routing metadata generated from successful rollout
