@@ -64,6 +64,12 @@ resources and engine/worker subprocesses. It is idempotent. Run each development
 comparison in a dedicated process and verify exit before reassigning its GPUs.
 Allow the run owner to schedule GPU memory and concurrency.
 
+The evaluation CLI also closes the policy after setup or episode failures. It
+cancels and awaits unfinished episodes before draining the policy and closing
+the prediction stream. The original failure propagates; cleanup failures are
+attached as exception notes, and a failed run does not write its rank completion
+marker. Persisted predictions remain available for a matching resumed run.
+
 Prompt tokenization and truncation call the same `encode_messages` helper as
 HFPolicy, with thinking disabled. The engine receives those exact token IDs.
 Prompt plus requested completion must fit `max_model_len`; an insufficient

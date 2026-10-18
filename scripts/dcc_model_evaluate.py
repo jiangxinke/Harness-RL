@@ -28,6 +28,36 @@ from slime_plugins.dcc.tools import WebTools
 from slime_plugins.dcc.retrieval import load_retrieval_profile
 
 
+async def _finish_evaluation(policy, stream, workers, failure):
+    # Stop episodes before draining the policy or closing their output stream.
+    # Some episodes may finish cancellation handlers and persist a result.
+    for worker in workers:
+        if not worker.done():
+            worker.cancel()
+    cleanup_errors = []
+    if workers:
+        try:
+            await asyncio.gather(*workers, return_exceptions=True)
+        except BaseException as error:
+            cleanup_errors.append(error)
+    if policy is not None:
+        try:
+            await policy.close()
+        except BaseException as error:
+            cleanup_errors.append(error)
+    if stream is not None:
+        try:
+            stream.close()
+        except BaseException as error:
+            cleanup_errors.append(error)
+    if cleanup_errors:
+        primary = failure if failure is not None else cleanup_errors.pop(0)
+        for error in cleanup_errors:
+            primary.add_note(f"Evaluation cleanup also failed: {type(error).__name__}: {error}")
+        if failure is None:
+            raise primary
+
+
 async def evaluate(args):
     import torch
 
@@ -113,70 +143,76 @@ async def evaluate(args):
         )
     ]
     if todo:
-        if backend == "vllm":
-            from slime_plugins.dcc.vllm_policy import load_vllm_policy
+        policy, stream, workers, failure = None, None, [], None
+        try:
+            if backend == "vllm":
+                from slime_plugins.dcc.vllm_policy import load_vllm_policy
 
-            policy = load_vllm_policy(
-                args.model, adapter=args.adapter, batch_size=args.batch_size,
-                max_prompt_tokens=args.max_prompt_tokens,
-                max_model_len=args.max_prompt_tokens + args.max_new_tokens,
-                tensor_parallel_size=args.vllm_tensor_parallel_size,
-                gpu_memory_utilization=args.vllm_memory_utilization,
-                max_num_batched_tokens=args.vllm_batched_tokens,
-                enforce_eager=args.vllm_enforce_eager, seed=args.seed,
-            )
-            (output / "inference_runtime.json").write_text(json.dumps(policy.provenance, indent=2) + "\n")
-        else:
-            model, tokenizer = load_policy_model(
-                args.model, adapter=args.adapter, rank=local, quantization=quantization
-            )
-            if hasattr(model, "dcc_quantization_report"):
-                (output / f"quantization_rank{rank}.json").write_text(
-                    json.dumps(model.dcc_quantization_report, indent=2) + "\n"
+                policy = load_vllm_policy(
+                    args.model, adapter=args.adapter, batch_size=args.batch_size,
+                    max_prompt_tokens=args.max_prompt_tokens,
+                    max_model_len=args.max_prompt_tokens + args.max_new_tokens,
+                    tensor_parallel_size=args.vllm_tensor_parallel_size,
+                    gpu_memory_utilization=args.vllm_memory_utilization,
+                    max_num_batched_tokens=args.vllm_batched_tokens,
+                    enforce_eager=args.vllm_enforce_eager, seed=args.seed,
                 )
-            policy = HFPolicy(
-                model, tokenizer, batch_size=args.batch_size,
-                max_prompt_tokens=args.max_prompt_tokens,
-            )
-        runner = EpisodeRunner(
-            max_steps=args.max_steps,
-            max_new_tokens=args.max_new_tokens,
-            initial_chunks=args.initial_chunks,
-            timeout_seconds=args.timeout,
-            retrieval_profile=retrieval_profile,
-            auto_read_sources=getattr(args, "auto_read_sources", 0),
-        )
-        semaphore = asyncio.Semaphore(args.batch_size * 2)
-        stream = file.open("a", buffering=1)
-        start = time.monotonic()
-
-        async def one(task):
-            async with semaphore:
-                result = await runner.run(task, policy, evaluation=True)
-                value = result.to_dict(include_tokens=args.save_tokens)
-                token_usage = {
-                    "prompt": sum(len(step.prompt_ids) for step in result.steps),
-                    "completion": sum(len(step.completion_ids) for step in result.steps),
-                }
-                value["token_usage"] = token_usage
-                stream.write(json.dumps(value, ensure_ascii=False) + "\n")
-                print(
-                    json.dumps(
-                        {
-                            "rank": rank,
-                            "task": task.id,
-                            "status": result.status,
-                            "turns": len(result.steps),
-                            "token_usage": token_usage,
-                            "elapsed": time.monotonic() - start,
-                        }
-                    ),
-                    flush=True,
+                (output / "inference_runtime.json").write_text(json.dumps(policy.provenance, indent=2) + "\n")
+            else:
+                model, tokenizer = load_policy_model(
+                    args.model, adapter=args.adapter, rank=local, quantization=quantization
                 )
+                policy = HFPolicy(
+                    model, tokenizer, batch_size=args.batch_size,
+                    max_prompt_tokens=args.max_prompt_tokens,
+                )
+                if hasattr(model, "dcc_quantization_report"):
+                    (output / f"quantization_rank{rank}.json").write_text(
+                        json.dumps(model.dcc_quantization_report, indent=2) + "\n"
+                    )
+            runner = EpisodeRunner(
+                max_steps=args.max_steps,
+                max_new_tokens=args.max_new_tokens,
+                initial_chunks=args.initial_chunks,
+                timeout_seconds=args.timeout,
+                retrieval_profile=retrieval_profile,
+                auto_read_sources=getattr(args, "auto_read_sources", 0),
+            )
+            semaphore = asyncio.Semaphore(args.batch_size * 2)
+            stream = file.open("a", buffering=1)
+            start = time.monotonic()
 
-        await asyncio.gather(*(one(task) for task in todo))
-        await policy.close()
-        stream.close()
+            async def one(task):
+                async with semaphore:
+                    result = await runner.run(task, policy, evaluation=True)
+                    value = result.to_dict(include_tokens=args.save_tokens)
+                    token_usage = {
+                        "prompt": sum(len(step.prompt_ids) for step in result.steps),
+                        "completion": sum(len(step.completion_ids) for step in result.steps),
+                    }
+                    value["token_usage"] = token_usage
+                    stream.write(json.dumps(value, ensure_ascii=False) + "\n")
+                    print(
+                        json.dumps(
+                            {
+                                "rank": rank,
+                                "task": task.id,
+                                "status": result.status,
+                                "turns": len(result.steps),
+                                "token_usage": token_usage,
+                                "elapsed": time.monotonic() - start,
+                            }
+                        ),
+                        flush=True,
+                    )
+
+            workers = [asyncio.create_task(one(task)) for task in todo]
+            await asyncio.gather(*workers)
+        except BaseException as error:
+            failure = error
+            raise
+        finally:
+            await _finish_evaluation(policy, stream, workers, failure)
     (output / f"rank{rank}.done").write_text(
         json.dumps({"tasks": len(assigned), "world_size": world})
     )
