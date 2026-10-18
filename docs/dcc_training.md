@@ -14,7 +14,7 @@ on each device; this is data parallel adapter training, not tensor parallelism.
 Choose the number of workers for the hardware available to you.
 
 ```bash
-torchrun --standalone --nproc-per-node="$WORKERS" scripts/dcc_train.py \
+python -m torch.distributed.run --standalone --nproc-per-node="$WORKERS" scripts/dcc_train.py \
   --model "$MODEL_CACHE" --train-data "$DATA_ROOT/cuad/train.jsonl" \
   --output-dir "$RUN_ROOT/training" \
   --sft-steps 32 --rl-steps 24 --group-size 2
@@ -56,16 +56,63 @@ momentum can still move parameters. Inspect reward variance and gradient norms
 before describing such a run as successful RL learning. Keep runtime paths and
 credentials outside the repository.
 
+The optional mixed SFT continuation trains direct grounded CUAD answers and
+actual search/read/final teacher segments together. Prepare its retrieval
+profile and teachers using training data only:
+
+```bash
+python scripts/dcc_fit_retrieval.py \
+  --data "$DATA_ROOT/cuad/train.jsonl" \
+  --output "$RUN_ROOT/cuad-retrieval-profile.json"
+python scripts/dcc_prepare_web_curriculum.py \
+  --output-dir "$RUN_ROOT/web-curriculum" --teachers
+python scripts/dcc_prepare_cuad_tools.py \
+  --data "$DATA_ROOT/cuad/train.jsonl" \
+  --retrieval-profile "$RUN_ROOT/cuad-retrieval-profile.json" \
+  --tokenizer "$MODEL_CACHE" --episodes 128 --negative-episodes 48 \
+  --output "$RUN_ROOT/cuad-tool-teachers.jsonl"
+```
+
+The following reproduces the second mixed phase's configuration. Set
+`WARMSTART_ADAPTER` to the first mixed phase's saved adapter, whose actual
+lineage and validation results are recorded in [dcc_experiment.md](dcc_experiment.md).
+This creates a fresh optimizer; it does not restore optimizer state.
+
+```bash
+python -m torch.distributed.run --standalone --nproc-per-node="$WORKERS" \
+  scripts/dcc_tool_sft.py \
+  --model "$MODEL_CACHE" --adapter "$WARMSTART_ADAPTER" \
+  --records "$RUN_ROOT/web-curriculum/teacher_train.jsonl" \
+  --cuad-train-data "$DATA_ROOT/cuad/train.jsonl" \
+  --cuad-tool-records "$RUN_ROOT/cuad-tool-teachers.jsonl" \
+  --retrieval-profile "$RUN_ROOT/cuad-retrieval-profile.json" \
+  --output-dir "$RUN_ROOT/tool-sft-round2" \
+  --steps 64 --save-every 16 --learning-rate 5e-6 \
+  --web-fraction .25 --cuad-tool-fraction .3 --negative-fraction .25 \
+  --max-prompt-tokens 8192 --max-new-tokens 2048 \
+  --batch-tokens 32768 --samples-per-step 4 --initial-chunks 4 --seed 45
+```
+
+The measured run used eight workers. Each worker accumulates gradients over
+individual examples; `--batch-tokens` is a sampling budget, not a padded
+forward batch allocation. Averaging weights each actual example equally across
+workers, including steps where workers sample unequal counts. Dynamic direct
+CUAD examples are skipped when gold text is not visible in the encoded prompt
+or the target exceeds its budget. Inspect the saved sampled IDs, stages and
+skip counts rather than assuming every eligible teacher segment was used.
+The held-out WideSearch tasks and either benchmark's official test labels must
+not enter teacher construction, retrieval-profile fitting or checkpoint selection.
+
 Evaluate each benchmark in a separate directory, with a budget appropriate to
 its answer size. For example:
 
 ```bash
-torchrun --standalone --nproc-per-node="$WORKERS" scripts/dcc_model_evaluate.py \
+python -m torch.distributed.run --standalone --nproc-per-node="$WORKERS" scripts/dcc_model_evaluate.py \
   --model "$MODEL_CACHE" --adapter "$RUN_ROOT/training/final" \
   --data "$DATA_ROOT/cuad/test.jsonl" --output-dir "$RUN_ROOT/cuad" \
   --max-steps 3 --max-new-tokens 1024 --max-prompt-tokens 8192 --batch-size 8
 
-torchrun --standalone --nproc-per-node="$WORKERS" scripts/dcc_model_evaluate.py \
+python -m torch.distributed.run --standalone --nproc-per-node="$WORKERS" scripts/dcc_model_evaluate.py \
   --model "$MODEL_CACHE" --adapter "$RUN_ROOT/training/final" \
   --data "$DATA_ROOT/widesearch/test.jsonl" --output-dir "$RUN_ROOT/widesearch" \
   --max-steps 12 --max-new-tokens 8192 --max-prompt-tokens 16384 --batch-size 1

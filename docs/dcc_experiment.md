@@ -210,11 +210,17 @@ and 0.267751, with precision 0.531915 and recall 0.416667. All 82 episodes
 completed without infrastructure failures. The next training phase therefore
 warm-starts step 24 with a fresh optimizer. Its configured mixture uses 25%
 web examples, 30% CUAD tool examples within the CUAD portion, and a 25%
-negative-answer target within CUAD. It schedules 64 optimizer steps with eight
-workers, up to four examples per worker, a 32,768-token per-step sampling
-budget, learning rate 0.000005 and checkpoints every 16 steps. These are
-configured targets; actual sampled counts and training results remain to be
-verified.
+negative-answer target within CUAD. It completed 64 optimizer steps with eight
+workers, four examples per worker, a 32,768-token per-step sampling budget,
+learning rate 0.000005 and checkpoints every 16 steps. Its 2,048 actual examples
+cover 1,305 distinct task IDs: 885 direct CUAD positives, 484 direct negatives,
+502 web segments (167 search, 168 fetch, 167 final), and 177 CUAD tool segments
+(58 search, 59 read, 60 final). Dynamic CUAD preparation skipped 486 candidates
+that failed grounding or response-length checks. All 512 per-worker step
+records have finite loss and nonzero finite gradient norms; workers agree on
+the synchronized norms. All 288 adapter tensors changed from the warm start
+and remain finite in each saved checkpoint. Training logs record 748.88 seconds;
+checkpoint selection is still in progress on validation data only.
 
 The next teacher set adds 48 training-only negative search/read/final episodes
 from 40 categories. Merging the original 128 positive episodes gives 176
@@ -259,8 +265,10 @@ full WideSearch outputs will be in `dcc-run/widesearch-final`.
 
 The `45a0857f` checkpoint passed 494 CPU regression checks with two optional
 checks skipped: the default CPU environment lacks bitsandbytes, and the
-optional external SP tokenizer fixture was not configured. The separate NF4
-runtime has its own real quantization checks. BF16 and NF4 dependency/tool
-preflights both passed. This includes real tiny-Qwen3MoE generation/log-probability
-parity checks and retained Harness-RL/OLE tests. Later changes receive targeted
-checks recorded alongside their implementation.
+optional external SP tokenizer fixture was not configured. Those missing checks
+were subsequently run separately: three NF4 checks and one real-Qwen tokenizer
+check passed. Independent vLLM logical sharding at `6db35768` passed 60 targeted
+CPU checks. BF16 and NF4 dependency/tool preflights both passed. This includes
+real tiny-Qwen3MoE generation/log-probability parity checks and retained
+Harness-RL/OLE tests. Later changes receive targeted checks recorded alongside
+their implementation.
