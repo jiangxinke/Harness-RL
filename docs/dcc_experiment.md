@@ -174,6 +174,10 @@ the first eight round-3 steps, or 256 global examples. The 1,024-example round-3
 diagnostic describes the complete candidate-training run. Step 24's stronger
 web score does not relax the predeclared CUAD floor. Step 8 has the highest
 AUPR among eligible candidates and is used unchanged for both final benchmarks.
+The selected weight lineage is initial adapter → corrected RL continuation →
+round-1 final → round-2 step 32 → round-3 step 8. Later candidate steps are not
+part of these weights; totals for entire training runs must not be interpreted
+as the number of updates inherited by the selected adapter.
 
 ## Harness and test protocol
 
@@ -238,7 +242,23 @@ WideSearch will report a strict proxy and the official metric pipeline with a
 **custom frozen base-Qwen judge**, not the published GPT-4.1 leaderboard judge.
 All 200 tasks remain in the denominator. Infrastructure and judge failures are
 explicit, and judge references are never silently truncated. The same frozen
-final adapter will be used for both benchmarks.
+final adapter is used for both benchmarks.
+
+An independent, synthetic three-case semantic check found that the original
+alignment prompt allowed the local judge to map two unrelated institutions.
+The raw judge response and a CPU replay confirmed a model judgment error, not
+a parser-generated mapping. Formal custom judging was held before it started.
+Scoring revision `same_entity_v2` distinguishes schema labels from entity names,
+requires the same specific entity and explicitly abstains on unsupported
+identity. It also rejects duplicate aligned headers, stably keeps the first
+row when aliases or normalization collapse a unique key, and combines multiple
+criteria for one cell before counting item accuracy. These guards prevent
+duplicate matches or multiple criteria from inflating a metric above one.
+The adapted scorer is versioned separately from the unchanged `b25a4d63`
+generation snapshot. Its strict proxy must also be recomputed from the saved
+predictions; the original scoring files are retained separately. These are
+scoring corrections based on artificial examples, not policy selection or
+tuning against official test answers.
 
 ## Checks, reproduction and artifacts
 
@@ -248,6 +268,13 @@ and one real-Qwen tokenizer check in their appropriate environments. BF16/NF4
 preflights pass. Sharding, scoring audit, resume and slow-mount fixes at
 `513f41f8` pass 111 targeted checks, Ruff and diff checks. Logical-shard complete
 820-question runs also exercise the real GPU path.
+
+Scoring revision `same_entity_v2` passes 98 targeted CPU checks across metrics,
+evaluation and sharded-judge provenance, plus fatal-error Ruff rules and diff
+checks. Independent review covers header and entity collisions, per-cell
+multiple criteria, exact-identity anchors, conflicting explicit versions and
+missing or null legacy versions. No official test item is used for these
+regressions.
 
 Judge provenance changes at `360971f5` pass 90 targeted checks and reject
 mixed judge models, budgets, runtime versions, adapters or generation records.

@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from slime_plugins.dcc import Task
 from slime_plugins.dcc.evaluation import evaluate_results
+from slime_plugins.dcc.widesearch_metrics import ALIGNMENT_PROTOCOL
 
 
 def wide(task_id):
@@ -36,6 +36,8 @@ def test_missing_predictions_stay_in_benchmark_denominator():
     assert report["widesearch"]["metric_denominator"] == 2
     assert report["widesearch"]["score"] == 0.5
     assert not report["complete"]
+    assert report["widesearch"]["alignment_protocol"] is None
+    assert all(value["alignment_protocol"] is None for value in report["widesearch"]["per_task"])
 
 
 def test_judge_failures_make_report_incomplete_and_have_no_fabricated_score():
@@ -51,6 +53,26 @@ def test_judge_failures_make_report_incomplete_and_have_no_fabricated_score():
     assert report["widesearch"]["score"] is None
     assert report["widesearch"]["metric_denominator"] == 0
     assert not report["complete"]
+    assert report["widesearch"]["alignment_protocol"] == ALIGNMENT_PROTOCOL
+    assert report["widesearch"]["per_task"][0]["alignment_protocol"] == ALIGNMENT_PROTOCOL
+
+
+@pytest.mark.parametrize("custom_judge", [False, True])
+def test_rejected_evidence_keeps_zero_score_and_explicit_alignment_provenance(custom_judge):
+    def judge(prompt):
+        raise AssertionError("Rejected evidence must not call a judge")
+
+    report = evaluate_results(
+        [wide("synthetic")],
+        [{"task_id": "synthetic", "answer": [], "status": "evidence_failure"}],
+        judge=judge if custom_judge else None,
+    )
+    expected = ALIGNMENT_PROTOCOL if custom_judge else None
+    assert report["widesearch"]["alignment_protocol"] == expected
+    assert report["widesearch"]["per_task"][0]["alignment_protocol"] == expected
+    assert report["widesearch"]["metric_denominator"] == 1
+    assert report["widesearch"]["score"] == 0
+    assert report["complete"]
 
 
 def test_duplicate_or_foreign_prediction_ids_rejected():

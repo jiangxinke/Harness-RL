@@ -28,6 +28,7 @@ from slime_plugins.dcc.hf_judge import HFBatchedJudge
 from slime_plugins.dcc.hf_policy import HFPolicy, load_policy_model
 from slime_plugins.dcc.tools import WebTools
 from slime_plugins.dcc.retrieval import load_retrieval_profile
+from slime_plugins.dcc.widesearch_metrics import ALIGNMENT_PROTOCOL
 
 
 def _evaluation_shard(args, *, generation):
@@ -391,7 +392,24 @@ def _judge_configuration(args):
         "max_new_tokens": args.judge_tokens, "batch_size": args.judge_batch_size,
         "batch_tokens": args.judge_batch_tokens, "workers": args.judge_workers,
         "allow_truncation": False, "runtime_versions": versions,
+        "alignment_protocol": ALIGNMENT_PROTOCOL,
     }
+
+
+def _judge_alignment_protocol(shard):
+    """Audit explicit prompt versions without assigning a version to legacy data."""
+    wide = shard["widesearch"]
+    configuration = shard.get("judge_configuration")
+    if configuration is not None and not isinstance(configuration, dict):
+        raise ValueError("Judge configuration must be an object")
+    sources = [wide, configuration or {}] + wide["per_task"]
+    declared = [value["alignment_protocol"] for value in sources if value.get("alignment_protocol") is not None]
+    if any(not isinstance(value, str) or not value for value in declared):
+        raise ValueError("Judge alignment protocol must be an explicit nonempty version")
+    versions = set(declared)
+    if len(versions) > 1:
+        raise ValueError("Judge alignment protocols differ within a scoring shard")
+    return versions, len(declared) == len(sources)
 
 
 def _check_judge_generation(report, manifest, runtime):
@@ -417,6 +435,7 @@ def score(args):
         _check_judge_generation(report, generation_manifest, runtime)
         records = []
         configurations, shard_count = [], 0
+        alignment_versions, alignment_legacy_shards = set(), 0
         judge_quantization = getattr(args, "quantization", "none")
         for path in sorted(output.glob("scores_judge_rank*.json")):
             shard = json.loads(path.read_text())
@@ -430,13 +449,20 @@ def score(args):
                 raise ValueError("Judge report policy backend differs from prediction manifests")
             if shard["widesearch"].get("judge_model", args.judge_name) != args.judge_name:
                 raise ValueError("Judge model differs across scoring shards or merge settings")
+            versions, alignment_complete = _judge_alignment_protocol(shard)
+            alignment_versions.update(versions)
+            alignment_legacy_shards += not alignment_complete
+            if len(alignment_versions) > 1:
+                raise ValueError("Judge alignment protocols differ across scoring shards")
             configuration = shard.get("judge_configuration")
             if configuration is not None:
                 if (configuration.get("model_name") != args.judge_name
                         or configuration.get("quantization") != judge_quantization
                         or configuration.get("adapter") is not None):
                     raise ValueError("Judge configuration differs from the frozen merge judge")
-                if configurations and configuration != configurations[0]:
+                comparable = {key: value for key, value in configuration.items() if key != "alignment_protocol"}
+                previous = {key: value for key, value in configurations[0].items() if key != "alignment_protocol"} if configurations else None
+                if previous is not None and comparable != previous:
                     raise ValueError("Judge configurations differ across scoring shards")
                 configurations.append(configuration)
             records.extend(shard["widesearch"]["per_task"])
@@ -464,6 +490,10 @@ def score(args):
             "metric_denominator": len(good),
             "judge_failures": len(records) - len(good),
             "evaluation_protocol": "official_protocol_custom_judge",
+            "alignment_protocol": next(iter(alignment_versions)) if alignment_versions and not alignment_legacy_shards else None,
+            "alignment_protocol_complete": alignment_legacy_shards == 0,
+            "alignment_protocols_observed": sorted(alignment_versions),
+            "alignment_protocol_legacy_shards": alignment_legacy_shards,
             "judge_model": args.judge_name,
             **{
                 key: sum(value[key] for value in good) / len(good) if good else None
@@ -479,9 +509,10 @@ def score(args):
         report["judge_quantization"] = judge_quantization
         # Legacy shards remain mergeable, with their unavailable configuration
         # evidence explicit rather than inferred from current CLI defaults.
-        report["judge_configuration_complete"] = len(configurations) == shard_count
+        report["judge_configuration_complete"] = len(configurations) == shard_count and alignment_legacy_shards == 0
         if configurations:
-            report["judge_configuration"] = configurations[0]
+            report["judge_configuration"] = dict(configurations[0])
+            report["judge_configuration"]["alignment_protocol"] = report["widesearch"]["alignment_protocol"]
         (output / "scores_local_judge.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
         )

@@ -3,14 +3,14 @@
 import asyncio
 import json
 import os
-from pathlib import Path
 import runpy
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from slime_plugins.dcc import PolicyCompletion, Task
+from slime_plugins.dcc.widesearch_metrics import ALIGNMENT_PROTOCOL
 
 
 def cli():
@@ -180,6 +180,7 @@ def judge_merge_run(monkeypatch, tmp_path):
         "quantization": "none", "context": 65536, "max_new_tokens": 4096,
         "batch_size": 1, "batch_tokens": 69632, "workers": 1,
         "allow_truncation": False, "runtime_versions": {"torch": "test"},
+        "alignment_protocol": ALIGNMENT_PROTOCOL,
     }
     keys = ("score", "precision_by_row", "recall_by_row", "f1_by_row",
             "precision_by_item", "recall_by_item", "f1_by_item")
@@ -188,8 +189,8 @@ def judge_merge_run(monkeypatch, tmp_path):
             "judge_quantization": "none", "policy_quantization": "none",
             "policy_inference_backend": "hf", "generation_manifest": manifest,
             "judge_configuration": configuration,
-            "widesearch": {"judge_model": "public/judge", "per_task": [
-                {"task_id": task.id, **dict.fromkeys(keys, 0.0)} for task in tasks[rank::8]
+            "widesearch": {"judge_model": "public/judge", "alignment_protocol": ALIGNMENT_PROTOCOL, "per_task": [
+                {"task_id": task.id, "alignment_protocol": ALIGNMENT_PROTOCOL, **dict.fromkeys(keys, 0.0)} for task in tasks[rank::8]
             ]},
         }))
     args = SimpleNamespace(data=["tasks.jsonl"], limit=None, output_dir=str(tmp_path),
@@ -207,6 +208,9 @@ def judge_merge_run(monkeypatch, tmp_path):
     ("generation", "generation provenance differs"),
     ("runtime", "generation provenance differs"),
     ("strict_generation", "generation provenance differs"),
+    ("alignment", "Judge alignment protocols differ"),
+    ("task_alignment", "Judge alignment protocols differ"),
+    ("cfg_alignment", "Judge alignment protocols differ"),
 ])
 def test_judge_merge_rejects_incomplete_or_mixed_provenance(monkeypatch, tmp_path, corruption, match):
     score, args = judge_merge_run(monkeypatch, tmp_path)
@@ -232,26 +236,56 @@ def test_judge_merge_rejects_incomplete_or_mixed_provenance(monkeypatch, tmp_pat
         path = tmp_path / "scores_strict.json"
         report = json.loads(path.read_text())
         report["generation_manifest"]["adapter"] = "different/candidate"
+    elif corruption == "alignment":
+        report["widesearch"]["alignment_protocol"] = "different_v1"
+        report["judge_configuration"]["alignment_protocol"] = "different_v1"
+        for record in report["widesearch"]["per_task"]:
+            record["alignment_protocol"] = "different_v1"
+    elif corruption == "task_alignment":
+        report["widesearch"]["per_task"][0]["alignment_protocol"] = "different_v1"
+    elif corruption == "cfg_alignment":
+        report["judge_configuration"]["alignment_protocol"] = "different_v1"
     path.write_text(json.dumps(report))
     with pytest.raises(ValueError, match=match):
         score(args)
     assert not (tmp_path / "scores_local_judge.json").exists()
 
 
-@pytest.mark.parametrize("mode", ["complete", "judge_failure", "legacy", "mixed_legacy"])
+@pytest.mark.parametrize("mode", ["complete", "judge_failure", "legacy", "mixed_legacy", "cfg_only_missing", "task_missing", "all_protocol_legacy", "null_protocol_legacy"])
 def test_judge_merge_preserves_all_200_tasks_and_legacy_reports(monkeypatch, tmp_path, mode):
     score, args = judge_merge_run(monkeypatch, tmp_path)
     if mode == "judge_failure":
         path = tmp_path / "scores_judge_rank7.json"
         report = json.loads(path.read_text())
         record = report["widesearch"]["per_task"][-1]
-        report["widesearch"]["per_task"][-1] = {"task_id": record["task_id"], "judge_error": "explicit failure"}
+        report["widesearch"]["per_task"][-1] = {"task_id": record["task_id"], "alignment_protocol": ALIGNMENT_PROTOCOL, "judge_error": "explicit failure"}
         path.write_text(json.dumps(report))
     elif mode in {"legacy", "mixed_legacy"}:
         paths = list(tmp_path.glob("scores_judge_rank*.json"))
         for path in paths if mode == "legacy" else paths[:1]:
             report = json.loads(path.read_text())
             del report["judge_configuration"], report["generation_manifest"]
+            del report["widesearch"]["alignment_protocol"]
+            for record in report["widesearch"]["per_task"]:
+                record.pop("alignment_protocol", None)
+            path.write_text(json.dumps(report))
+    elif mode in {"cfg_only_missing", "task_missing", "all_protocol_legacy", "null_protocol_legacy"}:
+        paths = list(tmp_path.glob("scores_judge_rank*.json"))
+        for path in paths if mode in {"all_protocol_legacy", "null_protocol_legacy"} else paths[:1]:
+            report = json.loads(path.read_text())
+            if mode in {"cfg_only_missing", "all_protocol_legacy"}:
+                del report["judge_configuration"]["alignment_protocol"]
+            if mode == "task_missing":
+                del report["widesearch"]["per_task"][0]["alignment_protocol"]
+            elif mode == "all_protocol_legacy":
+                del report["widesearch"]["alignment_protocol"]
+                for record in report["widesearch"]["per_task"]:
+                    del record["alignment_protocol"]
+            elif mode == "null_protocol_legacy":
+                report["widesearch"]["alignment_protocol"] = None
+                report["judge_configuration"]["alignment_protocol"] = None
+                for record in report["widesearch"]["per_task"]:
+                    record["alignment_protocol"] = None
             path.write_text(json.dumps(report))
     score(args)
     report = json.loads((tmp_path / "scores_local_judge.json").read_text())
@@ -263,6 +297,22 @@ def test_judge_merge_preserves_all_200_tasks_and_legacy_reports(monkeypatch, tmp
     assert report["complete"] == (not failures)
     assert report["judge_configuration_complete"] == (mode in {"complete", "judge_failure"})
     assert report["widesearch"]["search_coverage"] == {"tasks": 200}
+    assert report["widesearch"]["alignment_protocol_complete"] == (mode in {"complete", "judge_failure"})
+    assert report["widesearch"]["alignment_protocol"] == (ALIGNMENT_PROTOCOL if mode in {"complete", "judge_failure"} else None)
+    assert report["widesearch"]["alignment_protocol_legacy_shards"] == (8 if mode in {"legacy", "all_protocol_legacy", "null_protocol_legacy"} else 0 if mode in {"complete", "judge_failure"} else 1)
+    expected_observed = [] if mode in {"legacy", "all_protocol_legacy", "null_protocol_legacy"} else [ALIGNMENT_PROTOCOL]
+    assert report["widesearch"]["alignment_protocols_observed"] == expected_observed
+    if "judge_configuration" in report:
+        assert report["judge_configuration"]["alignment_protocol"] == report["widesearch"]["alignment_protocol"]
+
+
+def test_alignment_provenance_unknown_configuration_is_explicit_legacy():
+    protocol = cli()["_judge_alignment_protocol"]
+    assert protocol({"judge_configuration": None, "widesearch": {
+        "alignment_protocol": None, "per_task": [{"task_id": "synthetic", "alignment_protocol": None}],
+    }}) == (set(), False)
+    with pytest.raises(ValueError, match="configuration must be an object"):
+        protocol({"judge_configuration": [], "widesearch": {"per_task": []}})
 
 
 @pytest.mark.parametrize("quantization", ["none", "nf4"])
@@ -308,6 +358,9 @@ def test_local_judge_loads_frozen_base_with_full_context_and_records_configurati
     assert report["judge_configuration"]["adapter"] is None
     assert report["judge_configuration"]["context"] == 65536
     assert report["judge_configuration"]["runtime_versions"]["torch"] != "unavailable"
+    assert report["judge_configuration"]["alignment_protocol"] == ALIGNMENT_PROTOCOL
+    assert report["widesearch"]["alignment_protocol"] == ALIGNMENT_PROTOCOL
+    assert all(record["alignment_protocol"] == ALIGNMENT_PROTOCOL for record in report["widesearch"]["per_task"])
     assert report["policy_quantization"] == "none"
     assert report["judge_quantization"] == quantization
 
