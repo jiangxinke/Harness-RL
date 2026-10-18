@@ -45,7 +45,9 @@ exhausted their turn budget, with zero infrastructure failures. Fifteen of 64
 groups had nonzero reward variance; five of eight optimizer steps had nonzero
 global gradients. The run used no SFT auxiliary, establishing actual RL
 optimization signal. Exact trajectories and per-worker diagnostics are retained
-with the external checkpoints.
+with the external checkpoints. A direct comparison of the saved adapters found
+that all 288 tensors (5,701,632 trainable parameters) changed during the
+continuation; all final weights are finite. The weight-change L2 norm is 0.034580.
 
 ## Validation selection
 
