@@ -64,6 +64,8 @@ WideSearch uses `web_search` and `fetch_url` and returns table-row objects with
 the requested column names and a `citations` URL list. Citation validity means
 the URLs were observed by the agent; it does not establish that a source entails
 every cell. Held-out answers are consulted only after predictions are saved.
+The web reader extracts HTML article bodies and tables, supports PDF text,
+and returns `next_start` to page through long documents without redownloading.
 
 ## Web providers
 

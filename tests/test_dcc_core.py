@@ -211,6 +211,47 @@ def test_heldout_widesearch_gold_does_not_affect_rollout_reward():
     assert "item_f1" not in result.metrics
 
 
+@pytest.mark.parametrize(
+    "answer", [[{}], [""], [7], [{"text": "clause", "confidence": float("nan")}]]
+)
+def test_malformed_span_list_cannot_earn_no_answer_reward(answer):
+    async def policy(messages, **kwargs):
+        return PolicyCompletion(json.dumps({"answer": answer}), [1], [2])
+
+    result = asyncio.run(EpisodeRunner().run(task(gold=[]), policy))
+    assert result.status == "invalid_answer"
+    assert result.reward == 0
+    assert result.metrics["valid_format"] == 0
+
+
+def test_independent_web_curriculum_uses_actual_item_reward():
+    async def policy(messages, **kwargs):
+        return PolicyCompletion(
+            '{"answer":[{"name":"Alpha","citations":[]}]}', [1], [2]
+        )
+
+    item = Task(
+        "independent",
+        "widesearch",
+        "train",
+        "Find Alpha",
+        gold=[{"name": "Alpha"}],
+        metadata={
+            "source": "independent_curriculum",
+            "evaluation": {
+                "required": ["name"],
+                "unique_columns": ["name"],
+                "eval_pipeline": {
+                    "name": {"metric": ["exact_match"], "preprocess": ["norm_str"]}
+                },
+            },
+        },
+    )
+    result = asyncio.run(EpisodeRunner().run(item, policy))
+    assert result.reward == 1
+    assert result.metrics["f1_by_item"] == 1
+
+
 def test_evaluation_is_greedy_and_cancellation_is_preserved():
     seen = []
 
@@ -244,6 +285,32 @@ def test_duckduckgo_results_and_visible_text():
     assert "secret" not in visible_text(
         "<p>Hello</p><script>secret</script><p>World</p>"
     )
+
+
+def test_web_reader_can_continue_long_pages_without_retrieval_again(monkeypatch):
+    from slime_plugins.dcc import tools
+
+    calls = []
+
+    def download(url):
+        calls.append(url)
+        return b"abcdefghij", "text/plain", "utf-8"
+
+    monkeypatch.setattr(tools, "_download_public", download)
+
+    async def read():
+        web = WebTools(max_page_chars=4)
+        first = await web.fetch_url("https://example.org/page")
+        second = await web.fetch_url(
+            "https://example.org/page", start=first["next_start"]
+        )
+        return first, second
+
+    first, second = asyncio.run(read())
+    assert first["text"] == "abcd"
+    assert second["text"] == "efgh"
+    assert first["total_characters"] == 10
+    assert calls == ["https://example.org/page"]
 
 
 def test_completion_logprob_alignment_is_checked():

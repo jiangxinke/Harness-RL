@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import io
 import json
 import math
 import os
@@ -167,6 +168,57 @@ def _request(url: str, *, payload: dict[str, Any] | None = None, headers: dict[s
         raise InfrastructureError(f"HTTP retrieval failed ({type(exc).__name__})") from exc
 
 
+class _PublicRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, new_url):
+        _public_url(new_url)
+        return super().redirect_request(request, fp, code, message, headers, new_url)
+
+
+def _download_public(url: str) -> tuple[bytes, str, str]:
+    _public_url(url)
+    opener = urllib.request.build_opener(_PublicRedirects())
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; DCCResearch/1.0)"})
+    try:
+        with opener.open(request, timeout=float(os.environ.get("DCC_WEB_TIMEOUT", "30"))) as response:
+            content = response.read(5_000_000)
+            return content, response.headers.get_content_type(), response.headers.get_content_charset() or "utf-8"
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise InfrastructureError(f"HTTP retrieval failed ({type(exc).__name__})") from exc
+
+
+def extract_page(content: bytes, content_type: str, encoding: str = "utf-8") -> str:
+    if content_type == "application/pdf" or content.startswith(b"%PDF-"):
+        try:
+            from pypdf import PdfReader
+        except ImportError as exc:
+            raise ValueError("PDF reader unavailable; install configs/dcc/requirements.txt") from exc
+        try:
+            reader = PdfReader(io.BytesIO(content))
+            return "\n\n".join(page.extract_text() or "" for page in reader.pages[:100])
+        except Exception as exc:
+            raise ValueError("could not extract text from this PDF") from exc
+    try:
+        text = content.decode(encoding, errors="replace")
+    except LookupError:
+        text = content.decode("utf-8", errors="replace")
+    if "html" in content_type or "<html" in text[:1000].lower():
+        try:
+            import trafilatura
+
+            extracted = trafilatura.extract(text, include_tables=True, favor_recall=True)
+            if extracted:
+                return extracted
+        except ImportError:
+            pass
+        except Exception:
+            # Unsupported page structures still have an HTML text fallback.
+            pass
+        return visible_text(text)
+    if content_type.startswith("text/") or content_type in {"application/json", "application/xml"}:
+        return text
+    raise ValueError(f"unsupported page content type: {content_type}")
+
+
 class WebTools:
     """Search using DuckDuckGo, Serper, Brave, SearXNG, or Bing RSS."""
 
@@ -174,6 +226,7 @@ class WebTools:
         self.backend = backend or os.environ.get("DCC_SEARCH_BACKEND", "duckduckgo_lite")
         self.max_page_chars = max_page_chars
         self.sources: dict[str, dict[str, str]] = {}
+        self.pages: dict[str, str] = {}
         self._semaphore = asyncio.Semaphore(8)
 
     async def web_search(self, query: str, *, count: int = 8) -> dict[str, Any]:
@@ -225,20 +278,20 @@ class WebTools:
             raise ValueError(f"unknown search backend: {self.backend}")
         return [item for item in hits if item["url"].startswith(("https://", "http://"))][:count]
 
-    async def fetch_url(self, url: str) -> dict[str, Any]:
-        try:
-            await asyncio.to_thread(_public_url, url)
-        except (ValueError, socket.gaierror) as exc:
-            return {"error": str(exc)}
-        async with self._semaphore:
+    async def fetch_url(self, url: str, start: int = 0) -> dict[str, Any]:
+        if url not in self.pages:
             try:
-                raw = await asyncio.to_thread(_request, url)
-            except InfrastructureError as exc:
+                async with self._semaphore:
+                    raw, content_type, encoding = await asyncio.to_thread(_download_public, url)
+                self.pages[url] = await asyncio.to_thread(extract_page, raw, content_type, encoding)
+            except (InfrastructureError, ValueError, socket.gaierror) as exc:
                 # Dead/blocked pages are normal web-agent observations. An
                 # unavailable search backend, in contrast, aborts the episode.
                 return {"url": url, "error": str(exc)}
-        text = visible_text(raw) if "<" in raw[:500] else raw
-        result = {"url": url, "text": text[: self.max_page_chars], "truncated": len(text) > self.max_page_chars}
+        text = self.pages[url]
+        start = max(0, int(start))
+        end = min(len(text), start + self.max_page_chars)
+        result = {"url": url, "text": text[start:end], "start": start, "end": end, "total_characters": len(text), "truncated": end < len(text), "next_start": end if end < len(text) else None}
         self.sources.setdefault(url, {"title": "", "url": url, "snippet": text[:300]})
         return result
 

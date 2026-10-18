@@ -14,6 +14,8 @@ from .widesearch_metrics import Judge, JudgeError, evaluate_widesearch
 
 def evaluate_results(tasks: Iterable[Task], predictions: Iterable[dict[str, Any]], *, judge: Judge | None = None, workers: int = 1) -> dict[str, Any]:
     tasks = list(tasks)
+    if not tasks:
+        raise ValueError("evaluation requires at least one task")
     saved: dict[str, dict[str, Any]] = {}
     for record in predictions:
         task_id = str(record.get("task_id", record.get("id", "")))

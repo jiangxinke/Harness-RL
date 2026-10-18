@@ -56,6 +56,8 @@ def test_duplicate_or_foreign_prediction_ids_rejected():
         evaluate_results([wide("a")], [{"task_id": "a"}, {"task_id": "a"}])
     with pytest.raises(ValueError, match="outside"):
         evaluate_results([wide("a")], [{"task_id": "other"}])
+    with pytest.raises(ValueError, match="at least one"):
+        evaluate_results([], [])
 
 
 def test_infrastructure_episode_does_not_count_as_complete_evaluation():

@@ -1,3 +1,5 @@
 # In addition to the model runtime selected for training/inference.
 pandas>=2.2,<3
 dateparser>=1.2,<2
+pypdf>=5,<7
+trafilatura>=2,<3

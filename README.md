@@ -142,13 +142,15 @@ python train_stackplanner.py \
   --resume-from /path/to/torch-dist-checkpoint
 ```
 
-## Optional OLE sample selection
+## DCC benchmarks
 
 The `DCC` branch also provides a portable contract and web research harness for
 CUAD and WideSearch. It keeps benchmark labels out of agent context, retains
 separate policy-token trajectories for tool turns, and excludes infrastructure
 failures from policy training. See [the DCC workflow](docs/dcc.md) for data,
 tools, model integration, and evaluation protocols.
+
+## Optional OLE sample selection
 
 OLE is disabled by default in all three templates. Enable it for A, B, or C
 with `ole_enabled: true` in the configuration or the CLI switch:
