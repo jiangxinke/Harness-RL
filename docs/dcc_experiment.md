@@ -401,8 +401,19 @@ Different-base translations and abbreviations continue to use model judgment.
 Deterministic abstentions, actual raw model verdicts and effective production
 verdicts are reported separately; skipped calls are not model successes.
 The original 39, 46 mapping and 73 effective pair-verifier expectations and
-acceptance thresholds remain unchanged. V9 calibration and final semantic
-scoring are pending.
+acceptance thresholds remain unchanged. The complete v9 run at source
+`4ece9e7a` takes 221.99 seconds across eight GPUs: original final metrics pass
+39/39, final mappings 46/46, and effective pair verdicts 73/73, with no runtime,
+format or judge errors and all checked logits finite. The pair-verifier group
+contains 65 actual model calls, all correct, and eight separate deterministic
+UNCERTAIN abstentions with zero model calls. The latter are effective guard
+successes, not raw model successes. The known header-ambiguity check still
+fails: raw/effective header checks are 11/12 and combined checks 157/158.
+Accordingly, `calibration_passed=false`; the frozen exception permits
+`accepted_with_known_limitation=true`. An independent CPU replay passes all
+26 audit checks. These reused 158 artificial cases remain development
+calibration, not an untouched holdout. Fresh full-200 semantic scoring is
+pending; no earlier formal judge shard is reused.
 
 ## Checks, reproduction and artifacts
 
