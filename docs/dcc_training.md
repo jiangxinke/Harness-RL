@@ -103,6 +103,28 @@ skip counts rather than assuming every eligible teacher segment was used.
 The held-out WideSearch tasks and either benchmark's official test labels must
 not enter teacher construction, retrieval-profile fitting or checkpoint selection.
 
+The third mixed phase starts from round-2 step 32, using the same training data
+and fresh optimizer. Its eight-worker configuration is:
+
+```bash
+python -m torch.distributed.run --standalone --nproc-per-node="$WORKERS" \
+  scripts/dcc_tool_sft.py \
+  --model "$MODEL_CACHE" --adapter "$RUN_ROOT/tool-sft-round2/step_0032" \
+  --records "$RUN_ROOT/web-curriculum/teacher_train.jsonl" \
+  --cuad-train-data "$DATA_ROOT/cuad/train.jsonl" \
+  --cuad-tool-records "$RUN_ROOT/cuad-tool-teachers.jsonl" \
+  --retrieval-profile "$RUN_ROOT/cuad-retrieval-profile.json" \
+  --output-dir "$RUN_ROOT/tool-sft-round3" \
+  --steps 32 --save-every 8 --learning-rate 2e-6 \
+  --web-fraction .25 --cuad-tool-fraction .15 --negative-fraction .10 \
+  --max-prompt-tokens 8192 --max-new-tokens 2048 \
+  --batch-tokens 32768 --samples-per-step 4 --initial-chunks 8 --seed 46
+```
+
+Its four checkpoints are compared on all 820 validation questions and the
+independent web validation. The pre-test selection rule and measured results
+are recorded in [dcc_experiment.md](dcc_experiment.md).
+
 Evaluate each benchmark in a separate directory, with a budget appropriate to
 its answer size. For example:
 

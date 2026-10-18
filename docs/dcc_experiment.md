@@ -100,12 +100,13 @@ three turns, and batch size eight.
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Frozen base | 0.230205 | 0.305451 | 0.523349 | 0.385757 | 1 |
 | Early corrected-GRPO adapter | 0.273384 | 0.433036 | 0.468599 | 0.450116 | 1 |
+| Early adapter, matched four-engine control | 0.277331 | 0.453435 | 0.478261 | 0.465517 | 4 |
 | Round 2, step 32 | 0.225080 | 0.521028 | 0.359098 | 0.425167 | 4 |
 | Round 2, step 48 | 0.207676 | 0.589577 | 0.291465 | 0.390086 | 4 |
 
 All 820 questions complete with zero infrastructure failures in each run.
-Engine counts change batch composition and can cause numerical differences;
-a four-engine early-adapter control is also being evaluated. Round-2 step 48
+Engine counts change batch composition and can cause numerical differences,
+as the matched early-adapter control demonstrates. Round-2 step 48
 had the best 82-question graph score (F1 0.451613, AUPR 0.276915), but its full
 validation recall regresses. More steps do not establish better performance.
 
@@ -125,15 +126,24 @@ completed tasks and one evidence failure; the other settings complete all eight.
 Actual searches use the public-web provider's Seznam fallback. Automatic page
 reads are optional and do not consistently help this validation set.
 
-Further optimization is queued: match training to eight initial chunks, lower
-the negative draw fraction to 0.10, retain web fraction 0.25, use learning rate
-0.000002 and evaluate four short-training checkpoints on complete validation.
+Round 3 is running from round-2 step 32: eight workers, 32 optimizer steps,
+four examples per worker, fresh optimizer, seed 46 and checkpoints every eight
+steps. It matches training to eight initial chunks, lowers the negative draw
+fraction to 0.10, retains web fraction 0.25, uses CUAD tool fraction 0.15 and
+learning rate 0.000002. All four checkpoints will receive complete validation.
 Grounding skips raised round 2's actual direct-negative fraction to about 35%,
 above its configured 25% draw probability. Separately saved LoRA-factor
 interpolation candidates combine the early adapter and step 32 without changing
 either source checkpoint; factor interpolation is not equivalent to a linear
-interpolation of effective model functions. These candidates remain under
-validation and are not declared final policies.
+interpolation of effective model functions. Factors 0.25 and 0.5 give independent
+web row F1 0.650400 and 0.532705, respectively, below step 32; neither is promoted.
+
+The final selection rule is fixed before official testing: require independent
+web row F1 at least 0.78 with auto-read off and complete CUAD validation micro F1
+at least 0.4251668255, then maximize CUAD AUPR among eligible trained policies,
+breaking ties by micro F1. Round-2 step 32 is the existing eligible fallback.
+This balances extraction and web behavior, rather than selecting on one task
+alone. No additional training rounds or official-test-based tuning are planned.
 
 ## Harness and test protocol
 
