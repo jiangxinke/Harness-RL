@@ -50,6 +50,87 @@ def _check_generation_manifests(output, manifest):
             raise ValueError("Evaluation configuration changed; use a new output directory")
 
 
+def _adapter_identity(adapter):
+    if adapter is None:
+        return None
+    path = Path(adapter).absolute()
+    weights = path / "adapter_model.safetensors"
+    stat = weights.stat()
+    return {
+        "path": str(path), "config": json.loads((path / "adapter_config.json").read_text()),
+        "weights_file": weights.name, "weights_bytes": stat.st_size,
+        "weights_mtime_ns": stat.st_mtime_ns, "weights_ctime_ns": stat.st_ctime_ns,
+        "weights_inode": stat.st_ino, "weights_device": stat.st_dev,
+    }
+
+
+def _saved_runtime(output):
+    runtimes = [json.loads(path.read_text()) for path in sorted(output.glob("inference_runtime*.json"))]
+    if runtimes and any(value != runtimes[0] for value in runtimes[1:]):
+        raise ValueError("Inference runtime or adapter differs across evaluation shards")
+    return runtimes[0] if runtimes else None
+
+
+def _check_saved_adapter(adapter, runtime):
+    if runtime is not None and "adapter" in runtime:
+        previous = runtime["adapter"]
+        current = _adapter_identity(adapter)
+        if (previous is None) != (current is None) or (
+            previous is not None and any(current.get(key) != value for key, value in previous.items())
+        ):
+            raise ValueError("Adapter checkpoint identity changed; use a new output directory")
+
+
+def _score_predictions(output, tasks):
+    manifests = {int(path.stem.removeprefix("manifest_rank")): json.loads(path.read_text())
+                 for path in output.glob("manifest_rank*.json")}
+    manifest = next(iter(manifests.values()), {})
+    if any(value != manifest for value in manifests.values()):
+        raise ValueError("Cannot score predictions with mixed generation manifests")
+    saved, owners = {}, {}
+    for file in sorted(output.glob("predictions_rank*.jsonl")):
+        rank = int(file.stem.removeprefix("predictions_rank"))
+        for line in file.read_text().splitlines():
+            if line.strip():
+                record = json.loads(line)
+                task_id = record["task_id"]
+                if task_id in owners and owners[task_id] != rank:
+                    raise ValueError(f"Prediction {task_id} appears in multiple shards")
+                # Repeated records within one shard are explicit retries;
+                # retain its latest outcome without hiding cross-shard overlap.
+                owners[task_id], saved[task_id] = rank, record
+    expected = {task.id for task in tasks}
+    if len(expected) != len(tasks):
+        raise ValueError("duplicate evaluation task IDs")
+    if set(saved) != expected:
+        raise ValueError(
+            f"Coverage mismatch: {len(expected - set(saved))} missing, {len(set(saved) - expected)} extra predictions"
+        )
+    runtime = _saved_runtime(output)
+    if "eval_num_shards" in manifest:
+        count = manifest["eval_num_shards"]
+        if type(count) is not int or count < 1 or manifest.get("world_size") != count or set(manifests) != set(range(count)):
+            raise ValueError("Logical shard manifests do not cover the configured world")
+        statuses = {"completed", "invalid_answer", "max_steps", "evidence_failure", "infrastructure_error"}
+        for rank in range(count):
+            assigned = {task.id for task in tasks[rank::count]}
+            if {task_id for task_id, owner in owners.items() if owner == rank} != assigned:
+                raise ValueError("Prediction task ownership differs from its logical shard")
+            marker = output / f"rank{rank}.done"
+            if not marker.exists() or json.loads(marker.read_text()) != {"tasks": len(assigned), "world_size": count}:
+                raise ValueError(f"Evaluation shard {rank} has no matching completion marker")
+            runtime_path = output / (f"inference_runtime_rank{rank}.json" if count > 1 else "inference_runtime.json")
+            if assigned and not runtime_path.exists():
+                raise ValueError(f"Evaluation shard {rank} has no inference runtime record")
+        if any(record.get("status") not in statuses for record in saved.values()):
+            raise ValueError("Predictions contain a missing or unknown episode status")
+        if runtime is None or runtime.get("backend") != "vllm" or runtime.get("model") != manifest["model"]:
+            raise ValueError("Inference runtime does not identify the manifest policy")
+        if "adapter_identity" in manifest and runtime.get("adapter") != manifest["adapter_identity"]:
+            raise ValueError("Inference runtime adapter differs from its generation manifest")
+    return saved, manifest, runtime
+
+
 async def _finish_evaluation(policy, stream, workers, failure):
     # Stop episodes before draining the policy or closing their output stream.
     # Some episodes may finish cancellation handlers and persist a result.
@@ -121,6 +202,7 @@ async def evaluate(args):
     manifest["world_size"] = world
     if shard is not None:
         manifest["eval_num_shards"] = world
+        manifest["adapter_identity"] = _adapter_identity(args.adapter)
     if retrieval_profile is not None:
         # Profiles contain tuples in memory, while JSON persists them as lists.
         # Compare the same representation when resuming an unchanged profile.
@@ -174,6 +256,12 @@ async def evaluate(args):
         )
     ]
     if todo:
+        # A previous successful attempt must not certify a failed retry.
+        (output / f"rank{rank}.done").unlink(missing_ok=True)
+    if backend == "vllm":
+        previous_runtime = _saved_runtime(output)
+        _check_saved_adapter(args.adapter, previous_runtime)
+    if todo:
         policy, stream, workers, failure = None, None, [], None
         try:
             if backend == "vllm":
@@ -189,7 +277,19 @@ async def evaluate(args):
                     enforce_eager=args.vllm_enforce_eager, seed=args.seed,
                 )
                 runtime_file = f"inference_runtime_rank{rank}.json" if world > 1 else "inference_runtime.json"
-                (output / runtime_file).write_text(json.dumps(policy.provenance, indent=2) + "\n")
+                provenance = dict(policy.provenance)
+                identity = _adapter_identity(args.adapter)
+                if shard is not None:
+                    if identity != manifest["adapter_identity"]:
+                        raise ValueError("Adapter checkpoint changed while loading the policy")
+                provenance["adapter"] = identity
+                if previous_runtime is not None and provenance != previous_runtime:
+                    raise ValueError("Inference runtime or adapter changed; use a new output directory")
+                # Publish complete JSON before another worker audits it.
+                temporary = output / f".{runtime_file}.{os.getpid()}.tmp"
+                temporary.write_text(json.dumps(provenance, indent=2) + "\n")
+                temporary.replace(output / runtime_file)
+                _saved_runtime(output)
             else:
                 model, tokenizer = load_policy_model(
                     args.model, adapter=args.adapter, rank=local, quantization=quantization
@@ -274,19 +374,9 @@ def score(args):
     if args.limit:
         tasks = tasks[: args.limit]
     output = Path(args.output_dir)
+    saved, generation_manifest, runtime = _score_predictions(output, tasks)
     policy_quantization = _prediction_quantization(output)
     policy_backend = _prediction_setting(output, "inference_backend", "hf")
-    saved = {}
-    for file in sorted(output.glob("predictions_rank*.jsonl")):
-        for line in file.read_text().splitlines():
-            if line.strip():
-                record = json.loads(line)
-                saved[record["task_id"]] = record
-    expected = {task.id for task in tasks}
-    if set(saved) != expected:
-        raise ValueError(
-            f"Coverage mismatch: {len(expected - set(saved))} missing, {len(set(saved) - expected)} extra predictions"
-        )
     if args.merge_judge:
         report = json.loads((output / "scores_strict.json").read_text())
         records = []
@@ -385,7 +475,7 @@ def score(args):
         if judge:
             judge.close()
     report["generation"] = {
-        key: getattr(args, key)
+        key: generation_manifest.get(key, getattr(args, key))
         for key in (
             "max_steps",
             "max_new_tokens",
@@ -395,6 +485,9 @@ def score(args):
         )
     }
     report["model"] = args.model_name
+    report["generation_manifest"] = generation_manifest
+    if runtime is not None:
+        report["inference_runtime"] = runtime
     report["policy_quantization"] = policy_quantization
     report["policy_inference_backend"] = policy_backend
     if judge:

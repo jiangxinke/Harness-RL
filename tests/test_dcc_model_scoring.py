@@ -33,7 +33,10 @@ def test_cpu_score_retains_quantized_policy_provenance(monkeypatch, tmp_path):
     score = cli()["score"]
     task = Task("contract", "cuad", "test", "Find clause", document="exact clause", gold=["exact clause"])
     monkeypatch.setitem(score.__globals__, "load_tasks", lambda path: [task])
-    (tmp_path / "manifest_rank0.json").write_text('{"quantization":"nf4"}')
+    (tmp_path / "manifest_rank0.json").write_text(json.dumps({
+        "quantization": "nf4", "max_steps": 7, "max_new_tokens": 2048,
+        "max_prompt_tokens": 16384, "initial_chunks": 2, "seed": 17,
+    }))
     (tmp_path / "predictions_rank0.jsonl").write_text(json.dumps({
         "task_id": task.id, "status": "completed", "answer": [{"text": "exact clause", "confidence": 1}],
     }) + "\n")
@@ -46,6 +49,107 @@ def test_cpu_score_retains_quantized_policy_provenance(monkeypatch, tmp_path):
     assert report["policy_quantization"] == "nf4"
     assert report["policy_inference_backend"] == "hf"
     assert "judge_quantization" not in report
+    assert report["generation"] == {
+        "max_steps": 7, "max_new_tokens": 2048, "max_prompt_tokens": 16384,
+        "initial_chunks": 2, "seed": 17,
+    }
+
+
+def logical_predictions(tmp_path):
+    tasks = [Task(f"contract{i}", "cuad", "test", "Find clause", document="A contract", gold=[]) for i in range(2)]
+    manifest = {"eval_num_shards": 2, "world_size": 2, "model": "example/model",
+                "inference_backend": "vllm", "adapter_identity": None}
+    runtime = {"backend": "vllm", "model": "example/model", "adapter": None}
+    for rank, task in enumerate(tasks):
+        (tmp_path / f"manifest_rank{rank}.json").write_text(json.dumps(manifest))
+        (tmp_path / f"predictions_rank{rank}.jsonl").write_text(json.dumps({
+            "task_id": task.id, "status": "completed", "answer": [],
+        }) + "\n")
+        (tmp_path / f"rank{rank}.done").write_text(json.dumps({"tasks": 1, "world_size": 2}))
+        (tmp_path / f"inference_runtime_rank{rank}.json").write_text(json.dumps(runtime))
+    return tasks
+
+
+@pytest.mark.parametrize("corruption,match", [
+    ("overlap", "multiple shards"),
+    ("missing", "Coverage mismatch"),
+    ("done", "completion marker"),
+    ("done_count", "completion marker"),
+    ("runtime_missing", "no inference runtime"),
+    ("runtime_mixed", "runtime or adapter differs"),
+    ("adapter", "adapter differs from"),
+    ("ownership", "task ownership"),
+    ("status", "unknown episode status"),
+    ("manifest", "mixed generation manifests"),
+])
+def test_logical_score_rejects_incomplete_or_mixed_runs(tmp_path, corruption, match):
+    tasks = logical_predictions(tmp_path)
+    if corruption == "overlap":
+        with (tmp_path / "predictions_rank1.jsonl").open("a") as stream:
+            stream.write((tmp_path / "predictions_rank0.jsonl").read_text())
+    elif corruption == "missing":
+        (tmp_path / "predictions_rank1.jsonl").write_text("")
+    elif corruption == "done":
+        (tmp_path / "rank1.done").unlink()
+    elif corruption == "done_count":
+        (tmp_path / "rank1.done").write_text('{"tasks":2,"world_size":2}')
+    elif corruption == "runtime_missing":
+        (tmp_path / "inference_runtime_rank1.json").unlink()
+    elif corruption == "runtime_mixed":
+        (tmp_path / "inference_runtime_rank1.json").write_text('{"adapter":{"path":"changed"}}')
+    elif corruption == "adapter":
+        for path in tmp_path.glob("manifest_rank*.json"):
+            path.write_text(json.dumps(json.loads(path.read_text()) | {"adapter_identity": {"path": "changed"}}))
+    elif corruption == "ownership":
+        first, second = (tmp_path / "predictions_rank0.jsonl"), (tmp_path / "predictions_rank1.jsonl")
+        first_text = first.read_text()
+        first.write_text(second.read_text())
+        second.write_text(first_text)
+    elif corruption == "status":
+        path = tmp_path / "predictions_rank0.jsonl"
+        path.write_text(json.dumps(json.loads(path.read_text()) | {"status": "running"}) + "\n")
+    elif corruption == "manifest":
+        path = tmp_path / "manifest_rank1.json"
+        path.write_text(json.dumps(json.loads(path.read_text()) | {"max_steps": 8}))
+    with pytest.raises(ValueError, match=match):
+        cli()["_score_predictions"](tmp_path, tasks)
+
+
+def test_logical_score_keeps_same_shard_retry_and_legacy_manifests(tmp_path):
+    tasks = logical_predictions(tmp_path)
+    retry = {"task_id": tasks[0].id, "status": "evidence_failure", "answer": []}
+    with (tmp_path / "predictions_rank0.jsonl").open("a") as stream:
+        stream.write(json.dumps(retry) + "\n")
+    saved, manifest, runtime = cli()["_score_predictions"](tmp_path, tasks)
+    assert len(saved) == len(tasks) and saved[tasks[0].id] == retry
+    assert manifest["eval_num_shards"] == 2 and runtime["backend"] == "vllm"
+    for path in tmp_path.glob("manifest_rank*.json"):
+        old = json.loads(path.read_text())
+        del old["adapter_identity"]
+        path.write_text(json.dumps(old))
+    assert cli()["_score_predictions"](tmp_path, tasks)[0] == saved
+
+
+def test_adapter_identity_detects_replaced_symlink_target_without_hashing(tmp_path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    for path in (first, second):
+        path.mkdir()
+        (path / "adapter_config.json").write_text('{"r":8}')
+        (path / "adapter_model.safetensors").write_bytes(b"tiny")
+    timestamp = (first / "adapter_model.safetensors").stat().st_mtime_ns
+    os.utime(second / "adapter_model.safetensors", ns=(timestamp, timestamp))
+    adapter = tmp_path / "current"
+    adapter.symlink_to(first, target_is_directory=True)
+    namespace = cli()
+    identity = namespace["_adapter_identity"](adapter)
+    assert identity["path"] == str(adapter)
+    namespace["_check_saved_adapter"](adapter, {"adapter": identity})
+    adapter.unlink()
+    adapter.symlink_to(second, target_is_directory=True)
+    assert identity["weights_bytes"] == namespace["_adapter_identity"](adapter)["weights_bytes"]
+    assert identity["weights_mtime_ns"] == namespace["_adapter_identity"](adapter)["weights_mtime_ns"]
+    with pytest.raises(ValueError, match="checkpoint identity changed"):
+        namespace["_check_saved_adapter"](adapter, {"adapter": identity})
 
 
 def test_merge_rejects_judge_precision_change_before_publishing(monkeypatch, tmp_path):
@@ -92,7 +196,7 @@ def test_vllm_evaluation_uses_optional_policy_and_keeps_resume_separate(monkeypa
         return Policy()
 
     monkeypatch.setitem(sys.modules, "slime_plugins.dcc.vllm_policy", SimpleNamespace(load_vllm_policy=load))
-    args = SimpleNamespace(model="example/model", adapter="adapter", data=["tasks.jsonl"],
+    args = SimpleNamespace(model="example/model", adapter=None, data=["tasks.jsonl"],
                            max_steps=3, max_new_tokens=1024, max_prompt_tokens=8192,
                            initial_chunks=4, seed=42, limit=0, output_dir=str(tmp_path),
                            retry_infrastructure=False, inference_backend="vllm", quantization="none",
@@ -188,7 +292,7 @@ def test_independent_vllm_shards_cover_once_resume_and_score_shared_predictions(
 
     class Policy:
         def __init__(self):
-            self.provenance = {"replica": len(policies)}
+            self.provenance = {"backend": "vllm", "model": "example/model", "adapter": None}
             self.closed = False
 
         async def __call__(self, messages, **kwargs):
@@ -224,7 +328,7 @@ def test_independent_vllm_shards_cover_once_resume_and_score_shared_predictions(
         manifest = json.loads((tmp_path / f"manifest_rank{rank}.json").read_text())
         assert manifest["world_size"] == manifest["eval_num_shards"] == 2
         assert json.loads((tmp_path / f"rank{rank}.done").read_text())["tasks"] == len(records)
-        assert json.loads((tmp_path / f"inference_runtime_rank{rank}.json").read_text())["replica"] == rank
+        assert json.loads((tmp_path / f"inference_runtime_rank{rank}.json").read_text()) == policies[rank].provenance
     assert ids[0] == {task.id for task in tasks[::2]}
     assert ids[1] == {task.id for task in tasks[1::2]}
     assert not ids[0] & ids[1] and ids[0] | ids[1] == {task.id for task in tasks}
@@ -328,10 +432,11 @@ def test_runtime_metadata_failure_still_closes_loaded_policy(monkeypatch, tmp_pa
     evaluate, args = stub_evaluation(monkeypatch, tmp_path, Policy(), [
         Task("contract", "cuad", "validation", "Find clause", document="A contract"),
     ])
+    (tmp_path / "rank0.done").write_text('{"tasks":1,"world_size":1}')
     original_write = Path.write_text
 
     def fail_metadata(path, *args, **kwargs):
-        if path.name == "inference_runtime.json":
+        if "inference_runtime" in path.name:
             raise failure
         return original_write(path, *args, **kwargs)
 
@@ -342,6 +447,33 @@ def test_runtime_metadata_failure_still_closes_loaded_policy(monkeypatch, tmp_pa
     assert events == ["closed"]
     assert not (tmp_path / "predictions_rank0.jsonl").exists()
     assert not (tmp_path / "rank0.done").exists()
+
+
+def test_completed_vllm_resume_rechecks_adapter_before_reusing_predictions(monkeypatch, tmp_path):
+    class Policy:
+        provenance = {"backend": "vllm", "model": "example/model"}
+
+        async def __call__(self, messages, **kwargs):
+            return PolicyCompletion('{"answer":[]}', [1], [2])
+
+        async def close(self):
+            pass
+
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text('{"r":8}')
+    weights = adapter / "adapter_model.safetensors"
+    weights.write_bytes(b"first")
+    evaluate, args = stub_evaluation(monkeypatch, tmp_path, Policy(), [
+        Task("contract", "cuad", "validation", "Find clause", document="A contract"),
+    ])
+    args.adapter = str(adapter)
+    asyncio.run(evaluate(args))
+    before = (tmp_path / "predictions_rank0.jsonl").read_text()
+    weights.write_bytes(b"second")
+    with pytest.raises(ValueError, match="checkpoint identity changed"):
+        asyncio.run(evaluate(args))
+    assert (tmp_path / "predictions_rank0.jsonl").read_text() == before
 
 
 def test_cleanup_failure_after_success_still_closes_stream_and_prevents_done(monkeypatch, tmp_path):

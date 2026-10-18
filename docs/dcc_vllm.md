@@ -86,6 +86,75 @@ complete task coverage across all prediction files. Explicit shard options
 are rejected for HF generation and for scoring or judge modes. Omitting them
 preserves the existing HF launcher rank/world behavior.
 
+For a complete two-benchmark run, define portable paths to the model, adapter,
+full held-out datasets and an external output root. Use a fresh output root for
+each candidate. Invoke this command once for each assigned worker, with
+`SHARD_COUNT=8` and `SHARD_INDEX` from 0 through 7 for eight independent engines:
+
+```bash
+for BENCHMARK in cuad widesearch; do
+  if [ "$BENCHMARK" = cuad ]; then TASKS="$CUAD_TEST"; else TASKS="$WIDE_TEST"; fi
+  RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 CUDA_VISIBLE_DEVICES="$WORKER_GPU" \
+    "$VLLM_ENV/bin/python" scripts/dcc_model_evaluate.py \
+    --model "$MODEL" --model-name "$MODEL_NAME" --adapter "$ADAPTER" \
+    --inference-backend vllm --quantization none \
+    --eval-shard-index "$SHARD_INDEX" --eval-num-shards "$SHARD_COUNT" \
+    --data "$TASKS" --output-dir "$EVAL_ROOT/$BENCHMARK" \
+    --max-steps 6 --max-new-tokens 8192 --max-prompt-tokens 16384 \
+    --initial-chunks 4 --batch-size 8 --seed 42 --timeout 1800
+done
+```
+
+Do not partition the input files before invoking the workers: logical task
+assignment uses the same complete ordered task list. After every worker exits,
+score each benchmark on CPU, without logical shard options:
+
+```bash
+for BENCHMARK in cuad widesearch; do
+  if [ "$BENCHMARK" = cuad ]; then TASKS="$CUAD_TEST"; else TASKS="$WIDE_TEST"; fi
+  CUDA_VISIBLE_DEVICES='' RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 \
+    "$CPU_ENV/bin/python" scripts/dcc_model_evaluate.py \
+    --model "$MODEL" --model-name "$MODEL_NAME" --score-only \
+    --data "$TASKS" --output-dir "$EVAL_ROOT/$BENCHMARK"
+done
+```
+
+Scoring checks complete ID coverage, disjoint shard ownership, identical
+manifests and runtimes, known episode statuses, and every logical shard's
+matching completion marker. It keeps the latest retry within one shard but
+rejects the same task in different shards. Reports copy actual generation
+budgets from the saved manifest, independent of scoring CLI defaults. Older
+manifests without logical shard fields remain scoreable; their historical
+completion metadata cannot provide the newer strict logical-shard audit.
+
+For an optional frozen HF judge, run the following after strict scoring, using
+a separate HF environment and explicitly assigned judge GPUs. The judge loads
+the base model without the trained adapter. `JUDGE_WORKERS` must match the
+number of visible judge GPUs. Neither judging nor merging takes logical shard
+options:
+
+```bash
+CUDA_VISIBLE_DEVICES="$JUDGE_GPUS" "$HF_ENV/bin/python" -m torch.distributed.run \
+  --standalone --nproc-per-node "$JUDGE_WORKERS" scripts/dcc_model_evaluate.py \
+  --model "$MODEL" --model-name "$MODEL_NAME" --score-only --local-judge \
+  --judge-name "$MODEL_NAME" --quantization none \
+  --data "$WIDE_TEST" --output-dir "$EVAL_ROOT/widesearch"
+CUDA_VISIBLE_DEVICES='' RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 \
+  "$CPU_ENV/bin/python" scripts/dcc_model_evaluate.py \
+  --model "$MODEL" --model-name "$MODEL_NAME" --score-only --merge-judge \
+  --judge-name "$MODEL_NAME" --quantization none \
+  --data "$WIDE_TEST" --output-dir "$EVAL_ROOT/widesearch"
+```
+
+The strict WideSearch report is labeled `strict_exact_proxy`; the local-judge
+report is `official_protocol_custom_judge`. The latter follows the official
+matching protocol with a custom judge and is not an official-judge score.
+Report `status_counts`, `complete`, WideSearch `metric_denominator` and
+`judge_failures` with scores. Model `evidence_failure` outcomes receive zero
+within the full task denominator. Infrastructure errors make `complete=false`;
+judge errors are listed explicitly, excluded from the judge metric denominator,
+and also make the report incomplete.
+
 Set GPU visibility before creating an engine. Guard standalone launchers with
 `if __name__ == "__main__":` so worker subprocesses cannot rerun the launcher.
 The queue serializes engine access and batches requests. `close()` drains the
@@ -118,7 +187,15 @@ directory. It records model/tokenizer revisions, resolved model revision when
 available, runtime versions, adapter configuration/path/size/modification time,
 precision, seed, context/token budgets, memory fraction and cache settings.
 Adapter metadata identifies the supplied local checkpoint without expensive
-weight hashing. Actual prompt/completion IDs and finish reasons are retained
+weight hashing. New evaluation runtime records also retain weight ctime,
+inode and device, so replacing a stable adapter symlink target is detected
+even when size and mtime are preserved. Resume checks the saved identity
+before reusing completed predictions, and refuses inconsistent runtimes rather
+than overwriting them. Logical generation records identity in its manifest
+before loading and verifies it again afterward. Keep checkpoints immutable
+while evaluations run; changed checkpoints require a fresh output directory.
+Older records retain only the identity fields originally available.
+Actual prompt/completion IDs and finish reasons are retained
 in `PolicyCompletion`; log probabilities are absent. Changing the backend or
 adapter requires a new output directory. Runtime paths belong in external
 artifacts, not committed configuration.
