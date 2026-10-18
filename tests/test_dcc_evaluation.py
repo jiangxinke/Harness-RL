@@ -151,3 +151,19 @@ def test_search_coverage_handles_legacy_missing_and_malformed_observations():
         no_search["widesearch"]["search_coverage"]["encyclopedia_search_fraction"]
         is None
     )
+
+
+def test_search_coverage_recognizes_public_web_indexes():
+    report = evaluate_results(
+        [wide("a")],
+        [{"task_id": "a", "answer": [], "tool_events": [
+            {"tool": "web_search", "observation": {
+                "configured_backend": "public_web", "backend": backend,
+                "search_scope": "web", "fallback_reason": "duckduckgo_lite: challenge",
+            }} for backend in ("seznam", "baidu_mobile")
+        ]}],
+    )
+    coverage = report["widesearch"]["search_coverage"]
+    assert coverage["backend_counts"] == {"seznam": 1, "baidu_mobile": 1}
+    assert coverage["configured_backend_counts"] == {"public_web": 2}
+    assert coverage["encyclopedia_search_fraction"] == 0

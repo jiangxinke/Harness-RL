@@ -220,10 +220,10 @@ def extract_page(content: bytes, content_type: str, encoding: str = "utf-8") -> 
 
 
 class WebTools:
-    """Search using DuckDuckGo, Serper, Brave, SearXNG, or Bing RSS."""
+    """Search public indexes or an operator-configured web-search API."""
 
     def __init__(self, *, backend: str | None = None, max_page_chars: int = 14000) -> None:
-        self.backend = backend or os.environ.get("DCC_SEARCH_BACKEND", "duckduckgo_wikipedia")
+        self.backend = backend or os.environ.get("DCC_SEARCH_BACKEND", "public_web")
         self.max_page_chars = max_page_chars
         self.sources: dict[str, dict[str, str]] = {}
         self.pages: dict[str, str] = {}
@@ -235,7 +235,11 @@ class WebTools:
             return {"error": "query must be nonempty"}
         count = max(1, min(int(count), 10))
         async with self._semaphore:
-            if self.backend in {"auto", "duckduckgo_wikipedia"}:
+            if self.backend == "public_web":
+                from .search_provider import public_web_search
+
+                information = await asyncio.to_thread(public_web_search, query, count, lambda: self._search(query, count, backend="duckduckgo_lite"))
+            elif self.backend in {"auto", "duckduckgo_wikipedia"}:
                 from .search_provider import search_with_fallback
 
                 information = await asyncio.to_thread(search_with_fallback, query, count, lambda: self._search(query, count, backend="duckduckgo_lite"))
@@ -260,6 +264,10 @@ class WebTools:
             parser = _DuckDuckGoResults()
             parser.feed(raw)
             hits = parser.hits
+        elif backend in {"seznam", "baidu_mobile"}:
+            from .search_provider import public_html_search
+
+            hits = public_html_search(query, count, backend)
         elif backend == "serper":
             key = os.environ.get("SERPER_API_KEY")
             if not key:

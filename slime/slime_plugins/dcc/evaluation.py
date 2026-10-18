@@ -14,7 +14,7 @@ from .widesearch_metrics import Judge, JudgeError, evaluate_widesearch
 
 def _search_coverage(tasks: list[Task], saved: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """Summarize recorded search observations without echoing URLs or errors."""
-    known_backends = {"duckduckgo_lite", "duckduckgo_wikipedia", "wikipedia", "serper", "brave", "searxng", "bing_rss", "auto"}
+    known_backends = {"public_web", "seznam", "baidu_mobile", "duckduckgo_lite", "duckduckgo_wikipedia", "wikipedia", "serper", "brave", "searxng", "bing_rss", "auto"}
     backend_counts: Counter[str] = Counter()
     configured_counts: Counter[str] = Counter()
     scope_counts: Counter[str] = Counter()

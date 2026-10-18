@@ -69,13 +69,21 @@ and returns `next_start` to page through long documents without redownloading.
 
 ## Web providers
 
-Set `DCC_SEARCH_BACKEND` to `duckduckgo_wikipedia` (default), `wikipedia`,
-`duckduckgo_lite`, `serper`, `brave`, `searxng`, or `bing_rss`.
-The default tries DuckDuckGo, serializes its requests, and caches successful
-queries in the process. A challenge or service error starts a 300-second
-process-local cooldown and falls back to English/Chinese Wikipedia's official
-search API. Every observation records the actual `backend`, `search_scope`, and
-`fallback_reason`. Wikipedia covers encyclopedia articles and does not provide
+Set `DCC_SEARCH_BACKEND` to `public_web` (default), `duckduckgo_wikipedia`,
+`wikipedia`, `duckduckgo_lite`, `seznam`, `baidu_mobile`, `serper`, `brave`,
+`searxng`, or `bing_rss`. The default tries DuckDuckGo, then Seznam for
+non-Chinese queries, then Baidu's mobile web index, then English/Chinese
+Wikipedia's official search API. Seznam and Baidu return direct source URLs;
+individual source sites may still reject retrieval. Live validation covered
+multiple English and Chinese topics, actual source-page retrieval, and eight
+simultaneous queries. Provider availability and ranking can change.
+
+Public providers serialize and limit requests, cache query results in the
+process, and start a 300-second process-local cooldown on a challenge or
+service error. Challenges are detected and skipped. The compatibility setting
+`duckduckgo_wikipedia` (also `auto`) retains the earlier DuckDuckGo-to-Wikipedia
+chain. Every observation records the configured and actual `backend`,
+`search_scope`, and `fallback_reason`. Wikipedia covers encyclopedia articles and does not provide
 the coverage of a general web index. Its reader retrieves article HTML through
 the official parse API and preserves tables. MediaWiki's plaintext extracts
 omit tables and would discard many enumeration answers.
@@ -84,8 +92,9 @@ API providers require `SERPER_API_KEY` or
 `BRAVE_SEARCH_API_KEY`; SearXNG requires `DCC_SEARCH_URL`. Requests use
 `DCC_WEB_TIMEOUT` seconds (default 30). Configure these outside version control.
 Standalone `duckduckgo_lite` treats bot challenges as infrastructure failures.
-If both the default provider and its fallback fail, the episode is invalidated
-instead of creating a misleading training reward. A reliable search API is
+If every provider in `public_web` fails, the episode is invalidated instead of
+creating a misleading training reward. A valid empty response remains a normal
+observation even if later providers fail. A reliable search API is
 recommended for broad coverage in the full WideSearch run. Record provider
 coverage alongside scores. Validate query relevance before using Bing RSS.
 WideSearch reports include `search_coverage`: actual and configured backend
