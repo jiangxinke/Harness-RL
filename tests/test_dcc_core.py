@@ -148,6 +148,37 @@ def test_action_parser_ignores_nested_example_in_query_and_thinking():
     assert parse_action(json.dumps(action)) == action
 
 
+@pytest.mark.parametrize("fenced", [False, True])
+def test_terminal_bare_answer_list_is_accepted_and_validated(fenced):
+    payload = json.dumps([{"text": task().document, "confidence": 0.9}])
+    if fenced:
+        payload = "```json\n" + payload + "\n```"
+
+    async def policy(messages, **kwargs):
+        return PolicyCompletion(payload, [1], [2])
+
+    result = asyncio.run(EpisodeRunner(max_steps=1).run(task(), policy))
+    assert result.status == "completed"
+    assert result.reward == 1
+    assert parse_action('Example: [] is a possible answer, but research continues.') is None
+    assert parse_action('{"tool":"search_document","arguments":{"query":"[]"}}')["tool"] == "search_document"
+
+
+def test_last_turn_requests_final_answer_without_executing_tools():
+    class NoLastTurnWeb(WebTools):
+        async def web_search(self, **kwargs):
+            pytest.fail("A final-turn tool request must not reach the network")
+
+    async def policy(messages, **kwargs):
+        assert "Final turn: tools are unavailable" in messages[-1]["content"]
+        return PolicyCompletion('{"tool":"web_search","arguments":{"query":"test"}}')
+
+    item = Task("ws", "widesearch", "test", "Find entities")
+    result = asyncio.run(EpisodeRunner(max_steps=1, web_tools_factory=NoLastTurnWeb).run(item, policy))
+    assert result.status == "max_steps"
+    assert "no tool was executed" in result.tool_events[0]["observation"]["error"]
+
+
 def test_policy_segments_preserve_each_prompt_and_tool_observations_are_context_only():
     calls = []
 

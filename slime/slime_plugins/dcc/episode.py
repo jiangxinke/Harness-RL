@@ -83,6 +83,11 @@ def parse_action(text: str) -> dict[str, Any] | None:
         position = end
         if isinstance(value, dict) and ("answer" in value or "tool" in value):
             candidates.append(value)
+        elif isinstance(value, list) and text[end:].strip() in ("", "```"):
+            # Some policies emit the requested answer array without its outer
+            # object. Accept only a terminal JSON payload, never a list quoted
+            # inside reasoning; benchmark-specific validation still follows.
+            candidates.append({"answer": value})
     return candidates[-1] if candidates else None
 
 
@@ -182,6 +187,11 @@ class EpisodeRunner:
         try:
             async with asyncio.timeout(self.timeout_seconds):
                 for index in range(self.max_steps):
+                    if index == self.max_steps - 1:
+                        messages[-1]["content"] += (
+                            '\nFinal turn: tools are unavailable. Return your best final '
+                            'answer now as {"answer":[...]}, using the evidence already available.'
+                        )
                     completion = await policy([message.copy() for message in messages], max_new_tokens=self.max_new_tokens, temperature=0.0 if evaluation else self.temperature)
                     if not isinstance(completion, PolicyCompletion):
                         raise TypeError("policy must return PolicyCompletion")
@@ -200,7 +210,9 @@ class EpisodeRunner:
                             observation = {"error": "tool arguments must be a JSON object"}
                         else:
                             try:
-                                if tool == "search_document" and document_tools:
+                                if index == self.max_steps - 1:
+                                    observation = {"error": "Tools are unavailable on the final turn; no tool was executed."}
+                                elif tool == "search_document" and document_tools:
                                     observation = document_tools.search_document(**arguments)
                                 elif tool == "read_document" and document_tools:
                                     observation = document_tools.read_document(**arguments)

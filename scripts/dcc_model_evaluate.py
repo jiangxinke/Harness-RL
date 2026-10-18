@@ -20,16 +20,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "slime"))
 
 from slime_plugins.dcc import EpisodeRunner, load_tasks
 from slime_plugins.dcc.evaluation import evaluate_results
-from slime_plugins.dcc.hf_policy import HFPolicy, load_policy_model
 from slime_plugins.dcc.hf_judge import HFBatchedJudge
+from slime_plugins.dcc.hf_policy import HFPolicy, load_policy_model
 
 
 async def evaluate(args):
     import torch
 
-    rank = int(os.environ.get("RANK", 0))
-    local = int(os.environ.get("LOCAL_RANK", 0))
-    world = int(os.environ.get("WORLD_SIZE", 1))
+    rank = int(os.environ.get("RANK", "0"))
+    local = int(os.environ.get("LOCAL_RANK", "0"))
+    world = int(os.environ.get("WORLD_SIZE", "1"))
     torch.manual_seed(args.seed + rank)
     tasks = [task for path in args.data for task in load_tasks(path)]
     if any(task.split == "train" for task in tasks):
@@ -98,6 +98,11 @@ async def evaluate(args):
             async with semaphore:
                 result = await runner.run(task, policy, evaluation=True)
                 value = result.to_dict(include_tokens=args.save_tokens)
+                token_usage = {
+                    "prompt": sum(len(step.prompt_ids) for step in result.steps),
+                    "completion": sum(len(step.completion_ids) for step in result.steps),
+                }
+                value["token_usage"] = token_usage
                 stream.write(json.dumps(value, ensure_ascii=False) + "\n")
                 print(
                     json.dumps(
@@ -106,6 +111,7 @@ async def evaluate(args):
                             "task": task.id,
                             "status": result.status,
                             "turns": len(result.steps),
+                            "token_usage": token_usage,
                             "elapsed": time.monotonic() - start,
                         }
                     ),
@@ -121,9 +127,9 @@ async def evaluate(args):
 
 
 def score(args):
-    rank = int(os.environ.get("RANK", 0))
-    local = int(os.environ.get("LOCAL_RANK", 0))
-    world = int(os.environ.get("WORLD_SIZE", 1))
+    rank = int(os.environ.get("RANK", "0"))
+    local = int(os.environ.get("LOCAL_RANK", "0"))
+    world = int(os.environ.get("WORLD_SIZE", "1"))
     tasks = [task for path in args.data for task in load_tasks(path)]
     if args.limit:
         tasks = tasks[: args.limit]
@@ -162,6 +168,7 @@ def score(args):
             "recall_by_item",
             "f1_by_item",
         )
+        search_coverage = report["widesearch"].get("search_coverage")
         report["widesearch"] = {
             "tasks": len(records),
             "metric_denominator": len(good),
@@ -174,6 +181,8 @@ def score(args):
             },
             "per_task": records,
         }
+        if search_coverage is not None:
+            report["widesearch"]["search_coverage"] = search_coverage
         report["complete"] = report["complete"] and len(good) == len(records)
         (output / "scores_local_judge.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
