@@ -20,7 +20,7 @@ from urllib.request import Request, urlopen
 
 import pandas as pd
 
-ALIGNMENT_PROTOCOL = "same_entity_v3"
+ALIGNMENT_PROTOCOL = "same_entity_v5"
 
 HEADER_ALIGN_PROMPT = """Your task is to align two vocabularies of table column headers: response-table labels and the required reference schema. Column headers describe fields, not the identity of named entities.
 
@@ -179,22 +179,33 @@ def _batches(values: list[Any], batch_size: int, max_chars: int) -> Iterator[tup
 
 
 def _align(response: list[str], reference: list[str], judge: Judge, batch_size: int, max_chars: int, *, column_headers: bool = False) -> dict:
-    mapping = {}
+    # Vocabulary multiplicity does not change identity. Preserve each original
+    # string's first position rather than sorting or normalizing values.
+    response = list(dict.fromkeys(response))
+    reference = list(dict.fromkeys(reference))
+    # Exact matches already have a mandatory deterministic answer. Do not ask
+    # the judge to generate them, or allow a later response to overwrite them.
+    mapping = {value: value for value in response if value in reference}
+    unmatched = [value for value in response if value not in mapping]
     context = (
         "Column headers: align equivalent field meanings. These are schema labels, not named entities."
         if column_headers else
         "Entity values: align names only when they denote the same specific entity. These are not column headers."
     )
-    for _, batch in _batches(response, batch_size, max_chars):
+    for _, batch in _batches(unmatched, batch_size, max_chars):
         # Every response batch sees the FULL reference vocabulary. Splitting
         # the reference could change the entity matching problem.
         prompt = HEADER_ALIGN_PROMPT if column_headers else ALIGN_PROMPT
         result = _judge_json(judge, prompt.format(response=batch, reference=reference, context=context))
-        if any(not isinstance(value, str) or (value not in reference and value != key) for key, value in result.items()):
-            raise JudgeError("WideSearch alignment returned an unknown reference")
-        mapping.update({key: value for key, value in result.items() if key in batch})
-        # Exact identity is deterministic and must not be rewritten by a judge.
-        mapping.update({value: value for value in batch if value in reference})
+        for key, value in result.items():
+            # Explicit null/empty abstentions do not assert an identity. An
+            # empty string that is an actual reference value remains valid.
+            if value is None or (value == "" and "" not in reference):
+                continue
+            if not isinstance(value, str) or value not in reference:
+                raise JudgeError("WideSearch alignment returned an unknown reference")
+            if key in batch:
+                mapping[key] = value
     return mapping
 
 

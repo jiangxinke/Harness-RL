@@ -152,8 +152,9 @@ either source checkpoint; factor interpolation is not equivalent to a linear
 interpolation of effective model functions. Factors 0.25 and 0.5 give independent
 web row F1 0.650400 and 0.532705, respectively, below step 32; neither is promoted.
 
-The final selection rule is fixed before official testing: require independent
-web row F1 at least 0.78 with auto-read off and complete CUAD validation micro F1
+The final selection rule is fixed before testing the selected policy: require
+independent web row F1 at least 0.78 with auto-read off and complete CUAD
+validation micro F1
 at least 0.4251668255, then maximize CUAD AUPR among eligible trained policies,
 breaking ties by micro F1. Round-2 step 32 is the existing eligible fallback.
 This balances extraction and web behavior, rather than selecting on one task
@@ -297,6 +298,27 @@ predictions; the original scoring files are retained separately. These are
 scoring corrections based on artificial examples, not policy selection or
 tuning against official test answers.
 
+The first formal v3 pass is held because three tasks return judge errors;
+no semantic aggregate from that pass is accepted. Frozen diagnostic replays
+show one empty-string mapping for unmatched entities and two malformed JSON
+objects that repeat exact identity keys until the completion limit. Revision
+`same_entity_v5` addresses these execution failures without changing the v3
+header, entity or cell prompts, or the numeric metric calculation. It stably
+deduplicates the original vocabulary strings, resolves mandatory exact matches
+before calling the judge, and sends only unmatched origins with the complete
+deduplicated reference vocabulary. Null or empty-string values are treated as
+explicit abstentions; an empty string that is a real reference value remains
+a valid target. Other unknown or non-string targets still fail explicitly.
+
+V5 requires a new source freeze, the same 39 development cases with unchanged
+expected results, and a uniform rerun of all 200 saved predictions. The trace
+separates deterministic exact anchors, actual model mappings and effective
+production mappings; a skipped model call is not counted as a raw model success.
+The earlier v3 acceptance and failed pass remain historical evidence, and v5
+acceptance is recorded separately before its formal scoring run. These changes
+do not alter policy weights, selected checkpoint, generated answers or test
+denominators. The v5 GPU calibration and final semantic scoring are pending.
+
 ## Checks, reproduction and artifacts
 
 The `45a0857f` checkpoint passed 494 CPU regression checks with two optional
@@ -324,13 +346,16 @@ budget 4,096, without judge failures. CPU planning checks all 200 official
 WideSearch references using the real tokenizer: 200 header, 285 entity-alignment
 and 1,168 cell prompts. The longest reference prompt has 9,384 tokens; adding
 8,192 prediction tokens and 4,096 completion tokens totals 21,672, below the
-65,536 limit. A synthetic-only BF16 pressure run also completes the full planned worst-case
-budget on one GPU: 17,576 input tokens plus exactly 4,096 generated tokens,
+65,536 limit. These counts use an earlier prompt revision and are historical
+planning, not a token audit of every final judge call. A synthetic-only BF16
+pressure run also completes that planned synthetic length on one GPU: 17,576
+input tokens plus exactly 4,096 generated tokens,
 batch size one, adapter disabled and truncation disabled. All 4,096 output-logit
 checks are finite; peak allocated/reserved memory is 61.0/61.7 GiB. Generation
 takes 267.0 seconds, or 287.0 seconds including setup, without OOM. The input
-contains no official task or reference. These are runtime/capacity checks, not
-benchmark scores.
+contains no official task or reference. It validates this synthetic length,
+not every final prompt. These are runtime/capacity checks, not benchmark
+scores.
 
 The completed official CUAD run passes 30 additional CPU audit checks: all
 4,182 unique test IDs appear exactly once on the expected shards, frozen

@@ -46,7 +46,7 @@ def test_judge_failures_make_report_incomplete_and_have_no_fabricated_score():
 
     report = evaluate_results(
         [wide("a")],
-        [{"task_id": "a", "answer": [{"name": "alpha"}], "status": "completed"}],
+        [{"task_id": "a", "answer": [{"name": "alpha alias"}], "status": "completed"}],
         judge=judge,
     )
     assert report["widesearch"]["judge_failures"] == 1

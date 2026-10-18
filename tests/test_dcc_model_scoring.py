@@ -373,7 +373,7 @@ def test_judge_failures_remain_explicit_and_can_be_rejudged(failure):
         "evaluation": {"required": ["name"], "unique_columns": ["name"],
                        "eval_pipeline": {"name": {"metric": ["exact_match"]}}},
     })
-    prediction = {"task_id": task.id, "status": "completed", "answer": [{"name": "alpha"}]}
+    prediction = {"task_id": task.id, "status": "completed", "answer": [{"name": "alpha alias"}]}
     fail = True
 
     def judge(prompt):
@@ -383,7 +383,7 @@ def test_judge_failures_remain_explicit_and_can_be_rejudged(failure):
             if failure == "context":
                 raise ValueError("Judge input exceeds its context budget; refusing to truncate evidence")
             return "invalid JSON"
-        return {"alpha": "alpha"}
+        return {"alpha alias": "alpha"}
 
     failed = evaluate_results([task], [prediction], judge=judge)
     assert not failed["complete"]

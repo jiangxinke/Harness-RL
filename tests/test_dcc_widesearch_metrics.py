@@ -126,16 +126,15 @@ def test_native_citation_metadata_is_separate_from_answer_columns():
     )
 
 
-def test_judge_may_leave_unmatched_entities_unchanged():
+def test_unknown_nonreference_self_mapping_is_rejected():
     def judge(prompt):
         return {"unmatched": "unmatched"}
 
     row = {"name": "alpha", "year": "2000", "description": "first"}
-    result = evaluate_widesearch(
-        [{**row, "name": "unmatched"}], [row], configuration(), judge=judge
-    )
-    assert result["score"] == 0
-    assert result["matched_rows"] == 0
+    with pytest.raises(JudgeError, match="unknown reference"):
+        evaluate_widesearch(
+            [{**row, "name": "unmatched"}], [row], configuration(), judge=judge
+        )
 
 
 def test_judge_batches_keep_full_reference_and_global_cell_indices():
@@ -159,7 +158,7 @@ def test_judge_batches_keep_full_reference_and_global_cell_indices():
             )
             assert len(reference) == 70
             alignment_sizes.append(len(values))
-            return {value: value for value in values}
+            return {value: value.replace("alias", "entity") for value in values}
         pairs = ast.literal_eval(
             prompt.split("====== response-start ======\n", 1)[1].split(
                 "\n====== response-end", 1
@@ -168,7 +167,8 @@ def test_judge_batches_keep_full_reference_and_global_cell_indices():
         cell_indices.append(list(pairs))
         return {key: 1 for key in pairs}
 
-    result = evaluate_widesearch(rows, rows, configuration(), judge=judge)
+    predictions = [{**row, "name": row["name"].replace("entity", "alias")} for row in rows]
+    result = evaluate_widesearch(predictions, rows, configuration(), judge=judge)
     assert alignment_sizes == [32, 32, 6]
     assert [len(batch) for batch in cell_indices] == [32, 32, 6]
     assert [key for batch in cell_indices for key in batch] == [
@@ -237,6 +237,69 @@ def test_exact_entity_identity_cannot_be_rewritten_or_omitted_by_judge(judgment)
     from slime_plugins.dcc.widesearch_metrics import _align
 
     assert _align(["alpha"], ["alpha", "beta"], lambda prompt: judgment, 32, 32000) == {"alpha": "alpha"}
+
+
+@pytest.mark.parametrize("column_headers", [False, True])
+def test_duplicate_exact_vocabulary_never_calls_judge(column_headers):
+    from slime_plugins.dcc.widesearch_metrics import _align
+
+    def judge(prompt):
+        pytest.fail("Exact identity must be resolved before any judge call")
+
+    assert _align(["beta", "alpha", "beta"], ["alpha", "beta", "alpha"], judge, 1, 1, column_headers=column_headers) == {"beta": "beta", "alpha": "alpha"}
+
+
+def test_partial_exact_alignment_stably_deduplicates_and_keeps_full_reference():
+    from slime_plugins.dcc.widesearch_metrics import _align
+
+    calls = []
+
+    def judge(prompt):
+        values = ast.literal_eval(prompt.split("The vocabulary to be aligned is as follows:\n", 1)[1].split("\n\nThe reference vocabulary", 1)[0])
+        reference = ast.literal_eval(prompt.split("The reference vocabulary is as follows:\n", 1)[1].split("\n\nThe alignment rules", 1)[0])
+        calls.append((values, reference))
+        targets = {"Alias A": "beta", "Alias B": "gamma", "Alias C": "zeta"}
+        # A valid but conflicting extra key must not overwrite the exact anchor.
+        return {"alpha": "beta", **{value: targets[value] for value in values}}
+
+    mapping = _align(["alpha", "Alias A", "Alias A", "Alias B", "alpha", "Alias C"], ["alpha", "beta", "beta", "gamma", "zeta"], judge, 2, 32000)
+    assert mapping == {"alpha": "alpha", "Alias A": "beta", "Alias B": "gamma", "Alias C": "zeta"}
+    assert calls == [(["Alias A", "Alias B"], ["alpha", "beta", "gamma", "zeta"]), (["Alias C"], ["alpha", "beta", "gamma", "zeta"])]
+
+
+@pytest.mark.parametrize("abstention", [None, ""])
+def test_explicit_alignment_abstention_does_not_create_matches(abstention):
+    from slime_plugins.dcc.widesearch_metrics import _align
+
+    assert _align(["Pine Astronomy Station"], ["Elm Astronomy Station"], lambda prompt: {"Pine Astronomy Station": abstention}, 32, 32000) == {}
+    row = {"name": "Elm Astronomy Station", "year": "2000", "description": "same"}
+    result = evaluate_widesearch([{**row, "name": "Pine Astronomy Station"}], [row], configuration(), judge=lambda prompt: {"Pine Astronomy Station": abstention})
+    assert result["matched_rows"] == result["f1_by_row"] == result["f1_by_item"] == 0
+
+
+@pytest.mark.parametrize("invalid", ["unknown", "origin", 0, False, [], {}])
+def test_unknown_nonempty_or_nonstring_alignment_values_still_fail(invalid):
+    from slime_plugins.dcc.widesearch_metrics import _align
+
+    with pytest.raises(JudgeError, match="unknown reference"):
+        _align(["origin"], ["target"], lambda prompt: {"origin": invalid}, 32, 32000)
+
+
+def test_empty_string_reference_remains_a_legal_target_and_exact_anchor():
+    from slime_plugins.dcc.widesearch_metrics import _align
+
+    calls = []
+
+    def judge(prompt):
+        calls.append(prompt)
+        return {"empty alias": "", "": "target"}
+
+    assert _align(["empty alias", "", ""], ["", "target", ""], judge, 32, 32000) == {"": "", "empty alias": ""}
+    assert len(calls) == 1
+    values = ast.literal_eval(calls[0].split("The vocabulary to be aligned is as follows:\n", 1)[1].split("\n\nThe reference vocabulary", 1)[0])
+    reference = ast.literal_eval(calls[0].split("The reference vocabulary is as follows:\n", 1)[1].split("\n\nThe alignment rules", 1)[0])
+    assert values == ["empty alias"]
+    assert reference == ["", "target"]
 
 
 def test_header_and_entity_alignment_have_distinct_contexts():
