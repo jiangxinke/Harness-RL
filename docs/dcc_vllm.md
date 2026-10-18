@@ -92,17 +92,29 @@ each candidate. Invoke this command once for each assigned worker, with
 `SHARD_COUNT=8` and `SHARD_INDEX` from 0 through 7 for eight independent engines:
 
 ```bash
-for BENCHMARK in cuad widesearch; do
-  if [ "$BENCHMARK" = cuad ]; then TASKS="$CUAD_TEST"; else TASKS="$WIDE_TEST"; fi
-  RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 CUDA_VISIBLE_DEVICES="$WORKER_GPU" \
-    "$VLLM_ENV/bin/python" scripts/dcc_model_evaluate.py \
-    --model "$MODEL" --model-name "$MODEL_NAME" --adapter "$ADAPTER" \
-    --inference-backend vllm --quantization none \
-    --eval-shard-index "$SHARD_INDEX" --eval-num-shards "$SHARD_COUNT" \
-    --data "$TASKS" --output-dir "$EVAL_ROOT/$BENCHMARK" \
-    --max-steps 6 --max-new-tokens 8192 --max-prompt-tokens 16384 \
-    --initial-chunks 4 --batch-size 8 --seed 42 --timeout 1800
-done
+SHARD_COUNT=8
+RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 CUDA_VISIBLE_DEVICES="$WORKER_GPU" \
+  "$VLLM_ENV/bin/python" scripts/dcc_model_evaluate.py \
+  --model "$MODEL" --model-name "$MODEL_NAME" --adapter "$ADAPTER" \
+  --inference-backend vllm --quantization none \
+  --eval-shard-index "$SHARD_INDEX" --eval-num-shards "$SHARD_COUNT" \
+  --vllm-tensor-parallel-size 1 --vllm-memory-utilization 0.88 \
+  --vllm-batched-tokens 8192 --seed 42 \
+  --data "$CUAD_TEST" --output-dir "$EVAL_ROOT/cuad" \
+  --retrieval-profile "$RETRIEVAL_PROFILE" --initial-chunks 8 \
+  --max-steps 3 --max-new-tokens 1024 --max-prompt-tokens 8192 \
+  --batch-size 8 --timeout 1800
+
+RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 CUDA_VISIBLE_DEVICES="$WORKER_GPU" \
+  "$VLLM_ENV/bin/python" scripts/dcc_model_evaluate.py \
+  --model "$MODEL" --model-name "$MODEL_NAME" --adapter "$ADAPTER" \
+  --inference-backend vllm --quantization none \
+  --eval-shard-index "$SHARD_INDEX" --eval-num-shards "$SHARD_COUNT" \
+  --vllm-tensor-parallel-size 1 --vllm-memory-utilization 0.88 \
+  --vllm-batched-tokens 8192 --seed 42 \
+  --data "$WIDE_TEST" --output-dir "$EVAL_ROOT/widesearch" \
+  --auto-read-sources 0 --max-steps 12 --max-new-tokens 8192 \
+  --max-prompt-tokens 16384 --batch-size 4 --timeout 1800
 ```
 
 Do not partition the input files before invoking the workers: logical task
@@ -129,15 +141,17 @@ completion metadata cannot provide the newer strict logical-shard audit.
 
 For an optional frozen HF judge, run the following after strict scoring, using
 a separate HF environment and explicitly assigned judge GPUs. The judge loads
-the base model without the trained adapter. `JUDGE_WORKERS` must match the
-number of visible judge GPUs. Neither judging nor merging takes logical shard
-options:
+the base model without the trained adapter. `JUDGE_PROCESSES` must match the
+number of visible judge GPUs; `--judge-workers 1` serializes requests within
+each process. Neither judging nor merging takes logical shard options:
 
 ```bash
 CUDA_VISIBLE_DEVICES="$JUDGE_GPUS" "$HF_ENV/bin/python" -m torch.distributed.run \
-  --standalone --nproc-per-node "$JUDGE_WORKERS" scripts/dcc_model_evaluate.py \
+  --standalone --nproc-per-node "$JUDGE_PROCESSES" scripts/dcc_model_evaluate.py \
   --model "$MODEL" --model-name "$MODEL_NAME" --score-only --local-judge \
   --judge-name "$MODEL_NAME" --quantization none \
+  --judge-batch-size 1 --judge-workers 1 --judge-context 65536 \
+  --judge-tokens 4096 --judge-batch-tokens 69632 \
   --data "$WIDE_TEST" --output-dir "$EVAL_ROOT/widesearch"
 CUDA_VISIBLE_DEVICES='' RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 \
   "$CPU_ENV/bin/python" scripts/dcc_model_evaluate.py \
@@ -154,6 +168,29 @@ Report `status_counts`, `complete`, WideSearch `metric_denominator` and
 within the full task denominator. Infrastructure errors make `complete=false`;
 judge errors are listed explicitly, excluded from the judge metric denominator,
 and also make the report incomplete.
+
+Each judge shard records its frozen model, adapter absence, quantization,
+context and completion budgets, request batching, truncation policy and runtime
+versions in `judge_configuration`. Merge checks that these configurations agree
+across shards and match the selected judge. It also checks generation manifest
+and inference runtime provenance against the saved predictions, along with
+complete and unique task coverage. Legacy reports without judge configuration
+or generation provenance remain readable; `judge_configuration_complete` is
+false if any shard lacks its configuration. Configurations that are present
+must still agree, including in a mixed legacy/new merge.
+
+A failed judge shard must be rerun with its original rank and world size and
+the same data, output directory and judge configuration. This re-evaluates the
+whole judge shard and replaces that rank's report; judging does not resume
+individual tasks, and `--retry-infrastructure` applies only to generation. For
+one-rank recovery, launch Python directly with the original `RANK` and
+`WORLD_SIZE`, `LOCAL_RANK=0` and one visible GPU. A one-process `torchrun` would
+change the world size and task assignment. If the judge context, quantization
+or other recorded settings change, use a fresh judge output and recompute all
+judge shards with the same configuration. Retain every full gold reference;
+reduce response batches or increase the context if needed rather than clipping
+reference vocabularies. Context planning must reserve both the response text
+inside the judge prompt and the judge's completion budget.
 
 Set GPU visibility before creating an engine. Guard standalone launchers with
 `if __name__ == "__main__":` so worker subprocesses cannot rerun the launcher.
