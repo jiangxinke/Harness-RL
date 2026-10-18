@@ -179,8 +179,16 @@ or generation provenance remain readable; `judge_configuration_complete` is
 false if any shard lacks its configuration. Configurations that are present
 must still agree, including in a mixed legacy/new merge.
 
-A failed judge shard must be rerun with its original rank and world size and
-the same data, output directory and judge configuration. This re-evaluates the
+For uneven answer sizes, `--judge-scheduling balanced` optionally assigns
+saved answer tables using a deterministic size-based schedule after validating
+the original generation ownership. Pass the same option to every local-judge
+worker and the merge command. This changes judge task ownership only;
+generation files and original generation ranks remain intact. The default
+is `round_robin`. Use a fresh scoring directory when changing the strategy.
+
+A failed judge shard must be rerun with its original judge rank, world size,
+scheduling strategy and the same data, output directory and judge
+configuration. This re-evaluates the
 whole judge shard and replaces that rank's report; judging does not resume
 individual tasks, and `--retry-infrastructure` applies only to generation. For
 one-rank recovery, launch Python directly with the original `RANK` and

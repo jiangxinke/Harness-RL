@@ -280,7 +280,7 @@ require abstention. Entity identity and cell prompts are unchanged from v2.
 V3 gives correct end-to-end scores on all 39 synthetic cases, but one of the
 12 new header cases still violates its raw ambiguity-abstention assertion;
 the schema guard rejects that table, so the violation does not create a false
-positive score. V4 tried independent per-origin candidate checks with a brief
+positive score. V4 tried independent per-origin header candidate checks with a brief
 analysis before the final JSON. Although its 12 header cases pass, it misses
 the compatible `location` to `city` mapping in two other cases, leaving only
 37/39 correct end-to-end scores. V4 is rejected. The initial formal scorer
@@ -369,7 +369,18 @@ forbids candidates from supplying missing distinguishing qualifiers, and
 separately recognizes established cross-language names as positive identity
 evidence. Examples use fictional names rather than fixture-specific entities.
 The same 39 original, 46 mapping and 73 pair-verifier development cases and
-acceptance thresholds remain frozen. V7 GPU calibration and final semantic
+acceptance thresholds remain frozen. V7 restores 39/39 original final metrics,
+but is also rejected: final mappings remain 43/46 and isolated pairs improve
+to 70/73. It still defaults to particular works or event occurrences for some
+underspecified names and rejects one known qualified event alias. No runtime,
+format or judge errors occur; no formal v7 scoring is launched.
+
+Revision `same_entity_v8` asks each entity stage for at most three short
+sentences checking identity evidence and missing qualifiers before its final
+fenced JSON. The existing parser already supports this format. General rules
+also distinguish a bare recurring-event name from established, qualified event
+aliases. Implementation, schema, numeric scoring, frozen development cases and
+acceptance thresholds remain unchanged. V8 calibration and final semantic
 scoring are pending.
 
 ## Checks, reproduction and artifacts
