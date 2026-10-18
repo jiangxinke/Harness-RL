@@ -113,19 +113,26 @@ must pass before running the held-out tasks.
 
 An initial independent preflight exposed premature final answers without any
 search or page read, including unsupported URLs. The WideSearch-only
-`search-fetch-citations-v1` guard now requires a successful search with source
+`search-fetch-citations-ndjson-v2` guard requires a successful search with source
 URLs and a successful nonempty page read before accepting a final answer.
 Every returned row must cite an observed source URL. Rejected finals receive
 explicit corrective feedback within the original turn budget; exhausted guards
 are model failures scored as zero, not infrastructure exclusions. CUAD behavior
 is unchanged. A fresh output directory and manifest version prevent mixing
 these predictions with the initial failed preflight.
-With the guard, the first four-turn GPU preflight completed six of eight
-independent tasks with successful searches, page reads, and valid citations.
-Two tasks exhausted their budget after premature finals or multiple action
-objects in one response; there were no infrastructure or generation-length
-failures. An independent six-turn rerun is in progress. The full benchmark's
-fixed budget remains 12 turns.
+The guard also accepts a complete terminal payload containing one JSON answer
+row per line, with or without a single surrounding JSON code fence. Mixed tool
+actions, incomplete rows, or surrounding prose do not trigger this fallback.
+The normal answer schema and citation checks still apply.
+
+Short-budget independent preflights completed six of eight tasks at four and
+six turns, exposing recoverable answer-format and blocked-page failures. At
+the fixed 12-turn benchmark budget, all eight independent English/Chinese
+tasks completed with successful searches, page reads, and valid citations,
+with zero infrastructure failures. The final versioned NDJSON preflight also
+completed all eight tasks with valid evidence and citations, zero infrastructure
+failures, and the same 12-turn budget. It used 191,767 prompt tokens and 3,532
+completion tokens. Preflight tasks are not drawn from the official benchmark.
 
 The WideSearch report will include a deterministic strict proxy and the official
 metric pipeline with a **custom frozen base-Qwen judge**. This is not the
@@ -144,9 +151,9 @@ from the repository.
 Within the configured artifact root, the selected adapter is
 `dcc-run/training-raw/final`; the initial adapter is `dcc-run/training/final`.
 Validation predictions are in `dcc-run/dev82-v2-baseline` and
-`dcc-run/dev82-v2-trained`. Planned full-test outputs are `dcc-run/cuad-final`
-and `dcc-run/widesearch-final`.
+`dcc-run/dev82-v2-trained`. Full CUAD outputs are in `dcc-run/cuad-final`;
+full WideSearch outputs will be in `dcc-run/widesearch-final`.
 
-The code revision preceding this report passed 343 CPU regression checks with
+The code revision preceding this report passed 359 CPU regression checks with
 one optional real-tokenizer check skipped. This includes real tiny-Qwen3MoE
 generation/log-probability parity checks and retained Harness-RL/OLE tests.
