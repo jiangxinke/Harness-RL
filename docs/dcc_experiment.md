@@ -353,7 +353,24 @@ negative, six ambiguous) plus 73 separate pair-verifier cases before GPU
 results. These supplement the original 39 cases and retain separate
 denominators. Using the same frozen model for both stages can produce
 correlated errors; a second call alone does not establish judge accuracy.
-V6 GPU calibration and final semantic scoring are pending.
+The v6 GPU calibration is rejected under its frozen gate: original final
+metrics pass 38/39, new final mappings 43/46, and independent pair verdicts
+66/73. All 20 positive and 20 hard-negative mapping cases pass, but three
+underspecified names incorrectly match specific locations, adaptations or
+event occurrences; seven isolated ambiguous pairs also return YES. A known
+cross-language organization name is incorrectly rejected. There are no
+runtime, format or judge errors, and all checked logits are finite. An
+independent CPU replay verifies all 158 cases without changing that rejection.
+No formal v6 scoring is launched.
+
+Revision `same_entity_v7` retains the two-stage implementation and strengthens
+only the entity prompts. It first checks what the origin itself identifies,
+forbids candidates from supplying missing distinguishing qualifiers, and
+separately recognizes established cross-language names as positive identity
+evidence. Examples use fictional names rather than fixture-specific entities.
+The same 39 original, 46 mapping and 73 pair-verifier development cases and
+acceptance thresholds remain frozen. V7 GPU calibration and final semantic
+scoring are pending.
 
 ## Checks, reproduction and artifacts
 
