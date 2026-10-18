@@ -68,8 +68,14 @@ torchrun --standalone --nproc-per-node="$WORKERS" scripts/dcc_model_evaluate.py 
 torchrun --standalone --nproc-per-node="$WORKERS" scripts/dcc_model_evaluate.py \
   --model "$MODEL_CACHE" --adapter "$RUN_ROOT/training/final" \
   --data "$DATA_ROOT/widesearch/test.jsonl" --output-dir "$RUN_ROOT/widesearch" \
-  --max-steps 12 --max-new-tokens 8192 --max-prompt-tokens 16384 --batch-size 4
+  --max-steps 12 --max-new-tokens 8192 --max-prompt-tokens 16384 --batch-size 1
 ```
+
+Long-prompt MoE prefill can require much more memory than decoding. Start
+WideSearch with a per-worker batch size of one and increase concurrency only
+after measuring memory use. An out-of-memory error aborts the run rather than
+becoming a model score; lower the batch size and resume with unchanged semantic
+budgets. Apply the same caution to local judge batching.
 
 The evaluator resumes saved task IDs and rejects changed generation settings
 in the same directory. Use different directories for base and trained policies.

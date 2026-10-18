@@ -106,7 +106,11 @@ recall, and additional micro precision, recall, and F1. Correctly predicting an
 empty answer earns training reward but does not create an official true positive.
 
 WideSearch uses 12 model turns, 16,384 prompt tokens, and 8,192 completion
-tokens per turn. The default `public_web` provider tries DuckDuckGo, Seznam
+tokens per turn, with one active generation request per worker. An initial
+four-request batch exceeded memory during MoE prefill before any prediction
+was saved. The run resumed at batch size one with unchanged model, adapter,
+seed, and per-task budgets; that runtime failure contributes no model zeros.
+The default `public_web` provider tries DuckDuckGo, Seznam
 for non-Chinese queries, Baidu mobile, and Wikipedia; actual backend coverage
 is recorded with predictions. An independent English/Chinese tool preflight
 must pass before running the held-out tasks.
