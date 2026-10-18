@@ -249,6 +249,13 @@ and 1,168 cell prompts. The longest reference prompt has 9,384 tokens; adding
 8,192 prediction tokens and 4,096 completion tokens totals 21,672, below the
 65,536 limit. These are runtime/capacity checks, not benchmark scores.
 
+The completed official CUAD run passes 30 additional CPU audit checks: all
+4,182 unique test IDs appear exactly once on the expected shards, frozen
+selection/runtime provenance agrees, and independently recomputed aggregate
+and per-task metrics match the final report. There are 902 true-positive,
+729 false-positive and 1,741 false-negative answer spans. The three exhausted
+budgets remain in the evaluation population with empty answers.
+
 See [dcc.md](dcc.md), [dcc_training.md](dcc_training.md),
 [dcc_tool_training.md](dcc_tool_training.md), [dcc_vllm.md](dcc_vllm.md) and
 [dcc_runtime_setup.md](dcc_runtime_setup.md) for portable installation, data,
@@ -266,3 +273,7 @@ Artifact paths relative to that root include `dcc-run/training/final`,
 `dcc-run/cuad-final-selected` and `dcc-run/widesearch-final-selected` directories.
 CUAD scores are in `dcc-run/cuad-final-selected/scores_strict.json`. WideSearch
 scores will be recorded after full generation and judging finish.
+
+Final CUAD coverage and scoring audits are retained under
+`dcc-run/scoring-audit/final-cuad-score-audit.json` and
+`dcc-run/scoring-audit/final-selection-runtime-audit.json`.
