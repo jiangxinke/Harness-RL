@@ -156,7 +156,9 @@ def _adapter_metadata(adapter):
     weights = path / "adapter_model.safetensors"
     if not weights.is_file():
         raise ValueError("A local adapter_model.safetensors checkpoint is required")
-    return {"path": str(path.resolve()), "config": config,
+    # Keep the caller's symlink location while making worker paths independent
+    # of their current directory. Do not expose a mount's physical target.
+    return {"path": str(path.absolute()), "config": config,
             "weights_file": weights.name, "weights_bytes": weights.stat().st_size,
             "weights_mtime_ns": weights.stat().st_mtime_ns}
 

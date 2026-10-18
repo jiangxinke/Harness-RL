@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -213,7 +214,8 @@ def test_unsupported_adapter_is_rejected_before_loading_an_engine(tmp_path, chan
         _adapter_metadata(adapter_checkpoint(tmp_path, **change))
 
 
-def test_loader_preserves_versions_revision_adapter_and_memory_provenance(runtime, monkeypatch, tmp_path):
+@pytest.mark.parametrize("relative_symlink", [False, True])
+def test_loader_preserves_versions_revision_adapter_and_memory_provenance(runtime, monkeypatch, tmp_path, relative_symlink):
     import transformers
 
     tokenizer = Tokenizer()
@@ -221,8 +223,15 @@ def test_loader_preserves_versions_revision_adapter_and_memory_provenance(runtim
     monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *a, **kw: config)
     monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", lambda *a, **kw: tokenizer)
     monkeypatch.setattr(transformers.GenerationConfig, "from_pretrained", lambda *a, **kw: SimpleNamespace(eos_token_id=[1, 2]))
-    adapter_checkpoint(tmp_path)
-    policy = load_vllm_policy("model-id", adapter=str(tmp_path), revision="model-revision",
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    adapter_checkpoint(checkpoint)
+    adapter = str(checkpoint)
+    if relative_symlink:
+        (tmp_path / "checkpoint-link").symlink_to(checkpoint, target_is_directory=True)
+        monkeypatch.chdir(tmp_path)
+        adapter = "checkpoint-link"
+    policy = load_vllm_policy("model-id", adapter=adapter, revision="model-revision",
                              tokenizer_revision="tokenizer-revision", seed=11, batch_size=4,
                              max_prompt_tokens=8192, max_model_len=12288, enforce_eager=True)
     args = policy.model.kwargs
@@ -237,7 +246,11 @@ def test_loader_preserves_versions_revision_adapter_and_memory_provenance(runtim
     assert policy.provenance["resolved_config_revision"] == "resolved-model-revision"
     assert policy.provenance["seed"] == 11 and policy.eos_token_ids == [1, 2]
     assert policy.provenance["lora_dtype"] == "auto (bfloat16)"
-    assert policy.lora_request == ("dcc", 1, str(tmp_path.resolve()))
+    expected_path = str(Path(adapter).absolute())
+    assert policy.lora_request == ("dcc", 1, expected_path)
+    assert policy.provenance["adapter"]["path"] == expected_path
+    if relative_symlink:
+        assert expected_path != str(checkpoint)
     json.dumps(policy.provenance, allow_nan=False)
 
 
