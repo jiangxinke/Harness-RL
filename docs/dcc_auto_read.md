@@ -3,6 +3,9 @@
 `EpisodeRunner(auto_read_sources=1)` lets a WideSearch agent read actual source
 pages during the same model turn as its search. The default is `0` (disabled);
 supported values are `0`, `1`, and `2`. CUAD behavior is unchanged.
+The local evaluation and RL entry points expose the same switch through
+`--auto-read-sources 1`. Evaluation manifests reject resuming predictions with
+a changed setting; use separate directories for comparisons.
 
 After a successful nonterminal `web_search`, the runner visits returned HTTP(S)
 URLs in result order and calls the real `fetch_url(url, start=0)` for at most the

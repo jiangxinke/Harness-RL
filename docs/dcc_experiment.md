@@ -171,6 +171,20 @@ enters this curriculum. See [dcc_web_curriculum.md](dcc_web_curriculum.md).
 Candidate training and policy validation remain in progress; the full-test
 scores above continue to identify the original selected adapter.
 
+Grounded CUAD tool teachers add 128 training episodes from 38 clause categories,
+yielding 384 search/read/final segments. All 558 web and CUAD teacher segments
+passed source and encoded-context checks with no skipped tool records. Queries
+use public question/profile terms; document reads start at actual search hits.
+Training labels select successful teaching plans but never enter evaluation
+prompts or select evaluation sources.
+
+Matched two-step mixed LoRA trials completed with finite, nonzero gradients and
+saved adapters in both runtimes. NF4 took 86.51 and 85.75 seconds per step;
+BF16 took 4.97 and 4.63 seconds, with a measured 58.52 GiB allocation peak.
+The next 24-step candidate therefore uses BF16, with checkpoints at steps 12
+and 24. NF4 remains available when frozen weights do not fit. These trials
+establish execution and memory behavior, not final task quality.
+
 ## Reproduction and artifacts
 
 See [dcc.md](dcc.md) and [dcc_training.md](dcc_training.md) for portable
@@ -185,6 +199,6 @@ Validation predictions are in `dcc-run/dev82-v2-baseline` and
 `dcc-run/dev82-v2-trained`. Full CUAD outputs are in `dcc-run/cuad-final`;
 full WideSearch outputs will be in `dcc-run/widesearch-final`.
 
-The code revision preceding this report passed 359 CPU regression checks with
-one optional real-tokenizer check skipped. This includes real tiny-Qwen3MoE
+The current code passed 449 CPU regression checks with two optional runtime
+checks skipped. This includes real tiny-Qwen3MoE
 generation/log-probability parity checks and retained Harness-RL/OLE tests.

@@ -73,6 +73,9 @@ async def evaluate(args):
         manifest["search_backend"] = WebTools().backend
         manifest["search_endpoint"] = os.environ.get("DCC_SEARCH_URL")
         manifest["evidence_guard_version"] = WIDESEARCH_EVIDENCE_GUARD_VERSION
+        auto_read_sources = getattr(args, "auto_read_sources", 0)
+        if auto_read_sources:
+            manifest["auto_read_sources"] = auto_read_sources
     manifest_path = output / f"manifest_rank{rank}.json"
     if manifest_path.exists() and json.loads(manifest_path.read_text()) != manifest:
         raise ValueError("Evaluation configuration changed; use a new output directory")
@@ -114,6 +117,7 @@ async def evaluate(args):
             initial_chunks=args.initial_chunks,
             timeout_seconds=args.timeout,
             retrieval_profile=retrieval_profile,
+            auto_read_sources=getattr(args, "auto_read_sources", 0),
         )
         semaphore = asyncio.Semaphore(args.batch_size * 2)
         stream = file.open("a", buffering=1)
@@ -319,6 +323,7 @@ def main():
     parser.add_argument("--adapter")
     parser.add_argument("--quantization", choices=("none", "nf4"), default="none")
     parser.add_argument("--retrieval-profile")
+    parser.add_argument("--auto-read-sources", type=int, choices=(0, 1, 2), default=0)
     parser.add_argument("--data", nargs="+", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--batch-size", type=int, default=4)

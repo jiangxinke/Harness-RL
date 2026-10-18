@@ -223,6 +223,11 @@ def test_private_manifest_versions_only_widesearch_without_loading_gpu_model(mon
         manifest_path.write_text(json.dumps(manifest))
         with pytest.raises(ValueError, match="configuration changed"):
             asyncio.run(evaluate(args))
+        manifest["evidence_guard_version"] = WIDESEARCH_EVIDENCE_GUARD_VERSION
+        manifest_path.write_text(json.dumps(manifest))
+        args.auto_read_sources = 1
+        with pytest.raises(ValueError, match="configuration changed"):
+            asyncio.run(evaluate(args))
     else:
         assert "evidence_guard_version" not in manifest
         assert "search_backend" not in manifest

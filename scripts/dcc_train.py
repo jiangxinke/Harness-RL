@@ -139,6 +139,7 @@ async def train(args):
         initial_chunks=args.initial_chunks,
         temperature=1.0,
         retrieval_profile=load_retrieval_profile(args.retrieval_profile),
+        auto_read_sources=getattr(args, "auto_read_sources", 0),
     )
     policy = HFPolicy(
         model,
@@ -324,6 +325,7 @@ def main():
     parser.add_argument("--lora-rank", type=int, default=8)
     parser.add_argument("--quantization", choices=("none", "nf4"), default="none")
     parser.add_argument("--retrieval-profile")
+    parser.add_argument("--auto-read-sources", type=int, choices=(0, 1, 2), default=0)
     parser.add_argument("--learning-rate", type=float, default=2e-5)
     parser.add_argument("--sft-coefficient", type=float, default=0.1)
     parser.add_argument("--max-prompt-tokens", type=int, default=4096)
