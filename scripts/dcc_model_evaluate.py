@@ -28,7 +28,7 @@ from slime_plugins.dcc.hf_judge import HFBatchedJudge
 from slime_plugins.dcc.hf_policy import HFPolicy, load_policy_model
 from slime_plugins.dcc.tools import WebTools
 from slime_plugins.dcc.retrieval import load_retrieval_profile
-from slime_plugins.dcc.widesearch_metrics import ALIGNMENT_PROTOCOL
+from slime_plugins.dcc.widesearch_metrics import ALIGNMENT_PROTOCOL, extract_table
 
 
 def _evaluation_shard(args, *, generation):
@@ -86,7 +86,7 @@ def _check_saved_adapter(adapter, runtime):
             raise ValueError("Adapter checkpoint identity changed; use a new output directory")
 
 
-def _score_predictions(output, tasks):
+def _score_predictions(output, tasks, *, require_ownership=False):
     manifests = {int(path.stem.removeprefix("manifest_rank")): json.loads(path.read_text())
                  for path in output.glob("manifest_rank*.json")}
     manifest = next(iter(manifests.values()), {})
@@ -112,9 +112,12 @@ def _score_predictions(output, tasks):
             f"Coverage mismatch: {len(expected - set(saved))} missing, {len(set(saved) - expected)} extra predictions"
         )
     runtime = _saved_runtime(output)
-    if "eval_num_shards" in manifest:
+    if require_ownership and not isinstance(manifest.get("model"), str):
+        raise ValueError("Balanced judge scheduling requires recorded generation model provenance")
+    logical_shards = "eval_num_shards" in manifest
+    if logical_shards or require_ownership:
         output_names = {path.name for path in output.iterdir()}
-        count = manifest["eval_num_shards"]
+        count = manifest.get("eval_num_shards", manifest.get("world_size"))
         if type(count) is not int or count < 1 or manifest.get("world_size") != count or set(manifests) != set(range(count)):
             raise ValueError("Logical shard manifests do not cover the configured world")
         statuses = {"completed", "invalid_answer", "max_steps", "evidence_failure", "infrastructure_error"}
@@ -126,15 +129,76 @@ def _score_predictions(output, tasks):
             if marker.name not in output_names or json.loads(marker.read_text()) != {"tasks": len(assigned), "world_size": count}:
                 raise ValueError(f"Evaluation shard {rank} has no matching completion marker")
             runtime_path = output / (f"inference_runtime_rank{rank}.json" if count > 1 else "inference_runtime.json")
-            if assigned and runtime_path.name not in output_names:
+            if logical_shards and assigned and runtime_path.name not in output_names:
                 raise ValueError(f"Evaluation shard {rank} has no inference runtime record")
         if any(record.get("status") not in statuses for record in saved.values()):
             raise ValueError("Predictions contain a missing or unknown episode status")
-        if runtime is None or runtime.get("backend") != "vllm" or runtime.get("model") != manifest["model"]:
+        if logical_shards and (runtime is None or runtime.get("backend") != "vllm" or runtime.get("model") != manifest["model"]):
             raise ValueError("Inference runtime does not identify the manifest policy")
-        if "adapter_identity" in manifest and runtime.get("adapter") != manifest["adapter_identity"]:
+        if "adapter_identity" in manifest and (runtime is None or runtime.get("adapter") != manifest["adapter_identity"]):
             raise ValueError("Inference runtime adapter differs from its generation manifest")
     return saved, manifest, runtime
+
+
+def _judge_task_schedule(tasks, saved, world, strategy):
+    """Assign scoring work from persisted answers without consulting labels."""
+    if type(world) is not int or world < 1:
+        raise ValueError("Judge scheduling requires a positive shard count")
+    if strategy not in ("round_robin", "balanced"):
+        raise ValueError("Unknown judge scheduling strategy")
+    expected = {task.id for task in tasks}
+    if len(expected) != len(tasks) or not expected <= saved.keys():
+        raise ValueError("Judge scheduling requires unique tasks with saved predictions")
+    if strategy == "round_robin":
+        return [tasks[rank::world] for rank in range(world)], None
+
+    def cost(task):
+        answer = saved[task.id].get("answer")
+        try:
+            table = extract_table(answer)
+        except (TypeError, ValueError):
+            table = None
+        if table is None or table.empty:
+            return 128
+        characters = len(answer) if isinstance(answer, str) else len(json.dumps(answer, ensure_ascii=False))
+        return 128 * (1 + table.shape[0] * table.shape[1]) + characters
+
+    costs = [cost(task) for task in tasks]
+    capacities = [len(tasks) // world + (rank < len(tasks) % world) for rank in range(world)]
+    assigned, loads = [[] for _ in range(world)], [0] * world
+    for index in sorted(range(len(tasks)), key=lambda index: (-costs[index], index)):
+        rank = min((rank for rank in range(world) if len(assigned[rank]) < capacities[rank]), key=lambda rank: (loads[rank], rank))
+        assigned[rank].append(tasks[index])
+        loads[rank] += costs[index]
+    plan = {
+        "version": "answer_lpt_count_cap_v1", "strategy": strategy, "world_size": world,
+        "prediction_only": True, "reference_or_scores_used": False,
+        "cost_formula": "128*(1+table_rows*table_columns)+answer_characters; empty/invalid/no table:128",
+        "tie_breaking": "original task order for equal cost; lowest rank for equal load",
+        "capacities": capacities, "estimated_cost_units_by_rank": loads,
+        "task_ids_by_rank": [[task.id for task in shard] for shard in assigned],
+    }
+    return assigned, plan
+
+
+def _check_judge_schedule(shards, tasks, saved, strategy):
+    """Check the saved scoring assignment without changing generation ownership."""
+    plans = [shard.get("judge_task_schedule") for _, shard in shards]
+    if strategy == "round_robin" and all(plan is None for plan in plans):
+        return None  # Legacy round-robin reports keep their existing behavior.
+    if strategy != "balanced" or not plans or any(not isinstance(plan, dict) for plan in plans):
+        raise ValueError("Judge scheduling differs across shards or merge settings")
+    world = plans[0].get("world_size")
+    assigned, expected_plan = _judge_task_schedule(tasks, saved, world, strategy)
+    if len(shards) != world or {rank for rank, _ in shards} != set(range(world)):
+        raise ValueError("Judge scheduling shards do not cover the configured world")
+    for rank, shard in shards:
+        if shard.get("judge_task_schedule") != expected_plan or type(shard.get("judge_shard_index")) is not int or shard["judge_shard_index"] != rank:
+            raise ValueError("Judge scheduling differs across shards or saved predictions")
+        actual = [record["task_id"] for record in shard["widesearch"]["per_task"]]
+        if actual != [task.id for task in assigned[rank]]:
+            raise ValueError("Judge task ownership differs from its scoring schedule")
+    return expected_plan
 
 
 async def _finish_evaluation(policy, stream, workers, failure):
@@ -170,6 +234,8 @@ async def _finish_evaluation(policy, stream, workers, failure):
 async def evaluate(args):
     import torch
 
+    if getattr(args, "judge_scheduling", "round_robin") != "round_robin":
+        raise ValueError("Balanced judge scheduling requires --score-only with --local-judge or --merge-judge")
     rank = int(os.environ.get("RANK", "0"))
     local = int(os.environ.get("LOCAL_RANK", "0"))
     world = int(os.environ.get("WORLD_SIZE", "1"))
@@ -427,18 +493,22 @@ def score(args):
     if args.limit:
         tasks = tasks[: args.limit]
     output = Path(args.output_dir)
-    saved, generation_manifest, runtime = _score_predictions(output, tasks)
+    scheduling = getattr(args, "judge_scheduling", "round_robin")
+    if scheduling == "balanced" and not (getattr(args, "local_judge", False) or args.merge_judge):
+        raise ValueError("Balanced judge scheduling requires --local-judge or --merge-judge")
+    saved, generation_manifest, runtime = _score_predictions(output, tasks, require_ownership=scheduling == "balanced")
     policy_quantization = _prediction_quantization(output)
     policy_backend = _prediction_setting(output, "inference_backend", "hf")
     if args.merge_judge:
         report = json.loads((output / "scores_strict.json").read_text())
         _check_judge_generation(report, generation_manifest, runtime)
-        records = []
+        records, judge_shards = [], []
         configurations, shard_count = [], 0
         alignment_versions, alignment_legacy_shards = set(), 0
         judge_quantization = getattr(args, "quantization", "none")
         for path in sorted(output.glob("scores_judge_rank*.json")):
             shard = json.loads(path.read_text())
+            judge_shards.append((int(path.stem.removeprefix("scores_judge_rank")), shard))
             shard_count += 1
             _check_judge_generation(shard, generation_manifest, runtime)
             if shard.get("judge_quantization", "none") != judge_quantization:
@@ -474,6 +544,7 @@ def score(args):
             raise ValueError(
                 "Sharded judge reports must cover every WideSearch task exactly once"
             )
+        schedule = _check_judge_schedule(judge_shards, [task for task in tasks if task.benchmark == "widesearch"], saved, scheduling)
         good = [value for value in records if "judge_error" not in value]
         keys = (
             "score",
@@ -513,6 +584,8 @@ def score(args):
         if configurations:
             report["judge_configuration"] = dict(configurations[0])
             report["judge_configuration"]["alignment_protocol"] = report["widesearch"]["alignment_protocol"]
+        if schedule is not None:
+            report["judge_task_schedule"] = schedule
         (output / "scores_local_judge.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
         )
@@ -527,10 +600,13 @@ def score(args):
             )
         )
         return
-    judge = None
+    judge, schedule = None, None
     if args.local_judge:
         # Frozen base judge, after all policy predictions are persisted.
-        tasks = [task for task in tasks if task.benchmark == "widesearch"][rank::world]
+        assignments, schedule = _judge_task_schedule([task for task in tasks if task.benchmark == "widesearch"], saved, world, scheduling)
+        if not 0 <= rank < world:
+            raise ValueError("Judge rank is outside the scoring world")
+        tasks = assignments[rank]
         saved = {task.id: saved[task.id] for task in tasks}
         model, tokenizer = load_policy_model(
             args.model, adapter=None, trainable=False, rank=local,
@@ -580,6 +656,9 @@ def score(args):
     if judge:
         report["judge_quantization"] = getattr(args, "quantization", "none")
         report["judge_configuration"] = _judge_configuration(args)
+        if schedule is not None:
+            report["judge_task_schedule"] = schedule
+            report["judge_shard_index"] = rank
     (
         output / (f"scores_judge_rank{rank}.json" if judge else "scores_strict.json")
     ).write_text(
@@ -636,6 +715,8 @@ def main():
     parser.add_argument("--judge-tokens", type=int, default=4096)
     parser.add_argument("--judge-context", type=int, default=65536)
     parser.add_argument("--judge-workers", type=int, default=4)
+    parser.add_argument("--judge-scheduling", choices=("round_robin", "balanced"), default="round_robin",
+                        help="Optional answer-only LPT scheduling for score-only judge replicas; keep generation shards unchanged")
     parser.add_argument("--judge-batch-size", type=int, default=4)
     parser.add_argument("--judge-batch-tokens", type=int, default=32768)
     args = parser.parse_args()

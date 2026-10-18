@@ -218,3 +218,12 @@ process. This uses the official metric pipeline with a custom judge, not the
 published GPT-4.1 judge. Judge input is never silently truncated. Full coverage,
 infrastructure failure counts, judge failures, row F1 and item F1 are retained
 in the reports. Reports and predictions belong in the external artifact root.
+
+For uneven answer sizes, optionally pass `--judge-scheduling balanced` to both
+the local-judge workers and the merge command. After validating the original
+generation manifests and task ownership, this assigns large saved answer tables
+first using a deterministic, count-capped schedule. It uses answer sizes only,
+keeps every task, and leaves prediction files and generation ownership intact.
+The reports record the scoring assignment; merge recomputes and verifies it.
+The default remains `round_robin`. Use a fresh scoring directory when changing
+the scheduling mode, and never combine reports from different modes or sources.

@@ -198,6 +198,35 @@ def judge_merge_run(monkeypatch, tmp_path):
     return score, args
 
 
+def test_balanced_judge_merge_validates_plan_and_retains_generation(monkeypatch, tmp_path):
+    score, args = judge_merge_run(monkeypatch, tmp_path)
+    tasks = score.__globals__["load_tasks"]("tasks.jsonl")
+    manifest_path = tmp_path / "manifest_rank0.json"
+    manifest = json.loads(manifest_path.read_text()) | {"world_size": 1}
+    manifest_path.write_text(json.dumps(manifest))
+    (tmp_path / "rank0.done").write_text('{"tasks":200,"world_size":1}')
+    strict_path = tmp_path / "scores_strict.json"
+    strict = json.loads(strict_path.read_text()) | {"generation_manifest": manifest}
+    strict_path.write_text(json.dumps(strict))
+    saved, _, _ = score.__globals__["_score_predictions"](tmp_path, tasks, require_ownership=True)
+    assigned, plan = score.__globals__["_judge_task_schedule"](tasks, saved, 8, "balanced")
+    for rank, task_shard in enumerate(assigned):
+        path = tmp_path / f"scores_judge_rank{rank}.json"
+        shard = json.loads(path.read_text())
+        template = shard["widesearch"]["per_task"][0]
+        shard["widesearch"]["per_task"] = [{**template, "task_id": task.id} for task in task_shard]
+        shard.update(generation_manifest=manifest, judge_task_schedule=plan, judge_shard_index=rank)
+        path.write_text(json.dumps(shard))
+    generation_files = {path.name: path.read_bytes() for path in tmp_path.iterdir() if path.name.startswith(("manifest", "predictions", "rank"))}
+    args.judge_scheduling = "balanced"
+    score(args)
+    report = json.loads((tmp_path / "scores_local_judge.json").read_text())
+    assert report["complete"] and report["widesearch"]["metric_denominator"] == 200
+    assert report["judge_task_schedule"] == plan
+    assert report["generation_manifest"] == manifest
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir() if path.name.startswith(("manifest", "predictions", "rank"))} == generation_files
+
+
 @pytest.mark.parametrize("corruption,match", [
     ("missing", "every WideSearch task exactly once"),
     ("duplicate", "every WideSearch task exactly once"),
@@ -316,8 +345,14 @@ def test_alignment_provenance_unknown_configuration_is_explicit_legacy():
 
 
 @pytest.mark.parametrize("quantization", ["none", "nf4"])
-def test_local_judge_loads_frozen_base_with_full_context_and_records_configuration(monkeypatch, tmp_path, quantization):
+@pytest.mark.parametrize("scheduling", ["round_robin", "balanced"])
+def test_local_judge_loads_frozen_base_with_full_context_and_records_configuration(monkeypatch, tmp_path, quantization, scheduling):
     score, _ = judge_merge_run(monkeypatch, tmp_path)
+    if scheduling == "balanced":
+        path = tmp_path / "manifest_rank0.json"
+        path.write_text(json.dumps(json.loads(path.read_text()) | {"world_size": 1}))
+        (tmp_path / "rank0.done").write_text('{"tasks":200,"world_size":1}')
+    generation_files = {path.name: path.read_bytes() for path in tmp_path.iterdir() if path.name.startswith(("manifest", "predictions", "rank"))}
     monkeypatch.setenv("RANK", "3")
     monkeypatch.setenv("WORLD_SIZE", "8")
     calls = {}
@@ -347,7 +382,8 @@ def test_local_judge_loads_frozen_base_with_full_context_and_records_configurati
                            merge_judge=False, local_judge=True, quantization=quantization, judge_name="public/judge",
                            judge_context=65536, judge_tokens=4096, judge_batch_size=1,
                            judge_batch_tokens=69632, judge_workers=1, max_steps=3,
-                           max_new_tokens=1024, max_prompt_tokens=8192, initial_chunks=4, seed=42)
+                           max_new_tokens=1024, max_prompt_tokens=8192, initial_chunks=4, seed=42,
+                           judge_scheduling=scheduling)
     score(args)
     assert calls["load"] == ("base/model", {"adapter": None, "trainable": False, "rank": 0, "quantization": quantization})
     assert calls["policy"] == {"max_prompt_tokens": 65536, "allow_truncation": False}
@@ -363,6 +399,13 @@ def test_local_judge_loads_frozen_base_with_full_context_and_records_configurati
     assert all(record["alignment_protocol"] == ALIGNMENT_PROTOCOL for record in report["widesearch"]["per_task"])
     assert report["policy_quantization"] == "none"
     assert report["judge_quantization"] == quantization
+    if scheduling == "balanced":
+        assert report["judge_task_schedule"]["strategy"] == "balanced"
+        assert report["judge_task_schedule"]["capacities"] == [25] * 8
+        assert report["judge_shard_index"] == 3
+    else:
+        assert "judge_task_schedule" not in report
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir() if path.name.startswith(("manifest", "predictions", "rank"))} == generation_files
 
 
 @pytest.mark.parametrize("failure", ["oom", "context", "format"])
