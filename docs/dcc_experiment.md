@@ -204,6 +204,45 @@ progress. The small number of direct positive examples and lack of negative
 tool trajectories motivate the next training mixture; official test answers
 are not used to choose that mixture.
 
+The first candidate's step-12 checkpoint gave micro F1 0.389381 and AUPR
+0.200566 on those matched HF validation tasks; step 24 improved to 0.467290
+and 0.267751, with precision 0.531915 and recall 0.416667. All 82 episodes
+completed without infrastructure failures. The next training phase therefore
+warm-starts step 24 with a fresh optimizer. Its configured mixture uses 25%
+web examples, 30% CUAD tool examples within the CUAD portion, and a 25%
+negative-answer target within CUAD. It schedules 64 optimizer steps with eight
+workers, up to four examples per worker, a 32,768-token per-step sampling
+budget, learning rate 0.000005 and checkpoints every 16 steps. These are
+configured targets; actual sampled counts and training results remain to be
+verified.
+
+The next teacher set adds 48 training-only negative search/read/final episodes
+from 40 categories. Merging the original 128 positive episodes gives 176
+episodes and 528 CUAD segments covering all 41 categories. All segments pass
+actual source replay and real-tokenizer budgets without skips; every one of
+the eight training shards retains all three stages for both answer polarities.
+The original positive records are retained byte-for-byte.
+
+An optional vLLM graph runtime loaded the real attention adapter and completed
+generation and engine shutdown. With the same adapter and exact 16,384-token
+synthetic prompt, 128-token generation took 3.14 seconds versus 11.97 seconds
+for HF; compilation and loading are excluded from those generation times.
+Eager vLLM did not improve single-request throughput, so that mode was not
+selected for speed. Matched 82-question validation with the retrieval profile
+completed with zero infrastructure failures: graph vLLM micro F1 was 0.424779
+and AUPR 0.243268, versus HF's 0.433333 and 0.258015. Generation took 52.45
+seconds versus approximately 390 seconds. Fused kernels and BF16 LoRA
+computation can change greedy answers; subsequent selection uses a single
+runtime rather than substituting the higher score from another backend.
+
+An additional CPU check of the complete 820-question validation split compares
+four and eight initial retrieved chunks. Requiring a whole reference span to
+occur inside one original, unnormalized chunk gives coverage of 407/621 and
+481/621 spans, respectively. Median prompt lengths are 1,676.5 and 3,026 tokens;
+the longest eight-chunk prompt is 4,008 tokens, below the 8,192-token budget.
+This is a stricter visibility definition than normalized or combined-excerpt
+checks. It motivates a harness candidate, not an answer-quality claim.
+
 ## Reproduction and artifacts
 
 See [dcc.md](dcc.md) and [dcc_training.md](dcc_training.md) for portable
@@ -218,6 +257,10 @@ Validation predictions are in `dcc-run/dev82-v2-baseline` and
 `dcc-run/dev82-v2-trained`. Full CUAD outputs are in `dcc-run/cuad-final`;
 full WideSearch outputs will be in `dcc-run/widesearch-final`.
 
-The current code passed 449 CPU regression checks with two optional runtime
-checks skipped. This includes real tiny-Qwen3MoE
-generation/log-probability parity checks and retained Harness-RL/OLE tests.
+The `45a0857f` checkpoint passed 494 CPU regression checks with two optional
+checks skipped: the default CPU environment lacks bitsandbytes, and the
+optional external SP tokenizer fixture was not configured. The separate NF4
+runtime has its own real quantization checks. BF16 and NF4 dependency/tool
+preflights both passed. This includes real tiny-Qwen3MoE generation/log-probability
+parity checks and retained Harness-RL/OLE tests. Later changes receive targeted
+checks recorded alongside their implementation.
