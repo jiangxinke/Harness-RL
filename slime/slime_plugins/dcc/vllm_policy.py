@@ -209,7 +209,7 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
         enable_chunked_prefill=True, enable_prefix_caching=True, seed=seed,
         generation_config="vllm", enforce_eager=enforce_eager,
         distributed_executor_backend="uni" if tensor_parallel_size == 1 else "mp",
-        enable_lora=bool(lora), max_lora_rank=max_lora_rank, max_loras=1,
+        enable_lora=bool(lora), max_lora_rank=max_lora_rank, max_loras=1, lora_dtype="auto",
         swap_space=0, cpu_offload_gb=0,
     )
     with _engine_environment():
@@ -222,6 +222,7 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
         "resolved_config_revision": getattr(config, "_commit_hash", None),
         "tokenizer_revision": tokenizer_revision or revision,
         "adapter": metadata, "dtype": "bfloat16", "quantization": "none",
+        "lora_dtype": "auto (bfloat16)",
         "kv_cache_dtype": "auto (bfloat16)", "seed": seed,
         "tensor_parallel_size": tensor_parallel_size, "max_model_len": max_model_len,
         "launcher_world_size": 1, "worker_start_method": "spawn",

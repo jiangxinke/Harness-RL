@@ -68,7 +68,11 @@ Prompt tokenization and truncation call the same `encode_messages` helper as
 HFPolicy, with thinking disabled. The engine receives those exact token IDs.
 Prompt plus requested completion must fit `max_model_len`; an insufficient
 context budget raises an error and never silently shortens generation. KV
-cache uses the BF16 model dtype. Prefix caching and chunked prefill are enabled;
+cache uses the BF16 model dtype. LoRA dtype is explicitly `auto`, which resolves
+to BF16 with this base. HF/PEFT can store and compute its adapter branch in
+FP32; the vLLM adapter computation can therefore differ even with the same
+checkpoint. Validate on development tasks and retain that precision provenance.
+Prefix caching and chunked prefill are enabled;
 `max_num_batched_tokens` limits each scheduling iteration. The memory fraction
 includes the base weights, engine allocations and KV cache. Measure actual
 memory and throughput before increasing concurrency.

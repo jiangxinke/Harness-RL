@@ -228,6 +228,7 @@ def test_loader_preserves_versions_revision_adapter_and_memory_provenance(runtim
     args = policy.model.kwargs
     assert args["dtype"] == "bfloat16" and args["quantization"] is None
     assert args["enable_lora"] and args["max_lora_rank"] == 8
+    assert args["lora_dtype"] == "auto"
     assert args["max_num_seqs"] == 4 and args["max_model_len"] == 12288
     assert args["generation_config"] == "vllm" and args["kv_cache_dtype"] == "auto"
     assert args["revision"] == "model-revision" and args["tokenizer_revision"] == "tokenizer-revision"
@@ -235,6 +236,7 @@ def test_loader_preserves_versions_revision_adapter_and_memory_provenance(runtim
     assert policy.provenance["adapter"]["weights_bytes"] > 0
     assert policy.provenance["resolved_config_revision"] == "resolved-model-revision"
     assert policy.provenance["seed"] == 11 and policy.eos_token_ids == [1, 2]
+    assert policy.provenance["lora_dtype"] == "auto (bfloat16)"
     assert policy.lora_request == ("dcc", 1, str(tmp_path.resolve()))
     json.dumps(policy.provenance, allow_nan=False)
 
