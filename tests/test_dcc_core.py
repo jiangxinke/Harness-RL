@@ -175,7 +175,7 @@ def test_last_turn_requests_final_answer_without_executing_tools():
 
     item = Task("ws", "widesearch", "test", "Find entities")
     result = asyncio.run(EpisodeRunner(max_steps=1, web_tools_factory=NoLastTurnWeb).run(item, policy))
-    assert result.status == "max_steps"
+    assert result.status == "evidence_failure"
     assert "no tool was executed" in result.tool_events[0]["observation"]["error"]
 
 
@@ -229,14 +229,33 @@ def test_infrastructure_failure_invalidates_all_policy_segments():
     assert result.detail == "search unavailable"
 
 
-def test_heldout_widesearch_gold_does_not_affect_rollout_reward():
+class _AvailableWeb(WebTools):
+    async def web_search(self, query, count=8):
+        hit = {"title": "Source", "url": "https://example.org/source", "snippet": "Alpha"}
+        self.sources[hit["url"]] = hit
+        return {"results": [hit]}
+
+    async def fetch_url(self, url, start=0):
+        return {"url": url, "text": "Alpha source evidence"}
+
+
+def _supported_web_policy():
+    actions = iter([
+        {"tool": "web_search", "arguments": {"query": "Alpha"}},
+        {"tool": "fetch_url", "arguments": {"url": "https://example.org/source"}},
+        {"answer": [{"name": "Alpha", "citations": ["https://example.org/source"]}]},
+    ])
+
     async def policy(messages, **kwargs):
-        return PolicyCompletion(
-            '{"answer":[{"name":"Alpha","citations":[]}]}', [1], [2]
-        )
+        return PolicyCompletion(json.dumps(next(actions)), [1], [2])
+
+    return policy
+
+
+def test_heldout_widesearch_gold_does_not_affect_rollout_reward():
 
     item = Task("ws", "widesearch", "test", "Find entities", gold=[{"name": "Alpha"}])
-    result = asyncio.run(EpisodeRunner().run(item, policy))
+    result = asyncio.run(EpisodeRunner(web_tools_factory=_AvailableWeb).run(item, _supported_web_policy()))
     assert result.status == "completed"
     assert result.reward == 0
     assert "item_f1" not in result.metrics
@@ -256,11 +275,6 @@ def test_malformed_span_list_cannot_earn_no_answer_reward(answer):
 
 
 def test_independent_web_curriculum_uses_actual_item_reward():
-    async def policy(messages, **kwargs):
-        return PolicyCompletion(
-            '{"answer":[{"name":"Alpha","citations":[]}]}', [1], [2]
-        )
-
     item = Task(
         "independent",
         "widesearch",
@@ -278,7 +292,7 @@ def test_independent_web_curriculum_uses_actual_item_reward():
             },
         },
     )
-    result = asyncio.run(EpisodeRunner().run(item, policy))
+    result = asyncio.run(EpisodeRunner(web_tools_factory=_AvailableWeb).run(item, _supported_web_policy()))
     assert result.reward == 1
     assert result.metrics["f1_by_item"] == 1
 

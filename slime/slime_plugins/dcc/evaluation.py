@@ -97,6 +97,10 @@ def evaluate_results(tasks: Iterable[Task], predictions: Iterable[dict[str, Any]
     if wide:
 
         def score(task: Task) -> dict[str, Any]:
+            if saved.get(task.id, {}).get("status") == "evidence_failure":
+                # Rejected finals are model failures. Keep them in every
+                # denominator without judging unsupported or empty answers.
+                return {"task_id": task.id, **dict.fromkeys(("score", "precision_by_row", "recall_by_row", "f1_by_row", "precision_by_item", "recall_by_item", "f1_by_item"), 0.0)}
             try:
                 metrics = evaluate_widesearch(saved.get(task.id, {}).get("answer", []), task.gold or [], task.metadata["evaluation"], judge=judge)
                 return {"task_id": task.id, **metrics}

@@ -67,6 +67,23 @@ every cell. Held-out answers are consulted only after predictions are saved.
 The web reader extracts HTML article bodies and tables, supports PDF text,
 and returns `next_start` to page through long documents without redownloading.
 
+WideSearch accepts a final answer only after an executed `web_search` returns
+source URLs and an executed `fetch_url` returns nonempty source text. Each row
+must have a nonempty `citations` list containing only URLs returned by these
+successful tools. Empty answer lists also require the search and read steps.
+This checks observed provenance; semantic support still needs source review.
+An unsupported final receives explicit correction with tool JSON templates and
+uses the remaining model turns. Corrections are recorded separately in
+`metrics.evidence_guard.rejections`, never as tool calls. Exhausting the turn
+budget without an accepted final produces `evidence_failure`: a model failure
+with zero reward and zero evaluation score that remains in the full task
+denominator. Search-service outages remain `infrastructure_error` and exclude
+the episode's policy segments from training. Empty results and unreadable
+individual pages are normal tool observations, and do not satisfy the evidence
+requirements. The private WideSearch evaluation manifest includes the guard
+version, preventing resume from mixing predictions across guard versions.
+CUAD retains its existing extraction protocol.
+
 ## Web providers
 
 Set `DCC_SEARCH_BACKEND` to `public_web` (default), `duckduckgo_wikipedia`,

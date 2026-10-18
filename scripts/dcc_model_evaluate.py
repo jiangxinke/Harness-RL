@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "slime"))
 
 from slime_plugins.dcc import EpisodeRunner, load_tasks
 from slime_plugins.dcc.evaluation import evaluate_results
+from slime_plugins.dcc.episode import WIDESEARCH_EVIDENCE_GUARD_VERSION
 from slime_plugins.dcc.hf_judge import HFBatchedJudge
 from slime_plugins.dcc.hf_policy import HFPolicy, load_policy_model
 from slime_plugins.dcc.tools import WebTools
@@ -57,6 +58,7 @@ async def evaluate(args):
     if any(task.benchmark == "widesearch" for task in tasks):
         manifest["search_backend"] = WebTools().backend
         manifest["search_endpoint"] = os.environ.get("DCC_SEARCH_URL")
+        manifest["evidence_guard_version"] = WIDESEARCH_EVIDENCE_GUARD_VERSION
     manifest_path = output / f"manifest_rank{rank}.json"
     if manifest_path.exists() and json.loads(manifest_path.read_text()) != manifest:
         raise ValueError("Evaluation configuration changed; use a new output directory")
