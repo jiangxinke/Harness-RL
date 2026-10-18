@@ -257,7 +257,13 @@ budget 4,096, without judge failures. CPU planning checks all 200 official
 WideSearch references using the real tokenizer: 200 header, 285 entity-alignment
 and 1,168 cell prompts. The longest reference prompt has 9,384 tokens; adding
 8,192 prediction tokens and 4,096 completion tokens totals 21,672, below the
-65,536 limit. These are runtime/capacity checks, not benchmark scores.
+65,536 limit. A synthetic-only BF16 pressure run also completes the full planned worst-case
+budget on one GPU: 17,576 input tokens plus exactly 4,096 generated tokens,
+batch size one, adapter disabled and truncation disabled. All 4,096 output-logit
+checks are finite; peak allocated/reserved memory is 61.0/61.7 GiB. Generation
+takes 267.0 seconds, or 287.0 seconds including setup, without OOM. The input
+contains no official task or reference. These are runtime/capacity checks, not
+benchmark scores.
 
 The completed official CUAD run passes 30 additional CPU audit checks: all
 4,182 unique test IDs appear exactly once on the expected shards, frozen
@@ -290,3 +296,6 @@ Final CUAD coverage and scoring audits are retained under
 
 The selected WideSearch trajectory replay is retained in
 `dcc-run/scoring-audit/widesearch-evidence-sample-audit.json`.
+
+The real synthetic BF16 judge budget check is retained in
+`dcc-run/judge-long-context-stress-result.json`.
