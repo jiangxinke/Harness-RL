@@ -222,6 +222,19 @@ the synchronized norms. All 288 adapter tensors changed from the warm start
 and remain finite in each saved checkpoint. Training logs record 748.88 seconds;
 checkpoint selection is still in progress on validation data only.
 
+The small-sample graph selection did not establish generalization. On the
+complete 820-question validation split, the round-two step-48 candidate with
+eight initial chunks gave AUPR 0.207676 and micro F1 0.390086 (precision
+0.589577, recall 0.291465). The early corrected-GRPO adapter gave 0.273384
+and 0.450116; the frozen base gave 0.230205 and 0.385757. All questions
+completed without infrastructure failures. The baselines use one graph engine,
+whereas the candidate uses four logical shards, so batch composition also
+differs. The full split shares the 20 contracts used by the 82-question sample.
+The candidate's recall regression motivates a further training round rather
+than selection from the smaller validation score alone. Grounding skips can
+raise the actual negative fraction above the configured draw probability;
+training with eight initial chunks and fewer negative draws is under validation.
+
 The next teacher set adds 48 training-only negative search/read/final episodes
 from 40 categories. Merging the original 128 positive episodes gives 176
 episodes and 528 CUAD segments covering all 41 categories. All segments pass
