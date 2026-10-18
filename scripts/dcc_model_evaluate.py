@@ -151,6 +151,17 @@ async def evaluate(args):
     )
 
 
+def _prediction_quantization(output):
+    """Read policy precision from generation manifests, not scoring CLI flags."""
+    precisions = {
+        json.loads(path.read_text()).get("quantization", "none")
+        for path in output.glob("manifest_rank*.json")
+    }
+    if len(precisions) > 1:
+        raise ValueError("Cannot score predictions with mixed policy quantization")
+    return next(iter(precisions), "unrecorded")
+
+
 def score(args):
     rank = int(os.environ.get("RANK", "0"))
     local = int(os.environ.get("LOCAL_RANK", "0"))
@@ -159,6 +170,7 @@ def score(args):
     if args.limit:
         tasks = tasks[: args.limit]
     output = Path(args.output_dir)
+    policy_quantization = _prediction_quantization(output)
     saved = {}
     for file in sorted(output.glob("predictions_rank*.jsonl")):
         for line in file.read_text().splitlines():
@@ -173,8 +185,14 @@ def score(args):
     if args.merge_judge:
         report = json.loads((output / "scores_strict.json").read_text())
         records = []
+        judge_quantization = getattr(args, "quantization", "none")
         for path in sorted(output.glob("scores_judge_rank*.json")):
-            records.extend(json.loads(path.read_text())["widesearch"]["per_task"])
+            shard = json.loads(path.read_text())
+            if shard.get("judge_quantization", "none") != judge_quantization:
+                raise ValueError("Judge quantization differs across scoring shards or merge settings")
+            if shard.get("policy_quantization", policy_quantization) != policy_quantization:
+                raise ValueError("Judge report policy quantization differs from prediction manifests")
+            records.extend(shard["widesearch"]["per_task"])
         expected_wide = {task.id for task in tasks if task.benchmark == "widesearch"}
         if (
             len(records) != len(expected_wide)
@@ -209,6 +227,8 @@ def score(args):
         if search_coverage is not None:
             report["widesearch"]["search_coverage"] = search_coverage
         report["complete"] = report["complete"] and len(good) == len(records)
+        report["policy_quantization"] = policy_quantization
+        report["judge_quantization"] = judge_quantization
         (output / "scores_local_judge.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
         )
@@ -267,6 +287,9 @@ def score(args):
         )
     }
     report["model"] = args.model_name
+    report["policy_quantization"] = policy_quantization
+    if judge:
+        report["judge_quantization"] = getattr(args, "quantization", "none")
     (
         output / (f"scores_judge_rank{rank}.json" if judge else "scores_strict.json")
     ).write_text(
