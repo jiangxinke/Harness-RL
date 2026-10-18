@@ -1,0 +1,9 @@
+-r requirements.txt
+# The grouped MoE kernel needs CUDA SM80+ and PyTorch >= 2.10.
+# Install the PyTorch build appropriate for your CUDA runtime separately.
+torch>=2.10,<2.15
+transformers==5.20.1
+peft==0.21.2
+accelerate==1.15.0
+pytest>=8
+pytest-asyncio>=0.24
