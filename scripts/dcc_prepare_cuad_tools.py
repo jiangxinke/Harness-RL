@@ -106,8 +106,8 @@ def _records(task: Task, initial: dict, query: str, searched: dict, arguments: d
         "source": "cuad_train", "benchmark": "cuad", "split": "train",
         "task_id": task.id, "grounding_fields": list(task.gold),
         "metadata": {
-            "category": _category(task.prompt), "positive": True,
-            "initial_visibility": "partial" if any(initial_seen) else "none",
+            "category": _category(task.prompt), "positive": bool(task.gold),
+            "initial_visibility": ("partial" if any(initial_seen) else "none") if task.gold else "negative",
             "profile_terms": list(profile.questions.get(_normalize(task.prompt), ())) if profile else [],
             "query_policy": "question_category_train_profile_only",
             "teacher_version": 1,
@@ -130,13 +130,15 @@ def _records(task: Task, initial: dict, query: str, searched: dict, arguments: d
 
 def prepare_records(
     tasks: list[Task], profile: RetrievalProfile | None, *, tokenizer,
-    episodes: int = 96, seed: int = 42, initial_chunks: int = 4,
+    episodes: int = 96, negative_episodes: int = 0, seed: int = 42, initial_chunks: int = 4,
     max_prompt_tokens: int = 8192, max_response_tokens: int = 1024,
     batch_tokens: int = 12288,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Select category-balanced hidden positive episodes with real tool traces."""
-    if min(episodes, initial_chunks, max_prompt_tokens, max_response_tokens, batch_tokens) < 1:
-        raise ValueError("episode, retrieval, and token budgets must be positive")
+    """Select hidden positives and optional negatives with real tool traces."""
+    if episodes < 0 or negative_episodes < 0 or episodes + negative_episodes < 1:
+        raise ValueError("episode counts must be nonnegative and request at least one episode")
+    if min(initial_chunks, max_prompt_tokens, max_response_tokens, batch_tokens) < 1:
+        raise ValueError("retrieval and token budgets must be positive")
     ids: set[str] = set()
     for task in tasks:
         if task.benchmark != "cuad" or task.split != "train":
@@ -205,11 +207,63 @@ def prepare_records(
                 continue
             output.extend(accepted)
             emitted[category] += 1
+    # Keep positive selection and its RNG independent of this optional stage.
+    # Empty gold is a training label, never an inference shortcut: negatives
+    # still execute search and a hit-anchored read before returning no spans.
+    negative_grouped: dict[str, list[Task]] = defaultdict(list)
+    negative_rng = random.Random(seed)
+    for task in sorted(tasks, key=lambda value: value.id):
+        if not task.gold:
+            negative_grouped[_category(task.prompt)].append(task)
+    for values in negative_grouped.values():
+        negative_rng.shuffle(values)
+    negative_emitted: Counter = Counter()
+    while negative_grouped and sum(negative_emitted.values()) < negative_episodes:
+        for category in sorted(negative_grouped):
+            if sum(negative_emitted.values()) >= negative_episodes:
+                break
+            task = negative_grouped[category].pop()
+            if not negative_grouped[category]:
+                del negative_grouped[category]
+            counters["negative_tasks_considered"] += 1
+            if task.document not in cache:
+                cache[task.document] = DocumentTools(task.document)
+            tools = cache[task.document]
+            initial = search_document(tools, task.prompt, top_k=initial_chunks, profile=profile)
+            plans = []
+            for query_index, query in enumerate(candidate_queries(task.prompt, profile)):
+                searched = tools.search_document(query, top_k=4)
+                for hit_index, hit in enumerate(searched["hits"]):
+                    seen_reads = set()
+                    for window_index, arguments in enumerate(read_actions(hit)):
+                        read = tools.read_document(**arguments)
+                        read_key = (read["start"], read["end"])
+                        if read_key in seen_reads or not read.get("text", "").strip():
+                            continue
+                        seen_reads.add(read_key)
+                        records = _records(task, initial, query, searched, arguments, read, profile)
+                        cost = sum(len(message["content"]) for message in records[-1]["messages"])
+                        plans.append((cost, query_index, hit_index, window_index, records))
+            accepted = None
+            for _, _, _, _, records in sorted(plans, key=lambda plan: plan[:4]):
+                if _fits(records, tokenizer, max_prompt_tokens, max_response_tokens, batch_tokens):
+                    accepted = records
+                    break
+            if accepted is None:
+                counters["no_negative_tool_plan_fits_budgets"] += 1
+                continue
+            output.extend(accepted)
+            negative_emitted[category] += 1
+    categories = emitted + negative_emitted
     summary = {
         "source": "cuad_train", "benchmark": "cuad", "split": "train",
-        "teacher_version": 1, "requested_episodes": episodes,
-        "episodes": sum(emitted.values()), "records": len(output),
-        "categories": dict(sorted(emitted.items())), "counters": dict(counters),
+        "teacher_version": 1, "requested_episodes": episodes + negative_episodes,
+        "requested_positive_episodes": episodes, "requested_negative_episodes": negative_episodes,
+        "episodes": sum(categories.values()), "records": len(output),
+        "positive_episodes": sum(emitted.values()), "negative_episodes": sum(negative_emitted.values()),
+        "categories": dict(sorted(categories.items())), "counters": dict(counters),
+        "positive_categories": dict(sorted(emitted.items())),
+        "negative_categories": dict(sorted(negative_emitted.items())),
         "training_tasks": len(tasks), "seed": seed, "initial_chunks": initial_chunks,
         "profile_method": METHOD if profile else None,
         "profile_version": VERSION if profile else None,
@@ -227,7 +281,9 @@ def main(argv: list[str] | None = None, *, tokenizer=None) -> int:
     parser.add_argument("--retrieval-profile", type=Path, required=True)
     parser.add_argument("--tokenizer", required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--episodes", type=int, default=96)
+    parser.add_argument("--episodes", type=int, default=96, help="Hidden positive episodes to prepare")
+    parser.add_argument("--negative-episodes", type=int, default=0,
+                        help="Additional category-balanced train negatives; use --episodes 0 for negatives only")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--initial-chunks", type=int, default=4)
     parser.add_argument("--max-prompt-tokens", type=int, default=8192)
@@ -244,12 +300,13 @@ def main(argv: list[str] | None = None, *, tokenizer=None) -> int:
 
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     records, summary = prepare_records(
-        tasks, profile, tokenizer=tokenizer, episodes=args.episodes, seed=args.seed,
+        tasks, profile, tokenizer=tokenizer, episodes=args.episodes,
+        negative_episodes=args.negative_episodes, seed=args.seed,
         initial_chunks=args.initial_chunks, max_prompt_tokens=args.max_prompt_tokens,
         max_response_tokens=args.max_response_tokens, batch_tokens=args.batch_tokens,
     )
     if not records:
-        raise RuntimeError("No hidden CUAD positive produced a grounded tool trajectory")
+        raise RuntimeError("No requested CUAD train task produced a grounded tool trajectory")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8") as stream:
         for record in records:

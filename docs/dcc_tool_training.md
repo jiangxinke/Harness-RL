@@ -23,6 +23,33 @@ Teachers may use training labels to select a successful plan from public
 question/profile queries. They must never inject gold phrases into queries or
 choose arbitrary offsets from answer locations.
 
+Prepare these records on CPU with `scripts/dcc_prepare_cuad_tools.py`. The
+default `--episodes 96` selects hidden positive training questions. Optional
+`--negative-episodes` adds category-balanced questions whose training gold is
+empty; its default is zero, preserving positive-only generation. Negative
+teachers execute an actual search and a read anchored to one of its returned
+hits before producing `{"answer":[]}`. Their `metadata.positive` is false and
+`grounding_fields` is empty. Validation and test tasks are rejected, including
+when only negative episodes are requested. The manifest reports positive and
+negative counts and categories separately.
+
+```bash
+python scripts/dcc_prepare_cuad_tools.py \
+  --data "$DATA_ROOT/cuad/train.jsonl" \
+  --retrieval-profile "$RUN_ROOT/retrieval/profile.json" \
+  --tokenizer "$MODEL_CACHE" \
+  --output "$RUN_ROOT/teachers/cuad-train.jsonl" \
+  --episodes 128 --negative-episodes 48 \
+  --max-prompt-tokens 8192 --max-response-tokens 1024 --batch-tokens 12288
+```
+
+Use `--episodes 0 --negative-episodes 48` to prepare a separate negative file
+for an existing positive curriculum. Concatenate the complete files without
+dropping stages, then validate with the SFT loader and the training tokenizer.
+Each distributed worker must retain search, read and final stages after
+task-level sharding and token-budget filtering. The preparation command checks
+all three stages without truncation and refuses to overwrite existing outputs.
+
 Web and CUAD tool prompts are never truncated. Targets are never truncated.
 Overlong prompts, responses and token-budget failures are counted explicitly.
 Every local tool stage must retain eligible examples, so a run cannot silently

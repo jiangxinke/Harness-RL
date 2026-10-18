@@ -137,6 +137,67 @@ def test_sampling_deterministic_without_using_arbitrary_category_metadata():
         prepare([tasks()[0], tasks()[0]])
 
 
+def negative_tasks(count=4):
+    return [dataclasses.replace(
+        tasks(1)[0], id=f"negative_{category}_{index}", gold=[],
+        prompt=QUESTION.replace("Governing Law", category),
+    ) for category in ("Governing Law", "Exclusivity") for index in range(count)]
+
+
+def test_negative_teachers_replay_real_search_and_hit_anchored_read_before_abstaining():
+    rows = negative_tasks()
+    records, summary = prepare(rows, episodes=0, negative_episodes=6)
+    assert summary["positive_episodes"] == 0 and summary["negative_episodes"] == 6
+    assert summary["episodes"] == 6 and summary["records"] == 18
+    assert summary["negative_categories"] == {"Exclusivity": 3, "Governing Law": 3}
+    by_id = {task.id: task for task in rows}
+    for record in records:
+        assert record["metadata"]["positive"] is False and record["grounding_fields"] == []
+        assert record["metadata"]["initial_visibility"] == "negative"
+        assert record["split"] == "train"
+        if record["stage"] != "final":
+            continue
+        assert json.loads(record["completion"]) == {"answer": []}
+        tools = DocumentTools(by_id[record["task_id"]].document)
+        search = json.loads(record["messages"][3]["content"])
+        searched = observation(record["messages"][4])
+        assert searched == tools.search_document(**search["arguments"]) and searched["hits"]
+        read = json.loads(record["messages"][5]["content"])
+        assert read["arguments"] in [arguments for hit in searched["hits"] for arguments in PREPARE.read_actions(hit)]
+        observed_read = observation(record["messages"][6])
+        assert observed_read == tools.read_document(**read["arguments"]) and observed_read["text"].strip()
+        assert PREPARE.FINAL_TURN in record["messages"][6]["content"]
+    repeat, repeated_summary = prepare(list(reversed(rows)), episodes=0, negative_episodes=6)
+    assert repeat == records and repeated_summary == summary
+
+
+def test_optional_negatives_preserve_positive_records_and_enforce_all_budgets():
+    rows = tasks() + negative_tasks()
+    original, _ = prepare(rows)
+    explicit_zero, _ = prepare(rows, negative_episodes=0)
+    combined, summary = prepare(rows, negative_episodes=2)
+    assert original == explicit_zero == [record for record in combined if record["metadata"]["positive"]]
+    assert summary["positive_episodes"] == 2 and summary["negative_episodes"] == 2
+    for budgets in ({"max_prompt_tokens": 10}, {"max_response_tokens": 1}, {"batch_tokens": 10}):
+        rejected, counts = prepare(negative_tasks(), episodes=0, negative_episodes=1, **budgets)
+        assert not rejected and counts["negative_episodes"] == 0
+        assert counts["counters"]["no_negative_tool_plan_fits_budgets"] == 8
+    empty = dataclasses.replace(negative_tasks(1)[0], document=" \n ")
+    assert prepare([empty], episodes=0, negative_episodes=1)[0] == []
+
+
+@pytest.mark.parametrize("split", ["validation", "test"])
+def test_negative_only_generation_rejects_nontraining_tasks(split):
+    with pytest.raises(ValueError, match="CUAD train"):
+        prepare([dataclasses.replace(negative_tasks(1)[0], split=split)], episodes=0, negative_episodes=1)
+
+
+@pytest.mark.parametrize("counts", [{"episodes": 0}, {"episodes": -1}, {"negative_episodes": -1}])
+def test_episode_counts_reject_negative_or_empty_requests(counts):
+    with pytest.raises(ValueError, match="episode counts"):
+        prepare(**counts)
+
+
 def test_cli_outputs_external_records_and_manifest_and_refuses_overwrite(tmp_path):
     source, profile, output = tmp_path / "train.jsonl", tmp_path / "profile.json", tmp_path / "artifacts/teachers.jsonl"
     source.write_text("\n".join(json.dumps(dataclasses.asdict(task)) for task in tasks()))
@@ -148,3 +209,14 @@ def test_cli_outputs_external_records_and_manifest_and_refuses_overwrite(tmp_pat
     assert manifest["episodes"] == 2 and manifest["split"] == "train"
     with pytest.raises(FileExistsError):
         PREPARE.main(args, tokenizer=CharacterTokenizer())
+
+
+def test_cli_can_generate_negative_only_teachers(tmp_path):
+    source, profile, output = tmp_path / "train.jsonl", tmp_path / "profile.json", tmp_path / "negative.jsonl"
+    source.write_text("\n".join(json.dumps(dataclasses.asdict(task)) for task in negative_tasks()))
+    profile.write_text(json.dumps(fit_retrieval_profile(tasks(), min_examples=99)))
+    args = ["--data", str(source), "--retrieval-profile", str(profile), "--tokenizer", "supplied-in-test", "--output", str(output), "--episodes", "0", "--negative-episodes", "2", "--max-prompt-tokens", "100000", "--max-response-tokens", "4096", "--batch-tokens", "105000"]
+    assert PREPARE.main(args, tokenizer=CharacterTokenizer()) == 0
+    manifest = json.loads(output.with_suffix(".jsonl.manifest.json").read_text())
+    assert manifest["positive_episodes"] == 0 and manifest["negative_episodes"] == 2
+    assert len(output.read_text().splitlines()) == 6
