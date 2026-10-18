@@ -293,14 +293,13 @@ def test_ambiguous_header_can_abstain_instead_of_guessing_a_geographic_field():
     assert _align(["location"], ["city", "country"], judge, 32, 32000, column_headers=True) == {}
 
 
-def test_multiple_broad_headers_require_independent_full_schema_candidate_checks():
+def test_multiple_broad_headers_can_abstain_against_the_full_reference_schema():
     from slime_plugins.dcc.widesearch_metrics import _align
 
     def judge(prompt):
-        assert "For EACH origin independently" in prompt
-        assert "exactly ONE compatible candidate" in prompt
-        assert "matching list lengths, list position" in prompt
-        assert "eliminating a candidate because another response label might use it" in prompt
+        assert "Compare against the full reference schema" in prompt
+        assert "multiple counterparts remain plausible" in prompt
+        assert "Do not choose by list position" in prompt
         return {}
 
     assert _align(["location", "place"], ["city", "country"], judge, 32, 32000, column_headers=True) == {}
@@ -310,7 +309,7 @@ def test_header_candidate_analysis_before_fenced_json_is_parsed_without_extra_ma
     from slime_plugins.dcc.widesearch_metrics import _align
 
     def judge(prompt):
-        assert "briefly analyze each origin" in prompt
+        assert "Column headers:" in prompt
         return (
             "organisation: one candidate, organization. Geographic field: city or country, ambiguous.\n"
             '```json\n{"organisation": "organization"}\n```'

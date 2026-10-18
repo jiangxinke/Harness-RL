@@ -263,9 +263,19 @@ require abstention. Entity identity and cell prompts are unchanged from v2.
 V3 gives correct end-to-end scores on all 39 synthetic cases, but one of the
 12 new header cases still violates its raw ambiguity-abstention assertion;
 the schema guard rejects that table, so the violation does not create a false
-positive score. V4 adds independent per-origin candidate checks with a brief
-analysis before the final JSON. Entity and cell prompts and numeric scoring
-remain unchanged. The same fixed 39 cases are retained for the final check.
+positive score. V4 tried independent per-origin candidate checks with a brief
+analysis before the final JSON. Although its 12 header cases pass, it misses
+the compatible `location` to `city` mapping in two other cases, leaving only
+37/39 correct end-to-end scores. V4 is rejected. The final scorer restores
+the v3 production implementation and accepts its single known raw header
+abstention limitation explicitly: 39/39 correct end-to-end metrics, 38/39
+combined metric and raw checks, and 11/12 raw header checks. The raw response
+and failed assertion remain recorded; calibration is not reported as fully
+passed. Entity and cell prompts and numeric scoring remain unchanged.
+The fixed artificial cases were reused while revising the scorer, so this
+is development calibration, not an untouched holdout estimate. The choice
+of v3 and the accepted limitation are frozen before formal custom judging;
+official test scores are not used to select the scorer.
 The adapted scorer is versioned separately from the unchanged `b25a4d63`
 generation snapshot. Its strict proxy must also be recomputed from the saved
 predictions; the original scoring files are retained separately. These are
@@ -287,7 +297,9 @@ checks. Independent review covers header and entity collisions, per-cell
 multiple criteria, exact-identity anchors, conflicting explicit versions and
 missing or null legacy versions. No official test item is used for these
 regressions. The v3 header revision passes 100 checks across the same three
-targeted test files; the v4 candidate-analysis revision passes 102.
+targeted test files; the v4 candidate-analysis revision passes 102. The final
+v3 restoration also passes 102, retaining the general fenced-JSON parsing
+and header-abstention regressions.
 
 Judge provenance changes at `360971f5` pass 90 targeted checks and reject
 mixed judge models, budgets, runtime versions, adapters or generation records.
