@@ -24,6 +24,7 @@ from .core import (
 )
 from .glm import RESUME_PROMPT, UPDATE_PROMPT
 from .http_search import HttpSearch
+from .infrastructure import invalidate_samples, record_service_failure
 from .metrics import summarize_tree_for_training
 from .self_distill import (
     TEACHER_SYSTEM_PROMPT,
@@ -212,6 +213,7 @@ class SGLangHarnessModel:
         )
         return self._generate(prompt, max_tokens=256, stop=None, temperature=0.1).raw.strip()
 
+    @record_service_failure("generation")
     def _generate(
         self,
         prompt: str,
@@ -370,9 +372,12 @@ async def generate(
         model.close()
         search.close()
 
-    samples = build_tree_training_samples(args, sample, tree, state.tokenizer)
+    failures = list(getattr(model, "infrastructure_failures", [])) + list(getattr(search, "infrastructure_failures", []))
+    samples = [] if failures else build_tree_training_samples(args, sample, tree, state.tokenizer)
     if not samples:
         samples = [build_failed_accounting_sample(args, sample, tree, state.tokenizer, model.base_prompt)]
+    if failures:
+        invalidate_samples(samples, failures)
     _save_debug_tree_samples(args, tree, samples)
     return samples
 

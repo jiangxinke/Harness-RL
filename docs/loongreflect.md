@@ -78,6 +78,12 @@ token limits are CLI options. To select Fast-Slow, pass `--mode fast_slow
 outer-step target. Configuration and checkpoints are written under `save-dir`;
 choose a persistent output directory. Fresh runs reject nonempty outputs.
 
+Retriever/generator transport failures and malformed service responses mark
+the whole episode as retryable infrastructure failure with zero policy and
+reflection masks. The partial tree remains available for diagnosis. Empty
+search results remain valid outcomes. This adapts the reference harness to
+Harness-RL's existing failure-isolation contract.
+
 ## Reference implementation versus paper
 
 The reference repository explicitly differs from the final algorithm in
@@ -116,7 +122,7 @@ Megatron process-group queries in these tests; it is not used in training.
 Full Megatron/SGLang model serving and distributed checkpoint conversion need
 the GPU runtime and production checkpoints and are a separate validation step.
 
-Validation of this port: 300 CPU checks passed with one existing skip, including
+Validation of this port: 305 CPU checks passed with one existing skip, including
 the original Harness-RL/OLE/CAPO tests and Slime rollout scheduling checks.
 Four independent CUDA runs passed all 44 integration checks in total, including
 the real loss/optimizer tests in all four training modes. These are small-model

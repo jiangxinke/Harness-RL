@@ -6,6 +6,8 @@ from typing import Any
 
 import httpx
 
+from .infrastructure import record_service_failure
+
 
 def _search_concurrency_limit() -> int:
     raw = os.environ.get("REFLECT_SEARCH_CONCURRENCY", "8")
@@ -45,6 +47,7 @@ class HttpSearch:
             headers={"Connection": "close"},
         )
 
+    @record_service_failure("retrieval")
     def search(self, question: str) -> str:
         with _SEARCH_SEMAPHORE:
             with self.client.stream(
