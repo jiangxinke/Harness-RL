@@ -34,6 +34,12 @@ async def evaluate(args):
     rank = int(os.environ.get("RANK", "0"))
     local = int(os.environ.get("LOCAL_RANK", "0"))
     world = int(os.environ.get("WORLD_SIZE", "1"))
+    backend = getattr(args, "inference_backend", "hf")
+    quantization = getattr(args, "quantization", "none")
+    if backend == "vllm" and (world != 1 or local != 0):
+        raise ValueError("Use one evaluation process for vLLM; configure tensor parallelism instead of torchrun replicas")
+    if backend == "vllm" and quantization != "none":
+        raise ValueError("The vLLM evaluation backend currently requires BF16 base weights")
     torch.manual_seed(args.seed + rank)
     tasks = [task for path in args.data for task in load_tasks(path)]
     if any(task.split == "train" for task in tasks):
@@ -64,11 +70,20 @@ async def evaluate(args):
         manifest["retrieval_profile"] = json.loads(
             json.dumps(dataclasses.asdict(retrieval_profile))
         )
-    quantization = getattr(args, "quantization", "none")
     if quantization != "none":
         # Preserve existing BF16 manifests and reject changing precision when
         # resuming a quantized run. Quantized scores need a separate directory.
         manifest["quantization"] = quantization
+    if backend != "hf":
+        manifest["inference_backend"] = backend
+        manifest["inference_parameters"] = {
+            "tensor_parallel_size": args.vllm_tensor_parallel_size,
+            "gpu_memory_utilization": args.vllm_memory_utilization,
+            "max_num_batched_tokens": args.vllm_batched_tokens,
+            "max_model_len": args.max_prompt_tokens + args.max_new_tokens,
+            "enforce_eager": args.vllm_enforce_eager,
+            "batch_size": args.batch_size,
+        }
     if any(task.benchmark == "widesearch" for task in tasks):
         manifest["search_backend"] = WebTools().backend
         manifest["search_endpoint"] = os.environ.get("DCC_SEARCH_URL")
@@ -98,19 +113,31 @@ async def evaluate(args):
         )
     ]
     if todo:
-        model, tokenizer = load_policy_model(
-            args.model, adapter=args.adapter, rank=local, quantization=quantization
-        )
-        if hasattr(model, "dcc_quantization_report"):
-            (output / f"quantization_rank{rank}.json").write_text(
-                json.dumps(model.dcc_quantization_report, indent=2) + "\n"
+        if backend == "vllm":
+            from slime_plugins.dcc.vllm_policy import load_vllm_policy
+
+            policy = load_vllm_policy(
+                args.model, adapter=args.adapter, batch_size=args.batch_size,
+                max_prompt_tokens=args.max_prompt_tokens,
+                max_model_len=args.max_prompt_tokens + args.max_new_tokens,
+                tensor_parallel_size=args.vllm_tensor_parallel_size,
+                gpu_memory_utilization=args.vllm_memory_utilization,
+                max_num_batched_tokens=args.vllm_batched_tokens,
+                enforce_eager=args.vllm_enforce_eager, seed=args.seed,
             )
-        policy = HFPolicy(
-            model,
-            tokenizer,
-            batch_size=args.batch_size,
-            max_prompt_tokens=args.max_prompt_tokens,
-        )
+            (output / "inference_runtime.json").write_text(json.dumps(policy.provenance, indent=2) + "\n")
+        else:
+            model, tokenizer = load_policy_model(
+                args.model, adapter=args.adapter, rank=local, quantization=quantization
+            )
+            if hasattr(model, "dcc_quantization_report"):
+                (output / f"quantization_rank{rank}.json").write_text(
+                    json.dumps(model.dcc_quantization_report, indent=2) + "\n"
+                )
+            policy = HFPolicy(
+                model, tokenizer, batch_size=args.batch_size,
+                max_prompt_tokens=args.max_prompt_tokens,
+            )
         runner = EpisodeRunner(
             max_steps=args.max_steps,
             max_new_tokens=args.max_new_tokens,
@@ -155,15 +182,19 @@ async def evaluate(args):
     )
 
 
-def _prediction_quantization(output):
-    """Read policy precision from generation manifests, not scoring CLI flags."""
-    precisions = {
-        json.loads(path.read_text()).get("quantization", "none")
+def _prediction_setting(output, key, default):
+    """Read execution provenance from saved generation, not scoring flags."""
+    values = {
+        json.loads(path.read_text()).get(key, default)
         for path in output.glob("manifest_rank*.json")
     }
-    if len(precisions) > 1:
-        raise ValueError("Cannot score predictions with mixed policy quantization")
-    return next(iter(precisions), "unrecorded")
+    if len(values) > 1:
+        raise ValueError(f"Cannot score predictions with mixed policy {key}")
+    return next(iter(values), "unrecorded")
+
+
+def _prediction_quantization(output):
+    return _prediction_setting(output, "quantization", "none")
 
 
 def score(args):
@@ -175,6 +206,7 @@ def score(args):
         tasks = tasks[: args.limit]
     output = Path(args.output_dir)
     policy_quantization = _prediction_quantization(output)
+    policy_backend = _prediction_setting(output, "inference_backend", "hf")
     saved = {}
     for file in sorted(output.glob("predictions_rank*.jsonl")):
         for line in file.read_text().splitlines():
@@ -196,6 +228,8 @@ def score(args):
                 raise ValueError("Judge quantization differs across scoring shards or merge settings")
             if shard.get("policy_quantization", policy_quantization) != policy_quantization:
                 raise ValueError("Judge report policy quantization differs from prediction manifests")
+            if shard.get("policy_inference_backend", policy_backend) != policy_backend:
+                raise ValueError("Judge report policy backend differs from prediction manifests")
             records.extend(shard["widesearch"]["per_task"])
         expected_wide = {task.id for task in tasks if task.benchmark == "widesearch"}
         if (
@@ -232,6 +266,7 @@ def score(args):
             report["widesearch"]["search_coverage"] = search_coverage
         report["complete"] = report["complete"] and len(good) == len(records)
         report["policy_quantization"] = policy_quantization
+        report["policy_inference_backend"] = policy_backend
         report["judge_quantization"] = judge_quantization
         (output / "scores_local_judge.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
@@ -292,6 +327,7 @@ def score(args):
     }
     report["model"] = args.model_name
     report["policy_quantization"] = policy_quantization
+    report["policy_inference_backend"] = policy_backend
     if judge:
         report["judge_quantization"] = getattr(args, "quantization", "none")
     (
@@ -324,6 +360,11 @@ def main():
     parser.add_argument("--quantization", choices=("none", "nf4"), default="none")
     parser.add_argument("--retrieval-profile")
     parser.add_argument("--auto-read-sources", type=int, choices=(0, 1, 2), default=0)
+    parser.add_argument("--inference-backend", choices=("hf", "vllm"), default="hf")
+    parser.add_argument("--vllm-tensor-parallel-size", type=int, default=1)
+    parser.add_argument("--vllm-memory-utilization", type=float, default=0.88)
+    parser.add_argument("--vllm-batched-tokens", type=int, default=8192)
+    parser.add_argument("--vllm-enforce-eager", action="store_true")
     parser.add_argument("--data", nargs="+", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--batch-size", type=int, default=4)
