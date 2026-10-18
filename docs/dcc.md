@@ -1,0 +1,110 @@
+# DCC: contract and web research
+
+The DCC harness supports CUAD clause extraction and the
+[ByteDance-Seed WideSearch benchmark](https://github.com/ByteDance-Seed/WideSearch).
+It provides bounded document retrieval, HTTP web search and reading, structured
+answers, per-call token trajectories, and evaluation separate from rollout.
+
+## Data boundaries
+
+Task JSONL records contain `id`, `benchmark` (`cuad` or `widesearch`), `split`,
+`prompt`, `document`, `gold`, and optional `metadata`. CUAD source contracts can
+instead live in files referenced by `metadata.document_file`, relative to the
+JSONL file. `load_tasks` hydrates and caches those files. `validate_disjoint`
+rejects task-ID overlap and contracts reused across training and evaluation.
+Packed contract files additionally use `metadata.document_key`, avoiding one
+filesystem operation per contract on remote artifact storage.
+
+CUAD uses its official contract-level test split. Training and validation must
+come exclusively from the remaining contracts. WideSearch has 200 released
+tasks and no official training split; all 200 remain held out. Any web training
+curriculum must be authored independently and identified as such in metadata.
+Agent messages never contain `gold` or arbitrary metadata.
+
+Install the small scoring dependencies and prepare the pinned public datasets:
+
+```bash
+python -m pip install -r configs/dcc/requirements.txt
+python scripts/dcc_prepare_data.py --output-dir "$DATA_ROOT"
+```
+
+Set `DATA_ROOT` outside the checkout. To reuse previously downloaded raw data,
+also pass `--source-dir "$RAW_DATA_ROOT"`. The generated manifests record source
+revisions and split counts. The default CUAD validation split contains 20
+contracts, selected from its 408 training contracts.
+
+## Episode and training interface
+
+With the repository's `slime` directory on `PYTHONPATH`:
+
+```python
+from slime_plugins.dcc import EpisodeRunner, PolicyCompletion, load_tasks
+
+# async policy(messages, *, max_new_tokens, temperature) must return:
+# PolicyCompletion(text, exact_prompt_token_ids, generated_token_ids, logprobs)
+runner = EpisodeRunner(max_steps=4, max_new_tokens=1024)
+result = await runner.run(load_tasks("data/cuad/train.jsonl")[0], policy)
+segments, reward = result.trainable_steps, result.reward
+```
+
+Every model call is an independent prompt/completion pair. The policy loss must
+cover only that pair's generated tokens. Tool observations and chat-template
+tokens belong to the prompt and receive no loss. Do not concatenate the pairs
+into a flattened episode. Infrastructure failures have no trainable segments;
+policy formatting failures remain valid zero-reward training examples.
+
+CUAD starts with BM25-ranked contract excerpts and offers `search_document` and
+`read_document` tools with exact character offsets. Final answers are lists of
+`{"text": "verbatim span", "confidence": 0.9}`; an empty list means no clause.
+Training reward combines CUAD's official span-match F1 with verbatim grounding.
+The no-answer reward does not create an official true positive. Balance positive
+and negative questions when sampling training batches.
+
+WideSearch uses `web_search` and `fetch_url` and returns table-row objects with
+the requested column names and a `citations` URL list. Citation validity means
+the URLs were observed by the agent; it does not establish that a source entails
+every cell. Held-out answers are consulted only after predictions are saved.
+
+## Web providers
+
+Set `DCC_SEARCH_BACKEND` to `duckduckgo_lite` (default), `serper`, `brave`,
+`searxng`, or `bing_rss`. API providers require `SERPER_API_KEY` or
+`BRAVE_SEARCH_API_KEY`; SearXNG requires `DCC_SEARCH_URL`. Requests use
+`DCC_WEB_TIMEOUT` seconds (default 30). Configure these outside version control.
+DuckDuckGo can issue bot challenges, which invalidate the episode instead of
+creating a misleading training reward. A reliable search API is recommended
+for the full WideSearch run. Validate query relevance before using Bing RSS.
+
+## Scoring
+
+CUAD reports the official word-set Jaccard matching protocol, including the
+Parties substring rule, AUPR, precision at 80% and 90% recall, and additional
+operating-point micro-F1. AUPR uses the model's generated span confidences;
+these are not calibrated classifier probabilities.
+
+WideSearch scoring must disclose its protocol and judge model. Its official
+pipeline performs semantic table normalization/alignment before cell scoring;
+using a different judge is a custom-judge evaluation, and disabling the judge
+produces a strict matching proxy. Never label that proxy as the official score.
+Report the task denominator, failed episodes, and coverage alongside scores.
+
+Score previously saved `EpisodeResult.to_dict()` JSONL records with:
+
+```bash
+python scripts/dcc_evaluate.py \
+  --tasks "$DATA_ROOT/cuad/test.jsonl" \
+  --predictions "$RUN_ROOT/cuad_predictions.jsonl" \
+  --report "$RUN_ROOT/cuad_report.json"
+```
+
+The same command accepts WideSearch tasks. Add `--judge-base-url` and
+`--judge-model` to use the semantic evaluation protocol. Without those options,
+WideSearch results are labeled `strict_exact_proxy`. Missing predictions remain
+in the score denominator; judge failures make the report incomplete and are
+reported separately. Add `--base-url` and `--model` to generate missing episodes
+using an OpenAI-compatible endpoint. Generation resumes from existing task IDs.
+Use the local Hugging Face policy for training so exact token IDs are retained.
+
+Store generated data, trajectories, logs, checkpoints, and reports in the run's
+externally configured artifact directory. Runtime paths, credentials, hostnames,
+and hardware identifiers must stay out of committed configuration and reports.

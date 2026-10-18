@@ -144,6 +144,12 @@ python train_stackplanner.py \
 
 ## Optional OLE sample selection
 
+The `DCC` branch also provides a portable contract and web research harness for
+CUAD and WideSearch. It keeps benchmark labels out of agent context, retains
+separate policy-token trajectories for tool turns, and excludes infrastructure
+failures from policy training. See [the DCC workflow](docs/dcc.md) for data,
+tools, model integration, and evaluation protocols.
+
 OLE is disabled by default in all three templates. Enable it for A, B, or C
 with `ole_enabled: true` in the configuration or the CLI switch:
 
