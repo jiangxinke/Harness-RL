@@ -168,8 +168,9 @@ teacher episodes completed actual search/read/cite checks and scored exactly
 one against their public-source labels, yielding 174 supervised assistant
 segments with zero failed teachers. No official WideSearch task or reference
 enters this curriculum. See [dcc_web_curriculum.md](dcc_web_curriculum.md).
-Candidate training and policy validation remain in progress; the full-test
-scores above continue to identify the original selected adapter.
+The first mixed-training candidate has finished; policy validation remains in
+progress. The full-test scores above continue to identify the original selected
+adapter, rather than a new candidate.
 
 Grounded CUAD tool teachers add 128 training episodes from 38 clause categories,
 yielding 384 search/read/final segments. All 558 web and CUAD teacher segments
@@ -181,9 +182,27 @@ prompts or select evaluation sources.
 Matched two-step mixed LoRA trials completed with finite, nonzero gradients and
 saved adapters in both runtimes. NF4 took 86.51 and 85.75 seconds per step;
 BF16 took 4.97 and 4.63 seconds, with a measured 58.52 GiB allocation peak.
-The next 24-step candidate therefore uses BF16, with checkpoints at steps 12
-and 24. NF4 remains available when frozen weights do not fit. These trials
-establish execution and memory behavior, not final task quality.
+The 24-step BF16 candidate completed with checkpoints at steps 12 and 24.
+Every loss and gradient norm was finite and nonzero. It trained on 93 selected
+examples from 78 distinct tasks: 44 web segments, 26 CUAD tool segments,
+21 direct negative answers and only two direct positive answers. Three dynamic
+CUAD candidates were skipped for grounding or response-length limits. The
+558 eligible teacher segments are a dataset size, not a claim that all were
+used. Training took 255.6 seconds including setup, with a mean optimizer-step
+time of 4.68 seconds and a 60.17 GiB allocation peak. All 288 adapter tensors
+changed and remained finite. NF4 remains available when frozen weights do not
+fit. Runtime checks alone do not establish task quality.
+
+Matched single-worker BF16 validation of the original adapter completed all
+82 questions with no infrastructure failures. Enabling the training-only
+retrieval profile raised micro F1 from 0.340426 to 0.433333 and AUPR from
+0.167424 to 0.258015. These comparisons use the same adapter, task IDs,
+decoding budgets and worker configuration. The earlier eight-worker validation
+above has different batch composition; its score must not be substituted for
+this matched baseline. Checkpoint selection and further training remain in
+progress. The small number of direct positive examples and lack of negative
+tool trajectories motivate the next training mixture; official test answers
+are not used to choose that mixture.
 
 ## Reproduction and artifacts
 
