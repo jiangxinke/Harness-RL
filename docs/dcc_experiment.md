@@ -211,7 +211,8 @@ these evidence failures cannot all be attributed to model behavior alone.
 CUAD official test scoring and all 200 WideSearch generations are complete;
 WideSearch custom judging is **in progress**. Both final generation runs use
 source snapshot `b25a4d63`, graph vLLM/BF16 and eight independent TP1 engines.
-The separately frozen scoring snapshot is `1088aa2f`, protocol `same_entity_v3`.
+The separately frozen final scoring snapshot is `0b060a63`, protocol
+`same_entity_v5`; the first v3 attempt is retained as historical evidence.
 CUAD uses the training-only profile, eight initial chunks,
 8,192/1,024 prompt/completion budgets, three turns and batch size eight.
 WideSearch uses 16,384/8,192 budgets, 12 turns, batch size four, automatic page
@@ -282,16 +283,17 @@ the schema guard rejects that table, so the violation does not create a false
 positive score. V4 tried independent per-origin candidate checks with a brief
 analysis before the final JSON. Although its 12 header cases pass, it misses
 the compatible `location` to `city` mapping in two other cases, leaving only
-37/39 correct end-to-end scores. V4 is rejected. The final scorer restores
-the v3 production implementation and accepts its single known raw header
+37/39 correct end-to-end scores. V4 is rejected. The initial formal scorer
+restores the v3 production implementation and accepts its single known raw header
 abstention limitation explicitly: 39/39 correct end-to-end metrics, 38/39
 combined metric and raw checks, and 11/12 raw header checks. The raw response
 and failed assertion remain recorded; calibration is not reported as fully
 passed. Entity and cell prompts and numeric scoring remain unchanged.
 The fixed artificial cases were reused while revising the scorer, so this
 is development calibration, not an untouched holdout estimate. The choice
-of v3 and the accepted limitation are frozen before formal custom judging;
-official test scores are not used to select the scorer.
+of v3 and the accepted limitation are frozen before the first formal
+custom-judge attempt; official aggregate test scores are not used to select
+the scorer.
 The adapted scorer is versioned separately from the unchanged `b25a4d63`
 generation snapshot. Its strict proxy must also be recomputed from the saved
 predictions; the original scoring files are retained separately. These are
@@ -317,7 +319,22 @@ production mappings; a skipped model call is not counted as a raw model success.
 The earlier v3 acceptance and failed pass remain historical evidence, and v5
 acceptance is recorded separately before its formal scoring run. These changes
 do not alter policy weights, selected checkpoint, generated answers or test
-denominators. The v5 GPU calibration and final semantic scoring are pending.
+denominators.
+
+The frozen v5 implementation gives correct final metrics on all 39 original
+development cases, with no judge, runtime or format errors. Effective header
+mapping and raw model header checks each pass 11/12; the sole failure is the
+same ambiguous geography case as v3. The raw model maps `location` to `city`
+and omits `place`; the schema guard rejects the incomplete table and preserves
+the expected zero score. The combined calibration remains 38/39 and
+`calibration_passed=false`. Acceptance is recorded separately as
+`accepted_with_known_limitation=true`, under a rule frozen before results:
+39/39 final metrics, no new raw/effective failures, and only this named existing
+ambiguity allowed. All generation logits checked during calibration are finite.
+The eight-worker run takes 80.1 seconds including loading. Seventeen separate
+artificial format/deduplication probes also pass; these do not enlarge the
+39-case semantic calibration denominator. The final full-200 semantic scoring
+is pending.
 
 ## Checks, reproduction and artifacts
 
@@ -337,6 +354,14 @@ regressions. The v3 header revision passes 100 checks across the same three
 targeted test files; the v4 candidate-analysis revision passes 102. The final
 v3 restoration also passes 102, retaining the general fenced-JSON parsing
 and header-abstention regressions.
+
+The v5 alignment correction passes 114 targeted CPU checks and 29 independent
+boundary assertions. Independent review confirms that all three prompt strings
+and every production function except `_align` remain byte-identical to the
+initial v3 scoring source. The 17 format/deduplication probes and eight
+additional runner-check scenarios pass independently. Fatal-error Ruff rules
+and diff checks pass; this does not claim that all existing style warnings
+are resolved.
 
 Judge provenance changes at `360971f5` pass 90 targeted checks and reject
 mixed judge models, budgets, runtime versions, adapters or generation records.
