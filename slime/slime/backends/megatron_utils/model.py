@@ -202,6 +202,10 @@ def get_optimizer_param_scheduler(args: Namespace, optimizer: MegatronOptimizer)
     # plateau slightly early or late. Pass ``--lr-decay-iters`` explicitly if you
     # need exact decay control.
     args.train_iters = args.num_rollout * args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size
+    if getattr(args, "reflect_self_distill", False):
+        from slime_plugins.loongreflect.self_distill import build_update_objectives
+
+        args.train_iters *= len(build_update_objectives(args))
     if args.lr_decay_iters is None:
         args.lr_decay_iters = args.train_iters
     lr_decay_steps = args.lr_decay_iters * args.global_batch_size
@@ -594,6 +598,11 @@ def train_one_step(
                     "returns",
                     "rollout_log_probs",
                     "teacher_log_probs",
+                    "reflect_masks",
+                    "rollout_reflect_mask_sums",
+                    "reflect_policy_weights",
+                    "reflect_distill_weights",
+                    "reflect_train_phases",
                     "rollout_mask_sums",
                     "metadata",
                 ],
@@ -727,6 +736,7 @@ def train(
     data_iterator: Sequence[DataIterator],
     num_microbatches: Sequence[int],
     global_batch_sizes: Sequence[int],
+    optimizer_step_offset: int | None = None,
 ) -> None:
     """Run training over a rollout consisting of multiple steps.
 
@@ -837,7 +847,6 @@ def train(
 
     # Run training iterations till done.
     for step_id in range(num_steps_per_rollout):
-
         # Run training step.
         loss_dict, grad_norm, optimizer_update_successful = train_one_step(
             args,
@@ -888,7 +897,7 @@ def train(
             and mpu.get_tensor_model_parallel_rank() == 0
             and mpu.get_pipeline_model_parallel_rank() == mpu.get_pipeline_model_parallel_world_size() - 1
         ):
-            accumulated_step_id = rollout_id * num_steps_per_rollout + step_id
+            accumulated_step_id = (rollout_id * num_steps_per_rollout if optimizer_step_offset is None else optimizer_step_offset) + step_id
             role = getattr(model[0], "role", "actor")
             role_tag = "" if role == "actor" else f"{role}-"
             log_dict = {

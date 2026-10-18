@@ -66,6 +66,21 @@ class _TensorBackuperNormal(TensorBackuper):
             self._backups[dst_tag][name].copy_(self._backups[src_tag][name])
 
     @torch.no_grad()
+    def ema_update(self, *, src_tag: str, dst_tag: str, tau: float):
+        if not 0.0 <= tau <= 1.0:
+            raise ValueError(f"EMA tau must be in [0, 1], got {tau}")
+        source = self._backups[src_tag]
+        destination = self._backups[dst_tag]
+        if source.keys() != destination.keys():
+            raise ValueError("EMA source/destination tensor names differ")
+        for name, dst in destination.items():
+            src = source[name]
+            if dst.is_floating_point() or dst.is_complex():
+                dst.mul_(tau).add_(src, alpha=1.0 - tau)
+            else:
+                dst.copy_(src)
+
+    @torch.no_grad()
     def restore(self, tag: str) -> None:
         backup_dict = self._backups[tag]
         for name, param in self._source_getter():

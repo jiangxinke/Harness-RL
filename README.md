@@ -36,6 +36,14 @@ and weight synchronization.
 └── train_stackplanner.py             # Training entry point
 ```
 
+## Optional LoongReflect plugin
+
+The `loongreflect` branch adds reversible reflection-tree rollouts and the
+LONG-SLIME Joint / Fast-Slow EMA self-distillation objectives. Launch explicitly
+with `python train_loongreflect.py --help`; existing StackPlanner, OLE and CAPO
+training defaults are preserved. See [configuration, algorithm differences and
+validation](docs/loongreflect.md) before running experiments.
+
 ## Installation
 
 The supported setup is Linux x86_64 with NVIDIA GPUs, a compatible CUDA driver,

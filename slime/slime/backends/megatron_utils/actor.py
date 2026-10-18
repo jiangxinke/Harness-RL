@@ -104,6 +104,11 @@ class MegatronTrainRayActor(TrainRayActor):
             "microbatch_group_size_per_vp_stage": microbatch_group_size_per_vp_stage,
         }
 
+        if getattr(args, "reflect_self_distill", False):
+            from slime_plugins.loongreflect.runtime import validate_runtime
+
+            validate_runtime(args, self.train_parallel_config)
+
         start_rollout_id = loaded_rollout_id + 1
 
         if role == "critic":
@@ -121,6 +126,10 @@ class MegatronTrainRayActor(TrainRayActor):
         )
         self._active_model_tag: str | None = "actor"
         self.weights_backuper.backup("actor")
+        if getattr(self.args, "reflect_self_distill", False):
+            from slime_plugins.loongreflect.runtime import initialize_teacher
+
+            initialize_teacher(self, loaded_rollout_id)
 
         if with_ref:
             self.load_other_checkpoint("ref", args.ref_load)
@@ -254,6 +263,10 @@ class MegatronTrainRayActor(TrainRayActor):
         rollout_data["loss_masks"] = [
             t.to(device=device, dtype=torch.int, non_blocking=True) for t in rollout_data["loss_masks"]
         ]
+        if "teacher_tokens" in rollout_data:
+            rollout_data["teacher_tokens"] = [t.to(device=device, dtype=torch.long, non_blocking=True) for t in rollout_data["teacher_tokens"]]
+        if "rollout_reflect_mask_sums" in rollout_data:
+            rollout_data["rollout_reflect_mask_sums"] = rollout_data["rollout_reflect_mask_sums"].to(device=device, dtype=torch.float32, non_blocking=True)
         if "rollout_mask_sums" in rollout_data:
             # Promote precomputed per-rollout mask totals to GPU tensors here
             # (matching loss_masks) so the loss reducer can just divide.
@@ -274,7 +287,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 for mm_dict in rollout_data["multimodal_train_inputs"]
             ]
 
-        for key in ["rollout_log_probs", "teacher_log_probs"]:
+        for key in ["rollout_log_probs", "teacher_log_probs", "position_rewards", "reflect_masks"]:
             if key not in rollout_data:
                 continue
             rollout_data[key] = [
@@ -365,6 +378,26 @@ class MegatronTrainRayActor(TrainRayActor):
                 use_rollout_top_p_replay=True,
             )
 
+    def compute_teacher_log_prob(
+        self,
+        rollout_data: RolloutBatch,
+        num_microbatches: list[int],
+    ) -> dict[str, list[torch.Tensor]]:
+        """Score student responses under the private answer-aware prompt."""
+        teacher_data = dict(rollout_data)
+        teacher_data["tokens"] = rollout_data["teacher_tokens"]
+        teacher_data["total_lengths"] = rollout_data["teacher_total_lengths"]
+        teacher_iterators = get_data_iterator(teacher_data)
+        return forward_only(
+            get_log_probs_and_entropy,
+            self.args,
+            self.model,
+            teacher_iterators,
+            num_microbatches,
+            store_prefix="teacher_",
+            use_rollout_top_p_replay=False,
+        )
+
     def train(self, rollout_id: int, rollout_data_ref: Box, external_data=None):
         if self.args.debug_rollout_only:
             return None
@@ -439,7 +472,14 @@ class MegatronTrainRayActor(TrainRayActor):
                     )
 
                 # Forward teacher model to get teacher_log_probs for Megatron-based OPD
-                if "teacher" in self.weights_backuper.backup_tags:
+                if getattr(self.args, "reflect_self_distill", False):
+                    self._switch_model("ema_teacher")
+                    try:
+                        rollout_data.update(self.compute_teacher_log_prob(rollout_data, num_microbatches))
+                    finally:
+                        rollout_data.pop("teacher_tokens", None)
+                        rollout_data.pop("teacher_total_lengths", None)
+                elif "teacher" in self.weights_backuper.backup_tags:
                     if self.args.use_routing_replay:
                         os.environ["ROUTING_REPLAY_STAGE"] = "fallthrough"
                     self._switch_model("teacher")
@@ -509,15 +549,25 @@ class MegatronTrainRayActor(TrainRayActor):
             if self.args.use_routing_replay:
                 os.environ["ROUTING_REPLAY_STAGE"] = "replay_backward"
             with timer("actor_train"):
-                train(
-                    rollout_id,
-                    self.model,
-                    self.optimizer,
-                    self.opt_param_scheduler,
-                    data_iterator,
-                    num_microbatches,
-                    global_batch_sizes,
-                )
+                if getattr(self.args, "reflect_self_distill", False):
+                    from slime_plugins.loongreflect.self_distill import build_update_objectives, materialize_update_objective
+
+                    objectives = build_update_objectives(self.args)
+                else:
+                    objectives = [None]
+                for substep, objective in enumerate(objectives):
+                    if objective is not None:
+                        materialize_update_objective(rollout_data, objective)
+                    train(
+                        rollout_id,
+                        self.model,
+                        self.optimizer,
+                        self.opt_param_scheduler,
+                        data_iterator,
+                        num_microbatches,
+                        global_batch_sizes,
+                        optimizer_step_offset=(rollout_id * len(objectives) + substep) * len(num_microbatches),
+                    )
 
             self.prof.step(rollout_id=rollout_id)
 
@@ -528,6 +578,11 @@ class MegatronTrainRayActor(TrainRayActor):
 
         # update the cpu actor weight to the latest model
         self.weights_backuper.backup("actor")
+
+        if getattr(self.args, "reflect_self_distill", False):
+            from slime_plugins.loongreflect.runtime import update_teacher
+
+            update_teacher(self, rollout_id)
 
         # Update ref model if needed
         if (
@@ -557,6 +612,10 @@ class MegatronTrainRayActor(TrainRayActor):
             maybe_finalize_async_save(blocking=True)
 
         save(rollout_id, self.model, self.optimizer, self.opt_param_scheduler)
+        if self.role == "actor" and getattr(self.args, "reflect_self_distill", False):
+            from slime_plugins.loongreflect.runtime import save_teacher
+
+            save_teacher(self, rollout_id)
 
         if force_sync and self.args.async_save:
             maybe_finalize_async_save(blocking=True)

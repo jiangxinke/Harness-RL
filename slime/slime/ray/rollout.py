@@ -48,6 +48,9 @@ _ROLLOUT_DATA_TENSOR_DTYPES = {
     "rollout_top_p_token_ids": torch.int32,
     "rollout_top_p_token_offsets": torch.int32,
     "teacher_log_probs": torch.float32,
+    "position_rewards": torch.float32,
+    "reflect_masks": torch.float32,
+    "teacher_tokens": torch.long,
     "rollout_routed_experts": None,
 }
 
@@ -105,6 +108,9 @@ def _tensorize_rollout_data_for_training(rollout_data: dict[str, Any]) -> None:
             rollout_data["rollout_mask_sums"],
             dtype=torch.float32,
         )
+
+    if "rollout_reflect_mask_sums" in rollout_data:
+        rollout_data["rollout_reflect_mask_sums"] = _cpu_tensor(rollout_data["rollout_reflect_mask_sums"], dtype=torch.float32)
 
 
 @dataclasses.dataclass
@@ -771,6 +777,22 @@ class RolloutManager:
             loss_masks.append(sample.loss_mask)
         train_data["loss_masks"] = loss_masks
 
+        if any(sample.position_rewards is not None for sample in samples):
+            if not all(sample.position_rewards is not None for sample in samples):
+                raise ValueError("position_rewards must be provided for every compact rollout sample")
+            train_data["position_rewards"] = [sample.position_rewards for sample in samples]
+
+        if any(sample.reflect_mask is not None for sample in samples):
+            if not all(sample.reflect_mask is not None for sample in samples):
+                raise ValueError("reflect_mask must be provided for every compact rollout sample")
+            train_data["reflect_masks"] = [sample.reflect_mask for sample in samples]
+
+        if any(sample.teacher_tokens is not None for sample in samples):
+            if not all(sample.teacher_tokens is not None for sample in samples):
+                raise ValueError("teacher_tokens must be provided for every compact rollout sample")
+            train_data["teacher_tokens"] = [sample.teacher_tokens for sample in samples]
+            train_data["teacher_total_lengths"] = [len(sample.teacher_tokens) for sample in samples]
+
         # Per-rollout aggregate, precomputed at the step level (where we can
         # see every sample of every rollout) and broadcast per-sample so the
         # per-mb loss reducer uses the correct whole-rollout denominator even
@@ -787,6 +809,12 @@ class RolloutManager:
         for rid, ms in zip(rollout_id_list, mask_sums_per_sample, strict=True):
             rollout_total_mask[rid] = rollout_total_mask.get(rid, 0) + ms
         train_data["rollout_mask_sums"] = [rollout_total_mask[rid] for rid in rollout_id_list]
+
+        if "reflect_masks" in train_data:
+            rollout_total_reflect: dict[int, int] = {}
+            for rid, mask in zip(rollout_id_list, train_data["reflect_masks"], strict=True):
+                rollout_total_reflect[rid] = rollout_total_reflect.get(rid, 0) + sum(mask)
+            train_data["rollout_reflect_mask_sums"] = [rollout_total_reflect[rid] for rid in rollout_id_list]
 
         # Overwrite raw_reward when available. Mixed-source batches may only
         # populate this field for a subset of samples (e.g. SWE but not code).
@@ -893,6 +921,11 @@ class RolloutManager:
                 "source_names",
                 "prompt",
                 "teacher_log_probs",
+                "position_rewards",
+                "reflect_masks",
+                "teacher_tokens",
+                "teacher_total_lengths",
+                "rollout_reflect_mask_sums",
             ]:
                 if key not in data:
                     continue

@@ -124,6 +124,9 @@ class Sample:
     rollout_top_p_token_ids: list[int] | torch.Tensor | None = None
     rollout_top_p_token_offsets: list[int] | torch.Tensor | None = None
     rollout_routed_experts: list[list[int]] | torch.Tensor | None = None  # Routed experts from rollout engine
+    position_rewards: list[float] | None = None
+    reflect_mask: list[int] | None = None
+    teacher_tokens: list[int] | None = None
     remove_sample: bool = False
     teacher_log_probs: list[float] | None = None  # Log probabilities from teacher model for OPD
 
@@ -416,6 +419,15 @@ class Sample:
                 self.status = Sample.Status.COMPLETED
 
     def _validate_response_metadata_lengths(self):
+        for name in ("position_rewards", "reflect_mask"):
+            values = getattr(self, name)
+            if values is not None and len(values) != self.response_length:
+                raise ValueError(f"{name} length {len(values)} != response_length {self.response_length}")
+        if self.teacher_tokens is not None and len(self.teacher_tokens) < self.response_length:
+            raise ValueError("teacher_tokens cannot be shorter than the sampled response")
+        if self.teacher_tokens is not None and self.response_length:
+            if self.teacher_tokens[-self.response_length :] != self.tokens[-self.response_length :]:
+                raise ValueError("teacher_tokens must end with the exact sampled student response")
         if self.loss_mask is not None and len(self.loss_mask) != self.response_length:
             raise ValueError(f"loss_mask length {len(self.loss_mask)} != response_length {self.response_length}")
 
