@@ -260,6 +260,12 @@ also misses that header pair. Revision `same_entity_v3` therefore gives schema
 labels a separate prompt: a broader label can name the same field when its
 counterpart in the required schema is unambiguous, while competing fields
 require abstention. Entity identity and cell prompts are unchanged from v2.
+V3 gives correct end-to-end scores on all 39 synthetic cases, but one of the
+12 new header cases still violates its raw ambiguity-abstention assertion;
+the schema guard rejects that table, so the violation does not create a false
+positive score. V4 adds independent per-origin candidate checks with a brief
+analysis before the final JSON. Entity and cell prompts and numeric scoring
+remain unchanged. The same fixed 39 cases are retained for the final check.
 The adapted scorer is versioned separately from the unchanged `b25a4d63`
 generation snapshot. Its strict proxy must also be recomputed from the saved
 predictions; the original scoring files are retained separately. These are
@@ -281,7 +287,7 @@ checks. Independent review covers header and entity collisions, per-cell
 multiple criteria, exact-identity anchors, conflicting explicit versions and
 missing or null legacy versions. No official test item is used for these
 regressions. The v3 header revision passes 100 checks across the same three
-targeted test files.
+targeted test files; the v4 candidate-analysis revision passes 102.
 
 Judge provenance changes at `360971f5` pass 90 targeted checks and reject
 mixed judge models, budgets, runtime versions, adapters or generation records.

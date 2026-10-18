@@ -293,6 +293,32 @@ def test_ambiguous_header_can_abstain_instead_of_guessing_a_geographic_field():
     assert _align(["location"], ["city", "country"], judge, 32, 32000, column_headers=True) == {}
 
 
+def test_multiple_broad_headers_require_independent_full_schema_candidate_checks():
+    from slime_plugins.dcc.widesearch_metrics import _align
+
+    def judge(prompt):
+        assert "For EACH origin independently" in prompt
+        assert "exactly ONE compatible candidate" in prompt
+        assert "matching list lengths, list position" in prompt
+        assert "eliminating a candidate because another response label might use it" in prompt
+        return {}
+
+    assert _align(["location", "place"], ["city", "country"], judge, 32, 32000, column_headers=True) == {}
+
+
+def test_header_candidate_analysis_before_fenced_json_is_parsed_without_extra_mappings():
+    from slime_plugins.dcc.widesearch_metrics import _align
+
+    def judge(prompt):
+        assert "briefly analyze each origin" in prompt
+        return (
+            "organisation: one candidate, organization. Geographic field: city or country, ambiguous.\n"
+            '```json\n{"organisation": "organization"}\n```'
+        )
+
+    assert _align(["organisation", "geographic field"], ["organization", "city", "country"], judge, 32, 32000, column_headers=True) == {"organisation": "organization"}
+
+
 def test_header_alignment_cannot_create_duplicate_columns():
     def judge(prompt):
         assert "Column headers:" in prompt

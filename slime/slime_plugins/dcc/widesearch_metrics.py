@@ -20,7 +20,7 @@ from urllib.request import Request, urlopen
 
 import pandas as pd
 
-ALIGNMENT_PROTOCOL = "same_entity_v3"
+ALIGNMENT_PROTOCOL = "same_entity_v4"
 
 HEADER_ALIGN_PROMPT = """Your task is to align two vocabularies of table column headers: response-table labels and the required reference schema. Column headers describe fields, not the identity of named entities.
 
@@ -37,9 +37,12 @@ The reference vocabulary is as follows:
 The alignment rules are as follows:
 1. An exact string match must map to itself. Otherwise consider equivalent field meanings, including synonyms, translations, abbreviations, and broader or narrower labels in this schema. Do not require named-entity identity for header labels.
 2. A broader label can map to a more specific reference field when that is its unambiguous counterpart in the given schema. For example, "institution" can map to "organization"; "location" can map to "city" when "city" is the only compatible geographic reference field. These are valid header matches even though the labels are not identical in scope.
-3. Compare against the full reference schema. If both "city" and "country" are available, "location" alone is ambiguous: omit it rather than guessing. Do not choose by list position or force every header to have a match. Incompatible fields such as "birthplace" and "date of birth" must not match.
-4. If no suitable field exists or multiple counterparts remain plausible, OMIT that origin entirely. If none match, return {{}}.
-5. Each output key must be copied exactly from the response vocabulary and each output value exactly from the reference vocabulary. Preserve original strings and formatting. Return only the JSON object, without explanations or additional keys.
+3. For EACH origin independently, first list ALL compatible candidates in the FULL reference schema, including broader and narrower field meanings. Map it only if exactly ONE compatible candidate remains. If both "city" and "country" are available, "location" alone is ambiguous: omit it rather than guessing. Incompatible fields such as "birthplace" and "date of birth" must not match.
+4. Multiple broad response labels do not disambiguate one another. Never assign them by matching list lengths, list position, or eliminating a candidate because another response label might use it. Assess every origin against the full schema independently; a plausible nearest candidate is insufficient when other compatible candidates remain.
+5. If no suitable field exists or multiple counterparts remain plausible, OMIT that origin entirely. If none match, return {{}}.
+6. Each output key must be copied exactly from the response vocabulary and each output value exactly from the reference vocabulary. Preserve original strings and formatting. The JSON object must contain only confirmed mappings.
+
+First briefly analyze each origin and its full set of compatible candidates. Then output the final alignment object in a fenced JSON block. Do not skip the per-origin ambiguity check.
 
 Please output the alignment results in the following format:
 ```json
