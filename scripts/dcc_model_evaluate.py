@@ -55,6 +55,11 @@ async def evaluate(args):
         )
     }
     manifest["world_size"] = world
+    quantization = getattr(args, "quantization", "none")
+    if quantization != "none":
+        # Preserve existing BF16 manifests and reject changing precision when
+        # resuming a quantized run. Quantized scores need a separate directory.
+        manifest["quantization"] = quantization
     if any(task.benchmark == "widesearch" for task in tasks):
         manifest["search_backend"] = WebTools().backend
         manifest["search_endpoint"] = os.environ.get("DCC_SEARCH_URL")
@@ -82,8 +87,12 @@ async def evaluate(args):
     ]
     if todo:
         model, tokenizer = load_policy_model(
-            args.model, adapter=args.adapter, rank=local
+            args.model, adapter=args.adapter, rank=local, quantization=quantization
         )
+        if hasattr(model, "dcc_quantization_report"):
+            (output / f"quantization_rank{rank}.json").write_text(
+                json.dumps(model.dcc_quantization_report, indent=2) + "\n"
+            )
         policy = HFPolicy(
             model,
             tokenizer,
@@ -209,7 +218,9 @@ def score(args):
         # Frozen base judge, after all policy predictions are persisted.
         tasks = [task for task in tasks if task.benchmark == "widesearch"][rank::world]
         saved = {task.id: saved[task.id] for task in tasks}
-        model, tokenizer = load_policy_model(args.model, rank=local)
+        model, tokenizer = load_policy_model(
+            args.model, rank=local, quantization=getattr(args, "quantization", "none")
+        )
         policy = HFPolicy(
             model,
             tokenizer,
@@ -273,6 +284,7 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--model-name", default="Qwen/Qwen3-30B-A3B-Instruct-2507")
     parser.add_argument("--adapter")
+    parser.add_argument("--quantization", choices=("none", "nf4"), default="none")
     parser.add_argument("--data", nargs="+", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--batch-size", type=int, default=4)

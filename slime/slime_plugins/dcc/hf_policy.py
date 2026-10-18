@@ -156,10 +156,17 @@ class HFPolicy:
         return values
 
 
-def load_policy_model(model_name: str, *, adapter: str | None = None, trainable: bool = False, rank: int = 0, lora_rank: int = 8):
+def load_policy_model(model_name: str, *, adapter: str | None = None, trainable: bool = False, rank: int = 0, lora_rank: int = 8, quantization: str = "none"):
     from peft import LoraConfig, PeftModel, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
+    if quantization not in {"none", "nf4"}:
+        raise ValueError("quantization must be 'none' or 'nf4'")
+    load_kwargs = {"experts_implementation": "grouped_mm"}
+    if quantization == "nf4":
+        from .hf_quantization import nf4_load_kwargs
+
+        load_kwargs = nf4_load_kwargs()
     torch.cuda.set_device(rank)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.padding_side = "left"
@@ -170,8 +177,25 @@ def load_policy_model(model_name: str, *, adapter: str | None = None, trainable:
         dtype=torch.bfloat16,
         device_map={"": rank},
         attn_implementation="sdpa",
-        experts_implementation="grouped_mm",
+        **load_kwargs,
     )
+    report = None
+    if quantization == "nf4":
+        from .hf_quantization import quantization_report
+
+        # Validate before PEFT preparation: a fused, unquantized expert would
+        # otherwise be upcast to FP32 and could cause a large memory spike.
+        quantization_report(model)
+        from peft import prepare_model_for_kbit_training
+
+        # Also preserve these base dtypes for inference so an adapter reload
+        # evaluates the same precision used when it was trained.
+        model = prepare_model_for_kbit_training(
+            model,
+            use_gradient_checkpointing=trainable,
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+        )
+        report = quantization_report(model)
     if adapter:
         model = PeftModel.from_pretrained(model, adapter, is_trainable=trainable)
     elif trainable:
@@ -188,6 +212,8 @@ def load_policy_model(model_name: str, *, adapter: str | None = None, trainable:
     if trainable:
         model.enable_input_require_grads()
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    if report is not None:
+        model.dcc_quantization_report = report
     return model, tokenizer
 
 

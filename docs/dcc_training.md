@@ -77,6 +77,58 @@ after measuring memory use. An out-of-memory error aborts the run rather than
 becoming a model score; lower the batch size and resume with unchanged semantic
 budgets. Apply the same caution to local judge batching.
 
+Full-expert NF4 is an explicit alternative when the BF16 base weights leave too
+little memory for activations. Install
+`configs/dcc/requirements-quantized.txt` in a **different environment** and add
+`--quantization nf4` to training or evaluation. The default remains BF16 with
+Transformers 5.20.1 and grouped MoE. The quantized environment pins Transformers
+4.57.6, whose Qwen3 MoE experts use individual linear modules that bitsandbytes
+can quantize. It uses NF4 weights, double quantization, BF16 computation and
+attention LoRA. Expert computation uses that version's individual expert
+implementation; it does not use grouped MoE and may have lower throughput.
+Do not replace the dependency versions in an environment with running jobs.
+
+Transformers 5.20.1 stores experts as fused three-dimensional parameters.
+Its native bitsandbytes integration only converts linear modules, so simply
+setting `load_in_4bit` there leaves almost all expert weights unquantized.
+PEFT preparation can then upcast those frozen weights to FP32. The optional
+loader rejects that environment, requires every expert matrix to be NF4 before
+preparing the model for k-bit training, and prepares the base **before** adding
+or loading trainable adapters. Router and output-head weights stay unquantized;
+PEFT preparation preserves quantized experts and casts other floating base
+weights to FP32. Quantized inference uses the same base dtypes as training,
+without enabling gradient checkpointing. Only adapters receive gradients and
+optimizer updates.
+
+Training logs and quantized evaluation reports record the original logical base
+parameter count, expert coverage, unquantized FP32 fraction, packed parameter
+bytes and quantization metadata bytes. Packed tensor element counts alone do
+not describe the original model size. These storage figures exclude activations,
+KV cache, CUDA workspaces and allocator reservations; use actual memory results
+to choose sequence lengths and batches. Quantization changes predictions, so
+use separate output directories and report quantized precision for both policy
+and any local judge. It does not change the model's original parameter count.
+
+Run the CPU tiny-model checks in that separate environment with
+`CUDA_VISIBLE_DEVICES='' PYTHONPATH=slime python -m pytest tests/test_dcc_quantization.py`.
+They load and quantize real tiny Qwen3 MoE experts, verify finite nonzero adapter
+gradients through frozen NF4 experts, check that frozen weights stay unchanged,
+and round-trip an adapter checkpoint. Before scheduling a full run, measure one
+model on an available GPU:
+
+```bash
+python scripts/dcc_quantization_smoke.py \
+  --model "$MODEL_CACHE" --output-dir "$RUN_ROOT/nf4-smoke" \
+  --prompt-tokens 4096 --max-new-tokens 16 --train-step
+```
+
+The smoke records actual loading, full prefill and synthetic training-step
+memory and timing. Its synthetic prompt never reads benchmark labels. A short
+synthetic step verifies runtime correctness; it does not establish training
+quality. Raise the prefill budget in a separate run to test the intended context
+length. The NF4 route remains subject to real-device validation and does not
+claim measured memory savings until that smoke has succeeded.
+
 The evaluator resumes saved task IDs and rejects changed generation settings
 in the same directory. Use different directories for base and trained policies.
 `--retry-infrastructure` retries infrastructure failures. Set a reliable search

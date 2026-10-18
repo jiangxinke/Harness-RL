@@ -124,7 +124,10 @@ async def train(args):
         trainable=True,
         rank=local,
         lora_rank=args.lora_rank,
+        quantization=args.quantization,
     )
+    if hasattr(model, "dcc_quantization_report"):
+        record(event="quantization", **model.dcc_quantization_report)
     parameters = [
         parameter for parameter in model.parameters() if parameter.requires_grad
     ]
@@ -317,6 +320,7 @@ def main():
     parser.add_argument("--rl-steps", type=int, default=24)
     parser.add_argument("--group-size", type=int, default=2)
     parser.add_argument("--lora-rank", type=int, default=8)
+    parser.add_argument("--quantization", choices=("none", "nf4"), default="none")
     parser.add_argument("--learning-rate", type=float, default=2e-5)
     parser.add_argument("--sft-coefficient", type=float, default=0.1)
     parser.add_argument("--max-prompt-tokens", type=int, default=4096)
