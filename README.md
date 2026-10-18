@@ -150,6 +150,12 @@ separate policy-token trajectories for tool turns, and excludes infrastructure
 failures from policy training. See [the DCC workflow](docs/dcc.md) for data,
 tools, model integration, and evaluation protocols.
 
+The completed rank-8 LoRA experiment reports CUAD AUPR 22.83% and micro F1
+42.21% on 4,182 questions. On all 200 WideSearch tasks, the custom base-Qwen
+judge gives row F1 0.55% and item F1 1.52%; these are not official GPT-4.1
+leaderboard scores. See [the experiment report](docs/dcc_experiment.md) for
+training, selection, full results, reproduction and limitations.
+
 ## Optional OLE sample selection
 
 OLE is disabled by default in all three templates. Enable it for A, B, or C

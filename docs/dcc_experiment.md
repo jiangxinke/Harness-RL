@@ -1,5 +1,21 @@
 # DCC experiment
 
+The final run uses one validation-selected rank-8 LoRA adapter for both tests.
+All questions, including policy and evidence failures, remain in the metrics.
+
+| Benchmark | Test questions | Metric | Final score |
+| --- | ---: | --- | ---: |
+| CUAD | 4,182 | AUPR | 22.8265% |
+| CUAD | 4,182 | Micro F1 | 42.2087% |
+| WideSearch, custom Qwen judge | 200 | Macro row F1 | 0.5501% |
+| WideSearch, custom Qwen judge | 200 | Macro item F1 | 1.5212% |
+
+WideSearch complete-table accuracy is 0%. Its adapted semantic evaluator uses a
+frozen base-Qwen judge; these are not published GPT-4.1 leaderboard scores.
+The strict string-match proxy is reported separately below. WideSearch remains
+weak: 127 of 200 tasks fail the evidence guard, and all searches use fallback
+providers. The report retains these failures and the scoring limitations.
+
 ## Model and held-out data
 
 The model is `Qwen/Qwen3-30B-A3B-Instruct-2507`, revision
@@ -208,11 +224,11 @@ class, so their HTTP status codes cannot be recovered. Zero task-level
 `infrastructure_error` does not mean all external pages were accessible, and
 these evidence failures cannot all be attributed to model behavior alone.
 
-CUAD official test scoring and all 200 WideSearch generations are complete;
-WideSearch custom judging is **in progress**. Both final generation runs use
-source snapshot `b25a4d63`, graph vLLM/BF16 and eight independent TP1 engines.
-The separately frozen v5 scoring attempt uses `0b060a63`; earlier attempts
-are retained as historical evidence. Its replacement is described below.
+CUAD official test scoring, all 200 WideSearch generations, and their final
+strict/custom scoring are complete. Both final generation runs use source
+snapshot `b25a4d63`, graph vLLM/BF16 and eight independent TP1 engines.
+The accepted WideSearch scorer is `same_entity_v9`, source `4ece9e7a`.
+Earlier unsuccessful scoring attempts remain historical evidence below.
 CUAD uses the training-only profile, eight initial chunks,
 8,192/1,024 prompt/completion budgets, three turns and batch size eight.
 WideSearch uses 16,384/8,192 budgets, 12 turns, batch size four, automatic page
@@ -237,8 +253,10 @@ The new scoring snapshot recomputes the strict exact-match proxy from these
 unchanged predictions: macro row precision/recall/F1 are 0.008354/0.004288/0.004833,
 item precision/recall/F1 are 0.022740/0.012131/0.013661, and full-table accuracy
 is zero. All 200 tasks remain in each denominator. These are string-match
-proxy scores; custom semantic scores will be reported separately after all
-judge shards finish. Search occurs on 197 tasks, with 1,050 calls: 448 Seznam,
+proxy scores. The complete custom-Qwen semantic run has macro row
+precision/recall/F1 0.010580/0.004712/0.005501 and item
+precision/recall/F1 0.025848/0.013390/0.015212; full-table accuracy is zero.
+It covers all 200 tasks, with `complete=true` and zero judge errors. Search occurs on 197 tasks, with 1,050 calls: 448 Seznam,
 600 Baidu mobile and two Wikipedia calls. All calls use fallback providers
 because the configured public-web provider reports challenge/cooldown. This
 retrieval setting and the evidence failures limit benchmark quality; the
@@ -255,7 +273,7 @@ its partial files are never merged into a new policy/backend run.
 CUAD uses the official word-set Jaccard threshold of 0.5 and Parties substring
 exception; correctly empty answers do not create official true positives.
 Reports include AUPR, precision at 80%/90% recall and additional micro F1.
-WideSearch will report a strict proxy and the official metric pipeline with a
+WideSearch reports a strict proxy and an adapted official metric pipeline with a
 **custom frozen base-Qwen judge**, not the published GPT-4.1 leaderboard judge.
 All 200 tasks remain in the denominator. Infrastructure and judge failures are
 explicit, and judge references are never silently truncated. The same frozen
@@ -412,8 +430,33 @@ fails: raw/effective header checks are 11/12 and combined checks 157/158.
 Accordingly, `calibration_passed=false`; the frozen exception permits
 `accepted_with_known_limitation=true`. An independent CPU replay passes all
 26 audit checks. These reused 158 artificial cases remain development
-calibration, not an untouched holdout. Fresh full-200 semantic scoring is
-pending; no earlier formal judge shard is reused.
+calibration, not an untouched holdout. Fresh full-200 semantic scoring subsequently completes in 525.115 seconds,
+including model loading. All eight workers finish their 25 tasks; seven make
+actual judge calls, with per-rank counts `[38, 2, 0, 2, 7, 13, 10, 8]` (80 total).
+The zero-call shard is a valid production short-circuit, verified task by task.
+No earlier formal judge shard is reused. The balanced schedule is derived from
+saved predictions, without reference answers or scores.
+
+Formal judging uses the frozen base model without the policy adapter, BF16,
+HF batch size one and one worker per process, temperature zero, context 65,536,
+completion budget 4,096 and batch-token budget 69,632. References are retained
+in full and truncation is disabled. The CLI records seed 42, but the score-only
+path does not explicitly call `manual_seed`; that recorded argument is not a
+claim that this path seeds the RNG.
+
+An independent CPU audit passes 114 checks over all 200 task metrics, all 80
+captured model calls, original generation ownership, balanced judge ownership,
+configuration, aggregate math and durable artifact bytes. It establishes
+provenance and numerical reconstruction, not the semantic correctness of every
+model judgment. Formal prompts and raw responses are captured; token counts
+and per-token logit-finiteness are not instrumented in this formal wrapper.
+The finite-logit checks above refer to calibration.
+
+After both final result JSON files are atomically published, a private
+controller status logger raises a duplicate-timestamp argument error. A
+separate nine-check independent audit confirms that the published results and
+embedded accepted audit exactly match the local results. The original failure
+is retained; status recovery does not alter source, predictions or scores.
 
 ## Checks, reproduction and artifacts
 
@@ -447,6 +490,11 @@ independent boundary assertions. Independent review confirms unchanged old
 prompt strings, header-alignment implementation and numeric scoring body;
 the evaluation docstring now distinguishes per-origin entity calls from
 batched header/cell grading.
+
+The v9 guard/parser revision passes 234 targeted CPU checks, 53 independent
+production-boundary assertions and 54 runner assertions. Its complete
+158-case calibration is independently reconstructed by 26 CPU audit checks;
+the final 200-task run passes the separate 114-check audit described above.
 
 Judge provenance changes at `360971f5` pass 90 targeted checks and reject
 mixed judge models, budgets, runtime versions, adapters or generation records.
@@ -491,9 +539,15 @@ Artifact paths relative to that root include `dcc-run/training/final`,
 `dcc-run/cuad-final-selected` and `dcc-run/widesearch-final-selected` directories.
 CUAD scores are in `dcc-run/cuad-final-selected/scores_strict.json`. The new
 WideSearch strict scores are in
-`dcc-run/widesearch-final-selected-judge-same_entity_v3-final-bf16/scores_strict.json`;
-the original generation directory retains its legacy scoring files. Custom
-judge scores will be recorded after full judging and merge finish.
+`dcc-run/widesearch-final-selected-judge-same_entity_v9-final-bf16/scores_strict.json`;
+custom semantic scores are in the same directory's `scores_local_judge.json`.
+The original generation directory retains its legacy scoring files.
+The complete published summary, including the independent CPU audit, is
+`dcc-run/final-judge-result-v9.json`, also published as
+`dcc-run/final-judge-result.json`. Calibration evidence is retained under
+`dcc-run/scoring-audit/v9-calibration`, formal prompt/raw-response logs under
+`dcc-run/scoring-audit/v9-formal-raw`, and controller/source-freeze/acceptance
+records under `dcc-run/scoring-audit/v9-final-controller`.
 
 Final CUAD coverage and scoring audits are retained under
 `dcc-run/scoring-audit/final-cuad-score-audit.json` and
