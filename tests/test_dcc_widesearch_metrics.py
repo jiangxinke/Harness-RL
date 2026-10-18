@@ -260,6 +260,39 @@ def test_header_and_entity_alignment_have_distinct_contexts():
     assert "Column headers:" in calls[0] and "Entity values:" in calls[1]
 
 
+def test_header_alignment_uses_schema_semantics_without_weakening_entity_identity():
+    from slime_plugins.dcc.widesearch_metrics import _align
+
+    prompts = []
+
+    def judge(prompt):
+        prompts.append(prompt)
+        if "Column headers:" in prompt:
+            assert "broader or narrower labels" in prompt
+            assert '"location" can map to "city"' in prompt
+            assert 'both "city" and "country"' in prompt
+            return {"institution": "organization", "location": "city"}
+        assert "same specific entity" in prompt
+        assert "Similarity and being the only available reference are not evidence of identity" in prompt
+        assert "broader or narrower labels" not in prompt
+        return {}
+
+    assert _align(["institution", "location"], ["organization", "city"], judge, 32, 32000, column_headers=True) == {"institution": "organization", "location": "city"}
+    assert _align(["Pine Observatory"], ["Elm Observatory"], judge, 32, 32000) == {}
+    assert len(prompts) == 2
+
+
+def test_ambiguous_header_can_abstain_instead_of_guessing_a_geographic_field():
+    from slime_plugins.dcc.widesearch_metrics import _align
+
+    def judge(prompt):
+        assert "Column headers:" in prompt
+        assert '"location" alone is ambiguous: omit it rather than guessing' in prompt
+        return {}
+
+    assert _align(["location"], ["city", "country"], judge, 32, 32000, column_headers=True) == {}
+
+
 def test_header_alignment_cannot_create_duplicate_columns():
     def judge(prompt):
         assert "Column headers:" in prompt

@@ -254,6 +254,12 @@ identity. It also rejects duplicate aligned headers, stably keeps the first
 row when aliases or normalization collapse a unique key, and combines multiple
 criteria for one cell before counting item accuracy. These guards prevent
 duplicate matches or multiple criteria from inflating a metric above one.
+A subsequent independent 24-case GPU calibration passes all entity and cell
+checks but misses one compatible header pair; the original three-case regression
+also misses that header pair. Revision `same_entity_v3` therefore gives schema
+labels a separate prompt: a broader label can name the same field when its
+counterpart in the required schema is unambiguous, while competing fields
+require abstention. Entity identity and cell prompts are unchanged from v2.
 The adapted scorer is versioned separately from the unchanged `b25a4d63`
 generation snapshot. Its strict proxy must also be recomputed from the saved
 predictions; the original scoring files are retained separately. These are
@@ -274,7 +280,8 @@ evaluation and sharded-judge provenance, plus fatal-error Ruff rules and diff
 checks. Independent review covers header and entity collisions, per-cell
 multiple criteria, exact-identity anchors, conflicting explicit versions and
 missing or null legacy versions. No official test item is used for these
-regressions.
+regressions. The v3 header revision passes 100 checks across the same three
+targeted test files.
 
 Judge provenance changes at `360971f5` pass 90 targeted checks and reject
 mixed judge models, budgets, runtime versions, adapters or generation records.
