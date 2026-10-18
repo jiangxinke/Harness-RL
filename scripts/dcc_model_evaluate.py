@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import time
+from importlib import metadata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "slime"))
@@ -373,6 +374,32 @@ def _prediction_quantization(output):
     return _prediction_setting(output, "quantization", "none")
 
 
+def _judge_configuration(args):
+    quantization = getattr(args, "quantization", "none")
+    packages = ["torch", "transformers", "peft"]
+    if quantization == "nf4":
+        packages.append("bitsandbytes")
+    versions = {}
+    for package in packages:
+        try:
+            versions[package] = metadata.version(package)
+        except metadata.PackageNotFoundError:
+            versions[package] = "unavailable"
+    return {
+        "model": args.model, "model_name": args.judge_name, "adapter": None,
+        "quantization": quantization, "context": args.judge_context,
+        "max_new_tokens": args.judge_tokens, "batch_size": args.judge_batch_size,
+        "batch_tokens": args.judge_batch_tokens, "workers": args.judge_workers,
+        "allow_truncation": False, "runtime_versions": versions,
+    }
+
+
+def _check_judge_generation(report, manifest, runtime):
+    for key, value in (("generation_manifest", manifest), ("inference_runtime", runtime)):
+        if key in report and report[key] != value:
+            raise ValueError("Judge report generation provenance differs from saved predictions")
+
+
 def score(args):
     _evaluation_shard(args, generation=False)
     rank = int(os.environ.get("RANK", "0"))
@@ -387,16 +414,31 @@ def score(args):
     policy_backend = _prediction_setting(output, "inference_backend", "hf")
     if args.merge_judge:
         report = json.loads((output / "scores_strict.json").read_text())
+        _check_judge_generation(report, generation_manifest, runtime)
         records = []
+        configurations, shard_count = [], 0
         judge_quantization = getattr(args, "quantization", "none")
         for path in sorted(output.glob("scores_judge_rank*.json")):
             shard = json.loads(path.read_text())
+            shard_count += 1
+            _check_judge_generation(shard, generation_manifest, runtime)
             if shard.get("judge_quantization", "none") != judge_quantization:
                 raise ValueError("Judge quantization differs across scoring shards or merge settings")
             if shard.get("policy_quantization", policy_quantization) != policy_quantization:
                 raise ValueError("Judge report policy quantization differs from prediction manifests")
             if shard.get("policy_inference_backend", policy_backend) != policy_backend:
                 raise ValueError("Judge report policy backend differs from prediction manifests")
+            if shard["widesearch"].get("judge_model", args.judge_name) != args.judge_name:
+                raise ValueError("Judge model differs across scoring shards or merge settings")
+            configuration = shard.get("judge_configuration")
+            if configuration is not None:
+                if (configuration.get("model_name") != args.judge_name
+                        or configuration.get("quantization") != judge_quantization
+                        or configuration.get("adapter") is not None):
+                    raise ValueError("Judge configuration differs from the frozen merge judge")
+                if configurations and configuration != configurations[0]:
+                    raise ValueError("Judge configurations differ across scoring shards")
+                configurations.append(configuration)
             records.extend(shard["widesearch"]["per_task"])
         expected_wide = {task.id for task in tasks if task.benchmark == "widesearch"}
         if (
@@ -435,6 +477,11 @@ def score(args):
         report["policy_quantization"] = policy_quantization
         report["policy_inference_backend"] = policy_backend
         report["judge_quantization"] = judge_quantization
+        # Legacy shards remain mergeable, with their unavailable configuration
+        # evidence explicit rather than inferred from current CLI defaults.
+        report["judge_configuration_complete"] = len(configurations) == shard_count
+        if configurations:
+            report["judge_configuration"] = configurations[0]
         (output / "scores_local_judge.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
         )
@@ -455,7 +502,8 @@ def score(args):
         tasks = [task for task in tasks if task.benchmark == "widesearch"][rank::world]
         saved = {task.id: saved[task.id] for task in tasks}
         model, tokenizer = load_policy_model(
-            args.model, rank=local, quantization=getattr(args, "quantization", "none")
+            args.model, adapter=None, trainable=False, rank=local,
+            quantization=getattr(args, "quantization", "none")
         )
         policy = HFPolicy(
             model,
@@ -500,6 +548,7 @@ def score(args):
     report["policy_inference_backend"] = policy_backend
     if judge:
         report["judge_quantization"] = getattr(args, "quantization", "none")
+        report["judge_configuration"] = _judge_configuration(args)
     (
         output / (f"scores_judge_rank{rank}.json" if judge else "scores_strict.json")
     ).write_text(

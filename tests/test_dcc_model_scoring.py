@@ -160,6 +160,190 @@ def test_adapter_identity_detects_replaced_symlink_target_without_hashing(tmp_pa
         namespace["_check_saved_adapter"](adapter, {"adapter": identity})
 
 
+def judge_merge_run(monkeypatch, tmp_path):
+    score = cli()["score"]
+    tasks = [Task(f"web{i}", "widesearch", "test", "Find entries", gold=[]) for i in range(200)]
+    monkeypatch.setitem(score.__globals__, "load_tasks", lambda path: tasks)
+    for name, value in (("RANK", "0"), ("LOCAL_RANK", "0"), ("WORLD_SIZE", "1")):
+        monkeypatch.setenv(name, value)
+    manifest = {"model": "base/model", "adapter": "candidate"}
+    (tmp_path / "manifest_rank0.json").write_text(json.dumps(manifest))
+    (tmp_path / "predictions_rank0.jsonl").write_text("".join(json.dumps({
+        "task_id": task.id, "status": "evidence_failure", "answer": [],
+    }) + "\n" for task in tasks))
+    (tmp_path / "scores_strict.json").write_text(json.dumps({
+        "complete": True, "tasks": 200, "status_counts": {"evidence_failure": 200},
+        "generation_manifest": manifest, "widesearch": {"search_coverage": {"tasks": 200}},
+    }))
+    configuration = {
+        "model": "base/model", "model_name": "public/judge", "adapter": None,
+        "quantization": "none", "context": 65536, "max_new_tokens": 4096,
+        "batch_size": 1, "batch_tokens": 69632, "workers": 1,
+        "allow_truncation": False, "runtime_versions": {"torch": "test"},
+    }
+    keys = ("score", "precision_by_row", "recall_by_row", "f1_by_row",
+            "precision_by_item", "recall_by_item", "f1_by_item")
+    for rank in range(8):
+        (tmp_path / f"scores_judge_rank{rank}.json").write_text(json.dumps({
+            "judge_quantization": "none", "policy_quantization": "none",
+            "policy_inference_backend": "hf", "generation_manifest": manifest,
+            "judge_configuration": configuration,
+            "widesearch": {"judge_model": "public/judge", "per_task": [
+                {"task_id": task.id, **dict.fromkeys(keys, 0.0)} for task in tasks[rank::8]
+            ]},
+        }))
+    args = SimpleNamespace(data=["tasks.jsonl"], limit=None, output_dir=str(tmp_path),
+                           merge_judge=True, quantization="none", judge_name="public/judge")
+    return score, args
+
+
+@pytest.mark.parametrize("corruption,match", [
+    ("missing", "every WideSearch task exactly once"),
+    ("duplicate", "every WideSearch task exactly once"),
+    ("model", "Judge model differs"),
+    ("budget", "Judge configurations differ"),
+    ("version", "Judge configurations differ"),
+    ("adapter", "frozen merge judge"),
+    ("generation", "generation provenance differs"),
+    ("runtime", "generation provenance differs"),
+    ("strict_generation", "generation provenance differs"),
+])
+def test_judge_merge_rejects_incomplete_or_mixed_provenance(monkeypatch, tmp_path, corruption, match):
+    score, args = judge_merge_run(monkeypatch, tmp_path)
+    path = tmp_path / "scores_judge_rank7.json"
+    report = json.loads(path.read_text())
+    if corruption == "missing":
+        report["widesearch"]["per_task"].pop()
+    elif corruption == "duplicate":
+        report["widesearch"]["per_task"][-1]["task_id"] = "web0"
+    elif corruption == "model":
+        report["widesearch"]["judge_model"] = "different/judge"
+    elif corruption == "budget":
+        report["judge_configuration"]["context"] = 1024
+    elif corruption == "version":
+        report["judge_configuration"]["runtime_versions"]["torch"] = "different"
+    elif corruption == "adapter":
+        report["judge_configuration"]["adapter"] = "trained/candidate"
+    elif corruption == "generation":
+        report["generation_manifest"]["adapter"] = "different/candidate"
+    elif corruption == "runtime":
+        report["inference_runtime"] = {"backend": "different"}
+    elif corruption == "strict_generation":
+        path = tmp_path / "scores_strict.json"
+        report = json.loads(path.read_text())
+        report["generation_manifest"]["adapter"] = "different/candidate"
+    path.write_text(json.dumps(report))
+    with pytest.raises(ValueError, match=match):
+        score(args)
+    assert not (tmp_path / "scores_local_judge.json").exists()
+
+
+@pytest.mark.parametrize("mode", ["complete", "judge_failure", "legacy", "mixed_legacy"])
+def test_judge_merge_preserves_all_200_tasks_and_legacy_reports(monkeypatch, tmp_path, mode):
+    score, args = judge_merge_run(monkeypatch, tmp_path)
+    if mode == "judge_failure":
+        path = tmp_path / "scores_judge_rank7.json"
+        report = json.loads(path.read_text())
+        record = report["widesearch"]["per_task"][-1]
+        report["widesearch"]["per_task"][-1] = {"task_id": record["task_id"], "judge_error": "explicit failure"}
+        path.write_text(json.dumps(report))
+    elif mode in {"legacy", "mixed_legacy"}:
+        paths = list(tmp_path.glob("scores_judge_rank*.json"))
+        for path in paths if mode == "legacy" else paths[:1]:
+            report = json.loads(path.read_text())
+            del report["judge_configuration"], report["generation_manifest"]
+            path.write_text(json.dumps(report))
+    score(args)
+    report = json.loads((tmp_path / "scores_local_judge.json").read_text())
+    assert report["widesearch"]["tasks"] == len(report["widesearch"]["per_task"]) == 200
+    failures = int(mode == "judge_failure")
+    assert report["widesearch"]["metric_denominator"] == 200 - failures
+    assert report["widesearch"]["judge_failures"] == failures
+    assert report["widesearch"]["score"] == 0.0
+    assert report["complete"] == (not failures)
+    assert report["judge_configuration_complete"] == (mode in {"complete", "judge_failure"})
+    assert report["widesearch"]["search_coverage"] == {"tasks": 200}
+
+
+@pytest.mark.parametrize("quantization", ["none", "nf4"])
+def test_local_judge_loads_frozen_base_with_full_context_and_records_configuration(monkeypatch, tmp_path, quantization):
+    score, _ = judge_merge_run(monkeypatch, tmp_path)
+    monkeypatch.setenv("RANK", "3")
+    monkeypatch.setenv("WORLD_SIZE", "8")
+    calls = {}
+
+    def load(model, **kwargs):
+        calls["load"] = (model, kwargs)
+        return object(), object()
+
+    def policy(*args, **kwargs):
+        calls["policy"] = kwargs
+        return object()
+
+    class Judge:
+        model = "public/judge"
+
+        def __init__(self, *args, **kwargs):
+            calls["judge"] = kwargs
+
+        def close(self):
+            calls["closed"] = True
+
+    monkeypatch.setitem(score.__globals__, "load_policy_model", load)
+    monkeypatch.setitem(score.__globals__, "HFPolicy", policy)
+    monkeypatch.setitem(score.__globals__, "HFBatchedJudge", Judge)
+    args = SimpleNamespace(data=["tasks.jsonl"], limit=None, output_dir=str(tmp_path),
+                           model="base/model", model_name="public/base", adapter="candidate",
+                           merge_judge=False, local_judge=True, quantization=quantization, judge_name="public/judge",
+                           judge_context=65536, judge_tokens=4096, judge_batch_size=1,
+                           judge_batch_tokens=69632, judge_workers=1, max_steps=3,
+                           max_new_tokens=1024, max_prompt_tokens=8192, initial_chunks=4, seed=42)
+    score(args)
+    assert calls["load"] == ("base/model", {"adapter": None, "trainable": False, "rank": 0, "quantization": quantization})
+    assert calls["policy"] == {"max_prompt_tokens": 65536, "allow_truncation": False}
+    assert calls["judge"]["max_batch"] == 1 and calls["judge"]["max_new_tokens"] == 4096
+    assert calls["closed"]
+    report = json.loads((tmp_path / "scores_judge_rank3.json").read_text())
+    assert report["tasks"] == report["widesearch"]["metric_denominator"] == 25
+    assert report["judge_configuration"]["adapter"] is None
+    assert report["judge_configuration"]["context"] == 65536
+    assert report["judge_configuration"]["runtime_versions"]["torch"] != "unavailable"
+    assert report["policy_quantization"] == "none"
+    assert report["judge_quantization"] == quantization
+
+
+@pytest.mark.parametrize("failure", ["oom", "context", "format"])
+def test_judge_failures_remain_explicit_and_can_be_rejudged(failure):
+    from slime_plugins.dcc.evaluation import evaluate_results
+
+    task = Task("web", "widesearch", "test", "Find entries", gold=[{"name": "alpha"}], metadata={
+        "evaluation": {"required": ["name"], "unique_columns": ["name"],
+                       "eval_pipeline": {"name": {"metric": ["exact_match"]}}},
+    })
+    prediction = {"task_id": task.id, "status": "completed", "answer": [{"name": "alpha"}]}
+    fail = True
+
+    def judge(prompt):
+        if fail:
+            if failure == "oom":
+                raise RuntimeError("CUDA out of memory")
+            if failure == "context":
+                raise ValueError("Judge input exceeds its context budget; refusing to truncate evidence")
+            return "invalid JSON"
+        return {"alpha": "alpha"}
+
+    failed = evaluate_results([task], [prediction], judge=judge)
+    assert not failed["complete"]
+    assert failed["widesearch"]["judge_failures"] == 1
+    assert failed["widesearch"]["metric_denominator"] == 0
+    assert failed["widesearch"]["score"] is None
+    assert "judge_error" in failed["widesearch"]["per_task"][0]
+    fail = False
+    retried = evaluate_results([task], [prediction], judge=judge)
+    assert retried["complete"]
+    assert retried["widesearch"]["metric_denominator"] == retried["widesearch"]["score"] == 1
+
+
 def test_merge_rejects_judge_precision_change_before_publishing(monkeypatch, tmp_path):
     score = cli()["score"]
     task = Task("web", "widesearch", "test", "Find entries", gold=[])
