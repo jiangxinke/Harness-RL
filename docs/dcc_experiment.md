@@ -40,6 +40,7 @@ forwards/backwards; its token budget does not allocate a padded batch at once.
 | Corrected pure-RL continuation | 8 | 8 | 256 trajectories, 248 completed, 8 turn-budget failures, 0 infrastructure failures |
 | Mixed SFT round 1 | 24 | 1 | 93 examples from 78 task IDs |
 | Mixed SFT round 2 | 64 | 8 | 2,048 examples from 1,305 task IDs |
+| Mixed SFT round 3 | 32 | 8 | 1,024 examples from 742 task IDs |
 
 The initial RL phase sampled at temperature 0.8, top-p 0.95 and top-k 20 while
 scoring raw model log probabilities. Its continuation corrects this to
@@ -67,6 +68,20 @@ Dynamic preparation skips 486 ungrounded or overlong candidates. All 512
 per-worker step records have finite loss and nonzero finite gradient norms,
 and synchronized norms agree. All 288 tensors change and remain finite in
 every checkpoint. Training logs record 748.88 seconds.
+
+Round 3 warm-starts round-2 step 32 with a fresh optimizer, learning rate
+0.000002, eight initial chunks, negative draw fraction 0.10, web fraction 0.25,
+CUAD tool fraction 0.15 and seed 46. It completes 32 steps with four examples
+per worker, saving every eight steps. Actual examples are 657 direct CUAD
+positives, 102 direct negatives, 223 web segments (75 search, 74 fetch, 74 final)
+and 42 CUAD tool segments (14 search, 15 read, 13 final). The tool samples
+include 40 positive segments and two negative read segments; negative tool
+search/final teachers were available but were not sampled. Preparation skips
+261 direct candidates and no tool records. All losses are finite, gradients
+are finite and nonzero, and synchronized norms agree. All five saved adapters
+have 288 finite changed tensors, correct optimizer steps and the intended
+configuration; final equals step 32. Training logs record 1,093.8 seconds,
+including substantial filesystem waits during checkpoint creation.
 
 A full-expert NF4 option covers all 18,432 expert matrices. Actual loaded
 allocation is 16.79 GiB; 16,384-token prefill plus 16 generated tokens peaks at
@@ -126,11 +141,7 @@ completed tasks and one evidence failure; the other settings complete all eight.
 Actual searches use the public-web provider's Seznam fallback. Automatic page
 reads are optional and do not consistently help this validation set.
 
-Round 3 is running from round-2 step 32: eight workers, 32 optimizer steps,
-four examples per worker, fresh optimizer, seed 46 and checkpoints every eight
-steps. It matches training to eight initial chunks, lowers the negative draw
-fraction to 0.10, retains web fraction 0.25, uses CUAD tool fraction 0.15 and
-learning rate 0.000002. All four checkpoints will receive complete validation.
+Round 3 is complete and its four checkpoints are under complete validation.
 Grounding skips raised round 2's actual direct-negative fraction to about 35%,
 above its configured 25% draw probability. Separately saved LoRA-factor
 interpolation candidates combine the early adapter and step 32 without changing
@@ -189,6 +200,16 @@ and one real-Qwen tokenizer check in their appropriate environments. BF16/NF4
 preflights pass. Sharding, scoring audit, resume and slow-mount fixes at
 `513f41f8` pass 111 targeted checks, Ruff and diff checks. Logical-shard complete
 820-question runs also exercise the real GPU path.
+
+Judge provenance changes at `360971f5` pass 90 targeted checks and reject
+mixed judge models, budgets, runtime versions, adapters or generation records.
+A real frozen-base BF16 judge smoke completes one independent web task with
+all seven reference rows intact, batch size one, context 65,536 and generation
+budget 4,096, without judge failures. CPU planning checks all 200 official
+WideSearch references using the real tokenizer: 200 header, 285 entity-alignment
+and 1,168 cell prompts. The longest reference prompt has 9,384 tokens; adding
+8,192 prediction tokens and 4,096 completion tokens totals 21,672, below the
+65,536 limit. These are runtime/capacity checks, not benchmark scores.
 
 See [dcc.md](dcc.md), [dcc_training.md](dcc_training.md),
 [dcc_tool_training.md](dcc_tool_training.md), [dcc_vllm.md](dcc_vllm.md) and
