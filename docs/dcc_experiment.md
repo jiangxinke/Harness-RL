@@ -141,7 +141,9 @@ completed tasks and one evidence failure; the other settings complete all eight.
 Actual searches use the public-web provider's Seznam fallback. Automatic page
 reads are optional and do not consistently help this validation set.
 
-Round 3 is complete and its four checkpoints are under complete validation.
+All four round-3 checkpoints complete all 820 CUAD questions and all eight
+independent web tasks with zero infrastructure failures. Each CUAD run uses two
+logical engines; the round-2 comparison uses four, so batch composition differs.
 Grounding skips raised round 2's actual direct-negative fraction to about 35%,
 above its configured 25% draw probability. Separately saved LoRA-factor
 interpolation candidates combine the early adapter and step 32 without changing
@@ -155,6 +157,22 @@ at least 0.4251668255, then maximize CUAD AUPR among eligible trained policies,
 breaking ties by micro F1. Round-2 step 32 is the existing eligible fallback.
 This balances extraction and web behavior, rather than selecting on one task
 alone. No additional training rounds or official-test-based tuning are planned.
+
+| Candidate | CUAD AUPR | CUAD micro F1 | Web row F1 | Eligible |
+| --- | ---: | ---: | ---: | --- |
+| Round 2, step 32 | 0.225080 | 0.425167 | 0.831909 | Yes |
+| **Round 3, step 8** | **0.251273** | **0.441352** | **0.848744** | **Selected** |
+| Round 3, step 16 | 0.235500 | 0.418828 | 0.720798 | No |
+| Round 3, step 24 | 0.233861 | 0.422680 | 0.860174 | No |
+| Round 3, step 32 | 0.239564 | 0.433010 | 0.831909 | Yes |
+
+Selection freezes at `2026-10-18T20:10:45Z`, before new official-test generation,
+in external `dcc-run/final-selection.json`. The selected adapter is
+`dcc-run/tool-sft-round3/step_0008`: it inherits round-2 step 32 and incorporates
+the first eight round-3 steps, or 256 global examples. The 1,024-example round-3
+diagnostic describes the complete candidate-training run. Step 24's stronger
+web score does not relax the predeclared CUAD floor. Step 8 has the highest
+AUPR among eligible candidates and is used unchanged for both final benchmarks.
 
 ## Harness and test protocol
 
@@ -174,7 +192,13 @@ schema and citations pass the same checks. Page text is sanitized at the web
 cache boundary for tokenizer compatibility. Optional automatic reads fetch
 actual search URLs, retain source events and have a cumulative attempt budget.
 
-Full official scoring of the final optimized policy is **pending selection**.
+Full official scoring of the frozen optimized policy is **in progress**.
+Both new runs use source snapshot `b25a4d63`, graph vLLM/BF16 and eight independent
+TP1 engines. CUAD uses the training-only profile, eight initial chunks,
+8,192/1,024 prompt/completion budgets, three turns and batch size eight.
+WideSearch uses 16,384/8,192 budgets, 12 turns, batch size four, automatic page
+reads off and the same evidence guard. Each engine has memory utilization 0.88,
+8,192 scheduled prefill tokens and seed 42. No test result changes selection.
 The earlier adapter's original CUAD test run is retained as historical context:
 4,182/4,182 questions, AUPR 0.182906, micro F1 0.370070, precision 0.457637,
 recall 0.310632, 4,180 completed, two exhausted budgets and zero infrastructure
@@ -223,6 +247,7 @@ Artifact paths relative to that root include `dcc-run/training/final`,
 `dcc-run/tool-sft-round2/step_0032`. Training diagnostics are in the corresponding
 `tool-sft-round*-diagnostics.json`; validation tables are retained in
 `round2-graph-dev82-summary.json`, `single-validation-graph-summary.json` and
-`full-validation-graph-summary.json` under `dcc-run/`. Final selection, test
-artifact locations and complete scores will be recorded after the remaining
-validation and full evaluations finish.
+`full-validation-graph-summary.json` under `dcc-run/`. The frozen selection is
+`dcc-run/final-selection.json`; final predictions and scores use the new
+`dcc-run/cuad-final-selected` and `dcc-run/widesearch-final-selected` directories.
+Complete test scores will be recorded after generation and judging finish.
