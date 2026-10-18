@@ -144,6 +144,33 @@ published GPT-4.1 leaderboard judge or a directly comparable leaderboard score.
 All 200 tasks remain in the denominator. Infrastructure and judge failures are
 reported explicitly; successful subsets are never presented as a full run.
 
+## Further optimization under validation
+
+A separate full-expert NF4 runtime reduces frozen base-weight memory while
+retaining attention LoRA training. Real-model checks covered all 18,432 expert
+matrices, representing 100% of expert parameters. Loaded CUDA allocation was
+16.79 GiB; complete 4,096-token and 16,384-token prefill plus 16 generated tokens
+peaked at 17.89 and 21.17 GiB, respectively. A synthetic LoRA optimizer step
+produced finite, nonzero gradients and saved an adapter. These are memory and
+execution checks, not new benchmark scores. The separate quantized environment
+uses unfused expert linear modules; enabling a generic four-bit switch on the
+default fused implementation would leave the expert parameters unquantized.
+
+Train-only CUAD query expansion raises full-span visibility in the 820-question
+validation split from 307/621 to 411/621 while retaining four retrieved chunks
+and approximately the same source-text budget. This is retrieval coverage, not
+answer F1. The validation questions share the same 20 validation contracts;
+subsampling questions does not create a new contract-level holdout.
+
+An independent web curriculum has 58 bilingual training tasks from three IANA
+registries and eight validation tasks from two different registries. All 58
+teacher episodes completed actual search/read/cite checks and scored exactly
+one against their public-source labels, yielding 174 supervised assistant
+segments with zero failed teachers. No official WideSearch task or reference
+enters this curriculum. See [dcc_web_curriculum.md](dcc_web_curriculum.md).
+Candidate training and policy validation remain in progress; the full-test
+scores above continue to identify the original selected adapter.
+
 ## Reproduction and artifacts
 
 See [dcc.md](dcc.md) and [dcc_training.md](dcc_training.md) for portable

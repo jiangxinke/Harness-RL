@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import os
 import sys
@@ -24,6 +25,7 @@ from slime_plugins.dcc.episode import WIDESEARCH_EVIDENCE_GUARD_VERSION
 from slime_plugins.dcc.hf_judge import HFBatchedJudge
 from slime_plugins.dcc.hf_policy import HFPolicy, load_policy_model
 from slime_plugins.dcc.tools import WebTools
+from slime_plugins.dcc.retrieval import load_retrieval_profile
 
 
 async def evaluate(args):
@@ -40,6 +42,7 @@ async def evaluate(args):
         tasks = tasks[: args.limit]
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
+    retrieval_profile = load_retrieval_profile(getattr(args, "retrieval_profile", None))
     manifest = {
         key: getattr(args, key)
         for key in (
@@ -55,6 +58,8 @@ async def evaluate(args):
         )
     }
     manifest["world_size"] = world
+    if retrieval_profile is not None:
+        manifest["retrieval_profile"] = dataclasses.asdict(retrieval_profile)
     quantization = getattr(args, "quantization", "none")
     if quantization != "none":
         # Preserve existing BF16 manifests and reject changing precision when
@@ -104,6 +109,7 @@ async def evaluate(args):
             max_new_tokens=args.max_new_tokens,
             initial_chunks=args.initial_chunks,
             timeout_seconds=args.timeout,
+            retrieval_profile=retrieval_profile,
         )
         semaphore = asyncio.Semaphore(args.batch_size * 2)
         stream = file.open("a", buffering=1)
@@ -285,6 +291,7 @@ def main():
     parser.add_argument("--model-name", default="Qwen/Qwen3-30B-A3B-Instruct-2507")
     parser.add_argument("--adapter")
     parser.add_argument("--quantization", choices=("none", "nf4"), default="none")
+    parser.add_argument("--retrieval-profile")
     parser.add_argument("--data", nargs="+", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--batch-size", type=int, default=4)

@@ -14,6 +14,7 @@ from typing import Any, Protocol
 
 from .data import Task
 from .metrics import cuad_predictions, cuad_task_metrics
+from .retrieval import RetrievalProfile, search_document
 from .tools import DocumentTools, InfrastructureError, WebTools
 
 WIDESEARCH_EVIDENCE_GUARD_VERSION = "search-fetch-citations-ndjson-v2"
@@ -261,7 +262,7 @@ def _system_prompt(task: Task, max_steps: int) -> str:
 
 
 class EpisodeRunner:
-    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900) -> None:
+    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900, retrieval_profile: RetrievalProfile | None = None) -> None:
         if max_steps < 1 or max_new_tokens < 1:
             raise ValueError("episode limits must be positive")
         self.max_steps = max_steps
@@ -270,11 +271,12 @@ class EpisodeRunner:
         self.initial_chunks = initial_chunks
         self.web_tools_factory = web_tools_factory
         self.timeout_seconds = timeout_seconds
+        self.retrieval_profile = retrieval_profile
 
     def initial_messages(self, task: Task) -> list[dict[str, str]]:
         messages = [{"role": "system", "content": _system_prompt(task, self.max_steps)}, {"role": "user", "content": task.prompt}]
         if task.benchmark == "cuad" and self.initial_chunks:
-            observation = _document_tools(task.document).search_document(task.prompt, top_k=self.initial_chunks)
+            observation = search_document(_document_tools(task.document), task.prompt, top_k=self.initial_chunks, profile=self.retrieval_profile)
             messages.append({"role": "user", "content": "Initial contract retrieval (source material):\n" + json.dumps(observation, ensure_ascii=False)})
         return messages
 
