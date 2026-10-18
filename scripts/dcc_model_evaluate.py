@@ -59,7 +59,11 @@ async def evaluate(args):
     }
     manifest["world_size"] = world
     if retrieval_profile is not None:
-        manifest["retrieval_profile"] = dataclasses.asdict(retrieval_profile)
+        # Profiles contain tuples in memory, while JSON persists them as lists.
+        # Compare the same representation when resuming an unchanged profile.
+        manifest["retrieval_profile"] = json.loads(
+            json.dumps(dataclasses.asdict(retrieval_profile))
+        )
     quantization = getattr(args, "quantization", "none")
     if quantization != "none":
         # Preserve existing BF16 manifests and reject changing precision when

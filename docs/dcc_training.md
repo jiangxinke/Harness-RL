@@ -126,8 +126,14 @@ The smoke records actual loading, full prefill and synthetic training-step
 memory and timing. Its synthetic prompt never reads benchmark labels. A short
 synthetic step verifies runtime correctness; it does not establish training
 quality. Raise the prefill budget in a separate run to test the intended context
-length. The NF4 route remains subject to real-device validation and does not
-claim measured memory savings until that smoke has succeeded.
+length. Full-model validation quantized all 18,432 expert matrices. Loaded
+allocation was 16.79 GiB and full 16,384-token prefill plus 16 generated tokens
+peaked at 21.17 GiB, compared with 60.65 GiB for the BF16 implementation.
+A synthetic LoRA optimizer step produced finite, nonzero gradients.
+The unfused NF4 runtime trades speed for memory: matched single-request decode
+measured 2.12 tokens/s versus 16.22 tokens/s for fused BF16. Choose batch size
+using actual memory and throughput measurements; quantization alone does not
+establish faster training or better benchmark scores.
 
 The evaluator resumes saved task IDs and rejects changed generation settings
 in the same directory. Use different directories for base and trained policies.

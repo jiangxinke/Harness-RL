@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import dataclasses
+import asyncio
 import importlib.util
 import json
 from pathlib import Path
+import runpy
+from types import SimpleNamespace
 
 import pytest
 from slime_plugins.dcc.data import Task
@@ -137,3 +140,31 @@ def test_fitter_cli_writes_external_profile_and_rejects_validation(tmp_path):
     with pytest.raises(ValueError, match="CUAD train"):
         cli.main(["--data", str(source), "--output", str(tmp_path / "bad.json")])
     assert not (tmp_path / "bad.json").exists()
+
+
+def test_evaluator_resumes_unchanged_profile_and_rejects_changed_contents(monkeypatch, tmp_path):
+    fitted, profile_path, _ = profile(tmp_path)
+    evaluate = runpy.run_path(str(Path(__file__).parents[1] / "scripts/dcc_model_evaluate.py"))["evaluate"]
+    task = dataclasses.replace(examples()[0], split="validation")
+    monkeypatch.setitem(evaluate.__globals__, "load_tasks", lambda path: [task])
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Resuming completed predictions must not load a GPU model")
+
+    monkeypatch.setitem(evaluate.__globals__, "load_policy_model", unexpected)
+    for name in ("RANK", "LOCAL_RANK"):
+        monkeypatch.setenv(name, "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    args = SimpleNamespace(model="example/model", adapter=None, data=["tasks.jsonl"],
+                           max_steps=3, max_new_tokens=1024, max_prompt_tokens=8192,
+                           initial_chunks=4, seed=42, limit=0, output_dir=str(tmp_path),
+                           retrieval_profile=str(profile_path), retry_infrastructure=False)
+    (tmp_path / "predictions_rank0.jsonl").write_text(
+        json.dumps({"task_id": task.id, "status": "completed"}) + "\n"
+    )
+    asyncio.run(evaluate(args))
+    asyncio.run(evaluate(args))
+    fitted["questions"][QUESTION]["terms"] = ["replacement"]
+    profile_path.write_text(json.dumps(fitted))
+    with pytest.raises(ValueError, match="configuration changed"):
+        asyncio.run(evaluate(args))
