@@ -54,9 +54,9 @@ could not collect that suite (85 collection errors from missing dependencies,
 including FastAPI, Blockbuster, and Rich). Selected regression tests do not
 constitute a full distributed model-training run.
 
-Validation on this server: 232 training/normalization/scheduling tests passed
+Validation: 232 training/normalization/scheduling tests passed
 with one skipped; all 11 Search-R1 tool tests passed. The OLE policy-gradient
-and optimizer tests passed in FP32/BF16 on all eight available A100 GPUs
-(48 GPU checks). Ruff lint/format checks and `git diff --check` passed.
+and optimizer tests passed in FP32/BF16 (48 GPU checks). Ruff lint/format
+checks and `git diff --check` passed.
 The post-change full-backend attempt still stopped at collection because
 Blockbuster was unavailable.
