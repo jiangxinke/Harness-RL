@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from io import StringIO
 from typing import Any
 from urllib.parse import urlparse
@@ -130,12 +130,43 @@ def _judge_json(judge: Judge, prompt: str) -> dict:
         raise JudgeError("Malformed WideSearch judge response") from exc
 
 
-def _align(response: list[str], reference: list[str], judge: Judge) -> dict:
-    result = _judge_json(judge, ALIGN_PROMPT.format(response=response, reference=reference))
-    # A judge may change spelling, but must not invent a reference entity.
-    if any(not isinstance(value, str) or (value not in reference and value != key) for key, value in result.items()):
-        raise JudgeError("WideSearch alignment returned an unknown reference")
-    return {key: value for key, value in result.items() if key in response}
+def _batches(values: list[Any], batch_size: int, max_chars: int) -> Iterator[tuple[int, list[Any]]]:
+    """Partition without dropping an oversized item or changing global indices."""
+    start, batch, chars = 0, [], 0
+    for index, value in enumerate(values):
+        size = len(str(value))
+        if batch and (len(batch) >= batch_size or chars + size > max_chars):
+            yield start, batch
+            start, batch, chars = index, [], 0
+        batch.append(value)
+        chars += size
+    if batch:
+        yield start, batch
+
+
+def _align(response: list[str], reference: list[str], judge: Judge, batch_size: int, max_chars: int) -> dict:
+    mapping = {}
+    for _, batch in _batches(response, batch_size, max_chars):
+        # Every response batch sees the FULL reference vocabulary. Splitting
+        # the reference could change the entity matching problem.
+        result = _judge_json(judge, ALIGN_PROMPT.format(response=batch, reference=reference))
+        if any(not isinstance(value, str) or (value not in reference and value != key) for key, value in result.items()):
+            raise JudgeError("WideSearch alignment returned an unknown reference")
+        mapping.update({key: value for key, value in result.items() if key in batch})
+    return mapping
+
+
+def _judge_cells(predicted: list[str], targets: list[str], criterion: str, judge: Judge, batch_size: int, max_chars: int) -> list[int]:
+    pairs = [{"response": a, "target": b} for a, b in zip(predicted, targets, strict=True)]
+    values = []
+    for start, batch in _batches(pairs, batch_size, max_chars):
+        indexed = {f"idx_{start + offset}": pair for offset, pair in enumerate(batch)}
+        judgments = _judge_json(judge, CELL_PROMPT.format(criterion=criterion, response=indexed))
+        scores = [judgments.get(f"idx_{index}") for index in range(start, start + len(batch))]
+        if any(score not in (0, 1) for score in scores):
+            raise JudgeError("WideSearch judge omitted a cell or returned a nonbinary score")
+        values.extend(scores)
+    return values
 
 
 def extract_table(prediction: str | list[dict]) -> pd.DataFrame | None:
@@ -222,12 +253,25 @@ def _metric(response: str, target: str, name: str, criterion: Any = None) -> flo
     raise ValueError(f"Unknown WideSearch metric: {name}")
 
 
-def evaluate_widesearch(prediction: str | list[dict], gold: list[dict], evaluation: dict, *, judge: Judge | None = None) -> dict[str, Any]:
+def evaluate_widesearch(
+    prediction: str | list[dict],
+    gold: list[dict],
+    evaluation: dict,
+    *,
+    judge: Judge | None = None,
+    judge_batch_size: int = 32,
+    judge_max_batch_chars: int = 32000,
+) -> dict[str, Any]:
     """Return official row/item metrics, with the judge protocol recorded.
 
     Judge outages raise ``JudgeError`` instead of lowering a policy's score.
-    With no judge, semantic cells receive exact-string proxy scores.
+    With no judge, semantic cells receive exact-string proxy scores. Cell and
+    response-vocabulary judgments are batched (32 by default), increasing the
+    number of calls relative to upstream. References and metric denominators
+    are retained in full. A single large item is never truncated here.
     """
+    if judge_batch_size < 1 or judge_max_batch_chars < 1:
+        raise ValueError("WideSearch judge batch limits must be positive")
     result: dict[str, Any] = {
         "score": 0.0,
         "precision_by_row": 0.0,
@@ -238,6 +282,8 @@ def evaluate_widesearch(prediction: str | list[dict], gold: list[dict], evaluati
         "f1_by_item": 0.0,
         "evaluation_protocol": "official_protocol_custom_judge" if judge else "strict_exact_proxy",
         "judge_model": getattr(judge, "model", None),
+        "judge_batch_size": judge_batch_size if judge else None,
+        "judge_max_batch_chars": judge_max_batch_chars if judge else None,
         "msg": "",
     }
     required = evaluation["required"]
@@ -258,7 +304,7 @@ def evaluate_widesearch(prediction: str | list[dict], gold: list[dict], evaluati
         result["msg"] = "Duplicate response columns"
         return result
     if set(required) != set(response.columns) and judge:
-        response.rename(columns=_align(response.columns.tolist(), required, judge), inplace=True)
+        response.rename(columns=_align(response.columns.tolist(), required, judge, judge_batch_size, judge_max_batch_chars), inplace=True)
     if set(required) != set(response.columns):
         result["msg"] = "Response columns do not match required columns"
         return result
@@ -277,7 +323,7 @@ def evaluate_widesearch(prediction: str | list[dict], gold: list[dict], evaluati
     if judge:
         for column in unique:
             if {"llm_judge", "exact_match"}.intersection(pipeline.get(column, {}).get("metric", [])):
-                mapping = _align(response[column].tolist(), answer[column].tolist(), judge)
+                mapping = _align(response[column].tolist(), answer[column].tolist(), judge, judge_batch_size, judge_max_batch_chars)
                 response[column] = response[column].apply(lambda x, mapping=mapping: mapping.get(x, x))
     for column, rules in pipeline.items():
         for name in rules.get("preprocess", []):
@@ -294,11 +340,7 @@ def evaluate_widesearch(prediction: str | list[dict], gold: list[dict], evaluati
             predicted = matched[column + "_response"].tolist()
             targets = matched[column + "_query"].tolist()
             if metric == "llm_judge" and judge and predicted:
-                pairs = {f"idx_{idx}": {"response": a, "target": b} for idx, (a, b) in enumerate(zip(predicted, targets, strict=True))}
-                judgments = _judge_json(judge, CELL_PROMPT.format(criterion=rules.get("criterion"), response=pairs))
-                values = [judgments.get(f"idx_{idx}") for idx in range(len(predicted))]
-                if any(value not in (0, 1) for value in values):
-                    raise JudgeError("WideSearch judge omitted a cell or returned a nonbinary score")
+                values = _judge_cells(predicted, targets, rules.get("criterion"), judge, judge_batch_size, judge_max_batch_chars)
             else:
                 values = [_metric(a, b, "exact_match" if metric == "llm_judge" else metric, rules.get("criterion")) for a, b in zip(predicted, targets, strict=True)]
             scores[column + "_" + metric] = values
