@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from collections import Counter
-from copy import deepcopy
 import dataclasses
 import importlib.util
 import json
 import math
-from pathlib import Path
 import sys
+from collections import Counter
+from copy import deepcopy
+from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -212,6 +213,50 @@ def test_backward_uses_only_completion_positions_and_averages_examples():
     reference = Model()
     _TRAIN.backward_batch(reference, [example])
     torch.testing.assert_close(model.scores.grad, reference.scores.grad)
+
+
+def _unequal_batch_worker(rank, rendezvous):
+    from torch import distributed
+
+    class Model(torch.nn.Module):
+        device = "cpu"
+
+        def __init__(self):
+            super().__init__()
+            self.scores = torch.nn.Parameter(torch.zeros(16, 8))
+            self.unused = torch.nn.Parameter(torch.ones(2))
+
+        def forward(self, *, input_ids, use_cache, logits_to_keep):
+            return SimpleNamespace(logits=self.scores[:input_ids.shape[1]][-logits_to_keep:].unsqueeze(0))
+
+    distributed.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=2,
+                                   timeout=timedelta(seconds=30))
+    try:
+        examples = [_TRAIN.Example(str(i), "final", "web", [1, 2, 3, 4], target)
+                    for i, target in enumerate(([5, 6], [6, 7], [2, 2, 3]))]
+        local = examples[:1] if rank == 0 else examples[1:]
+        model, reference = Model(), Model()
+        _TRAIN.backward_batch(model, local)
+        global_examples = _TRAIN.average_example_gradients(list(model.parameters()), len(local), 2)
+        assert global_examples == 3
+        _TRAIN.backward_batch(reference, examples)
+        torch.testing.assert_close(model.scores.grad, reference.scores.grad)
+        torch.testing.assert_close(model.unused.grad, torch.zeros_like(model.unused))
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.1)
+        optimizer.step()
+        reference_optimizer.step()
+        torch.testing.assert_close(model.scores, reference.scores)
+        torch.testing.assert_close(model.unused, reference.unused)
+    finally:
+        distributed.destroy_process_group()
+
+
+def test_two_cpu_ranks_weight_unequal_batches_like_all_global_examples(tmp_path):
+    if not torch.distributed.is_available() or not torch.distributed.is_gloo_available():
+        pytest.skip("CPU distributed Gloo is unavailable")
+    rendezvous = (tmp_path / "distributed-example-average").as_uri()
+    torch.multiprocessing.spawn(_unequal_batch_worker, args=(rendezvous,), nprocs=2, join=True)
 
 
 SPAN = "Delaware law governs this agreement."

@@ -8,26 +8,30 @@ Use torchrun for disjoint per-rank samples and averaged adapter gradients.
 from __future__ import annotations
 
 import argparse
-from collections import Counter, defaultdict
-from dataclasses import dataclass
-from datetime import timedelta
 import json
 import math
 import os
-from pathlib import Path
 import random
 import sys
 import time
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from datetime import timedelta
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "slime"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import torch
 import torch.distributed as dist
-from dcc_train import average_gradients, supervised_example
+from dcc_train import supervised_example
 from slime_plugins.dcc import EpisodeRunner, load_tasks
 from slime_plugins.dcc.episode import _WebEvidence
-from slime_plugins.dcc.hf_policy import completion_logprobs, encode_messages, load_policy_model
+from slime_plugins.dcc.hf_policy import (
+    completion_logprobs,
+    encode_messages,
+    load_policy_model,
+)
 from slime_plugins.dcc.retrieval import load_retrieval_profile
 
 STAGES = ("search", "fetch", "final")
@@ -410,6 +414,28 @@ def backward_batch(model, examples):
     return total
 
 
+def average_example_gradients(parameters, local_examples, world):
+    """Weight local mean gradients by the actual global example count.
+
+    The token budget can give ranks different batch sizes. Averaging rank
+    means would otherwise give examples in a smaller batch more weight.
+    """
+    if type(local_examples) is not int or local_examples < 1:
+        raise ValueError("Gradient averaging requires a positive local example count")
+    if world == 1:
+        return local_examples
+    total = torch.tensor(local_examples, dtype=torch.int64, device=parameters[0].device)
+    dist.all_reduce(total, op=dist.ReduceOp.SUM)
+    global_examples = total.item()
+    for parameter in parameters:
+        if parameter.grad is None:
+            parameter.grad = torch.zeros_like(parameter)
+        parameter.grad.mul_(local_examples)
+        dist.all_reduce(parameter.grad, op=dist.ReduceOp.SUM)
+        parameter.grad.div_(global_examples)
+    return global_examples
+
+
 def train(args):
     rank, local, world = (int(os.environ.get(key, default)) for key, default in (("RANK", "0"), ("LOCAL_RANK", "0"), ("WORLD_SIZE", "1")))
     torch.cuda.set_device(local)
@@ -473,7 +499,7 @@ def train(args):
             model.train()
             optimizer.zero_grad(set_to_none=True)
             loss = backward_batch(model, examples)
-            average_gradients(parameters, world)
+            global_examples = average_example_gradients(parameters, len(examples), world)
             norm = torch.nn.utils.clip_grad_norm_(parameters, args.max_grad_norm)
             if not torch.isfinite(norm) or norm <= 0:
                 raise FloatingPointError("Expected finite nonzero adapter gradient; refusing update")
@@ -481,6 +507,7 @@ def train(args):
             counts.update(example.stage for example in examples)
             ids.update(example.task_id for example in examples)
             record(event="step", step=step, loss=loss, gradient_norm=norm.item(), seconds=time.monotonic() - begin,
+                   global_examples=global_examples,
                    samples=[{"task_id": e.task_id, "stage": e.stage, "category": e.category,
                              "prompt_tokens": len(e.prompt), "completion_tokens": len(e.completion)} for e in examples],
                    stage_counts=dict(counts), skipped=dict(sampler.skips))
