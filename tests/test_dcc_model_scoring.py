@@ -82,7 +82,7 @@ def logical_predictions(tmp_path):
     ("status", "unknown episode status"),
     ("manifest", "mixed generation manifests"),
 ])
-def test_logical_score_rejects_incomplete_or_mixed_runs(tmp_path, corruption, match):
+def test_logical_score_rejects_incomplete_or_mixed_runs(monkeypatch, tmp_path, corruption, match):
     tasks = logical_predictions(tmp_path)
     if corruption == "overlap":
         with (tmp_path / "predictions_rank1.jsonl").open("a") as stream:
@@ -111,6 +111,14 @@ def test_logical_score_rejects_incomplete_or_mixed_runs(tmp_path, corruption, ma
     elif corruption == "manifest":
         path = tmp_path / "manifest_rank1.json"
         path.write_text(json.dumps(json.loads(path.read_text()) | {"max_steps": 8}))
+    original_exists = Path.exists
+
+    def no_output_exists(path):
+        if path.parent == tmp_path:
+            raise AssertionError("Output checks must use directory listings")
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", no_output_exists)
     with pytest.raises(ValueError, match=match):
         cli()["_score_predictions"](tmp_path, tasks)
 
@@ -283,6 +291,44 @@ def test_explicit_data_shards_do_not_enable_multirank_vllm_launchers(monkeypatch
 def test_scoring_rejects_explicit_generation_shards():
     with pytest.raises(ValueError, match="require vLLM generation"):
         cli()["score"](SimpleNamespace(inference_backend="vllm", eval_shard_index=0, eval_num_shards=2))
+
+
+def test_new_shards_and_resume_avoid_negative_output_metadata_lookups(monkeypatch, tmp_path):
+    calls = []
+
+    class Policy:
+        provenance = {"backend": "vllm", "model": "example/model"}
+
+        async def __call__(self, messages, **kwargs):
+            calls.append("generate")
+            return PolicyCompletion('{"answer":[]}', [1], [2])
+
+        async def close(self):
+            calls.append("close")
+
+    tasks = [Task(f"contract{i}", "cuad", "validation", "Find clause", document="A contract") for i in range(2)]
+    evaluate, args = stub_evaluation(monkeypatch, tmp_path, Policy(), tasks)
+    original_exists, original_unlink = Path.exists, Path.unlink
+
+    def no_output_exists(path):
+        if path.parent == tmp_path:
+            raise AssertionError("Output checks must use directory listings")
+        return original_exists(path)
+
+    def no_negative_unlink(path, *args, **kwargs):
+        if path.parent == tmp_path and path.name not in {entry.name for entry in tmp_path.iterdir()}:
+            raise AssertionError("Do not unlink a known absent output file")
+        return original_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as context:
+        context.setattr(Path, "exists", no_output_exists)
+        context.setattr(Path, "unlink", no_negative_unlink)
+        for rank in (0, 1, 0):
+            shard_args = SimpleNamespace(**vars(args), eval_shard_index=rank, eval_num_shards=2)
+            asyncio.run(evaluate(shard_args))
+        saved, _, _ = cli()["_score_predictions"](tmp_path, tasks)
+    assert len(saved) == 2
+    assert calls.count("generate") == calls.count("close") == 2
 
 
 def test_independent_vllm_shards_cover_once_resume_and_score_shared_predictions(monkeypatch, tmp_path):

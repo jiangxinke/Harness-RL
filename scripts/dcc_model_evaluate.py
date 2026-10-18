@@ -45,9 +45,12 @@ def _evaluation_shard(args, *, generation):
 
 
 def _check_generation_manifests(output, manifest):
+    names = set()
     for path in output.glob("manifest_rank*.json"):
+        names.add(path.name)
         if json.loads(path.read_text()) != manifest:
             raise ValueError("Evaluation configuration changed; use a new output directory")
+    return names
 
 
 def _adapter_identity(adapter):
@@ -108,6 +111,7 @@ def _score_predictions(output, tasks):
         )
     runtime = _saved_runtime(output)
     if "eval_num_shards" in manifest:
+        output_names = {path.name for path in output.iterdir()}
         count = manifest["eval_num_shards"]
         if type(count) is not int or count < 1 or manifest.get("world_size") != count or set(manifests) != set(range(count)):
             raise ValueError("Logical shard manifests do not cover the configured world")
@@ -117,10 +121,10 @@ def _score_predictions(output, tasks):
             if {task_id for task_id, owner in owners.items() if owner == rank} != assigned:
                 raise ValueError("Prediction task ownership differs from its logical shard")
             marker = output / f"rank{rank}.done"
-            if not marker.exists() or json.loads(marker.read_text()) != {"tasks": len(assigned), "world_size": count}:
+            if marker.name not in output_names or json.loads(marker.read_text()) != {"tasks": len(assigned), "world_size": count}:
                 raise ValueError(f"Evaluation shard {rank} has no matching completion marker")
             runtime_path = output / (f"inference_runtime_rank{rank}.json" if count > 1 else "inference_runtime.json")
-            if assigned and not runtime_path.exists():
+            if assigned and runtime_path.name not in output_names:
                 raise ValueError(f"Evaluation shard {rank} has no inference runtime record")
         if any(record.get("status") not in statuses for record in saved.values()):
             raise ValueError("Predictions contain a missing or unknown episode status")
@@ -231,16 +235,18 @@ async def evaluate(args):
         if auto_read_sources:
             manifest["auto_read_sources"] = auto_read_sources
     manifest_path = output / f"manifest_rank{rank}.json"
-    _check_generation_manifests(output, manifest)
-    if not manifest_path.exists():
+    if manifest_path.name not in _check_generation_manifests(output, manifest):
         # Other independently launched shards must never read partial JSON.
         temporary = output / f".manifest_rank{rank}.{os.getpid()}.tmp"
         temporary.write_text(json.dumps(manifest, indent=2) + "\n")
         temporary.replace(manifest_path)
     _check_generation_manifests(output, manifest)
+    # Directory enumeration avoids slow negative metadata lookups on some
+    # remote filesystems. Only this rank's pre-existing files control resume.
+    output_names = {path.name for path in output.iterdir()}
     file = output / f"predictions_rank{rank}.jsonl"
     done = {}
-    if file.exists():
+    if file.name in output_names:
         for line in file.read_text().splitlines():
             if line.strip():
                 value = json.loads(line)
@@ -257,7 +263,9 @@ async def evaluate(args):
     ]
     if todo:
         # A previous successful attempt must not certify a failed retry.
-        (output / f"rank{rank}.done").unlink(missing_ok=True)
+        marker = output / f"rank{rank}.done"
+        if marker.name in output_names:
+            marker.unlink(missing_ok=True)
     if backend == "vllm":
         previous_runtime = _saved_runtime(output)
         _check_saved_adapter(args.adapter, previous_runtime)
