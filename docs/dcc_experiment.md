@@ -207,9 +207,11 @@ class, so their HTTP status codes cannot be recovered. Zero task-level
 `infrastructure_error` does not mean all external pages were accessible, and
 these evidence failures cannot all be attributed to model behavior alone.
 
-CUAD official test scoring is complete; full WideSearch generation and judging
-are **in progress**. Both final runs use source snapshot `b25a4d63`, graph
-vLLM/BF16 and eight independent TP1 engines. CUAD uses the training-only profile, eight initial chunks,
+CUAD official test scoring and all 200 WideSearch generations are complete;
+WideSearch custom judging is **in progress**. Both final generation runs use
+source snapshot `b25a4d63`, graph vLLM/BF16 and eight independent TP1 engines.
+The separately frozen scoring snapshot is `1088aa2f`, protocol `same_entity_v3`.
+CUAD uses the training-only profile, eight initial chunks,
 8,192/1,024 prompt/completion budgets, three turns and batch size eight.
 WideSearch uses 16,384/8,192 budgets, 12 turns, batch size four, automatic page
 reads off and the same evidence guard. Each engine has memory utilization 0.88,
@@ -226,6 +228,19 @@ generation exit, including model loading and compilation, consuming 11,878,691
 prompt tokens and 168,150 completion tokens. This CUAD run makes zero tool
 calls: it answers from the eight retrieved initial chunks. The harness supports
 additional retrieval tools, but these scores do not demonstrate tool use.
+
+All 200 WideSearch tasks are present: 73 have accepted final answers and 127
+end with `evidence_failure`; none has task-level `infrastructure_error`.
+The new scoring snapshot recomputes the strict exact-match proxy from these
+unchanged predictions: macro row precision/recall/F1 are 0.008354/0.004288/0.004833,
+item precision/recall/F1 are 0.022740/0.012131/0.013661, and full-table accuracy
+is zero. All 200 tasks remain in each denominator. These are string-match
+proxy scores; custom semantic scores will be reported separately after all
+judge shards finish. Search occurs on 197 tasks, with 1,050 calls: 448 Seznam,
+600 Baidu mobile and two Wikipedia calls. All calls use fallback providers
+because the configured public-web provider reports challenge/cooldown. This
+retrieval setting and the evidence failures limit benchmark quality; the
+results do not establish reliable broad web research behavior.
 
 The earlier adapter's original CUAD test run is retained as historical context:
 4,182/4,182 questions, AUPR 0.182906, micro F1 0.370070, precision 0.457637,
@@ -339,8 +354,11 @@ Artifact paths relative to that root include `dcc-run/training/final`,
 `full-validation-graph-summary.json` under `dcc-run/`. The frozen selection is
 `dcc-run/final-selection.json`; final predictions and scores use the new
 `dcc-run/cuad-final-selected` and `dcc-run/widesearch-final-selected` directories.
-CUAD scores are in `dcc-run/cuad-final-selected/scores_strict.json`. WideSearch
-scores will be recorded after full generation and judging finish.
+CUAD scores are in `dcc-run/cuad-final-selected/scores_strict.json`. The new
+WideSearch strict scores are in
+`dcc-run/widesearch-final-selected-judge-same_entity_v3-final-bf16/scores_strict.json`;
+the original generation directory retains its legacy scoring files. Custom
+judge scores will be recorded after full judging and merge finish.
 
 Final CUAD coverage and scoring audits are retained under
 `dcc-run/scoring-audit/final-cuad-score-audit.json` and
