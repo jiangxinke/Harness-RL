@@ -146,6 +146,8 @@ def _system_prompt(task: Task, max_steps: int) -> str:
         "table's exact column names and a citations list of supporting URLs for every row. Do not include rows "
         "that fail a condition. Tools: web_search(query: string, count: integer=8), fetch_url(url: string, start: integer=0). "
         "The reader supports HTML, text, and PDFs. Use next_start to continue a truncated page. "
+        "Search observations disclose their actual backend and coverage. Wikipedia fallback covers an encyclopedia; "
+        "it is not a general web index. Adjust queries in English or Chinese as needed. "
         f"Required answer columns: {json.dumps(columns, ensure_ascii=False)}. "
         "Only cite URLs actually returned by web_search or fetch_url."
     )

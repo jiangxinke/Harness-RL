@@ -223,7 +223,7 @@ class WebTools:
     """Search using DuckDuckGo, Serper, Brave, SearXNG, or Bing RSS."""
 
     def __init__(self, *, backend: str | None = None, max_page_chars: int = 14000) -> None:
-        self.backend = backend or os.environ.get("DCC_SEARCH_BACKEND", "duckduckgo_lite")
+        self.backend = backend or os.environ.get("DCC_SEARCH_BACKEND", "duckduckgo_wikipedia")
         self.max_page_chars = max_page_chars
         self.sources: dict[str, dict[str, str]] = {}
         self.pages: dict[str, str] = {}
@@ -235,39 +235,51 @@ class WebTools:
             return {"error": "query must be nonempty"}
         count = max(1, min(int(count), 10))
         async with self._semaphore:
-            hits = await asyncio.to_thread(self._search, query, count)
-        for hit in hits:
-            self.sources[hit["url"]] = hit
-        return {"query": query, "results": hits, "backend": self.backend}
+            if self.backend in {"auto", "duckduckgo_wikipedia"}:
+                from .search_provider import search_with_fallback
 
-    def _search(self, query: str, count: int) -> list[dict[str, str]]:
-        if self.backend == "duckduckgo_lite":
+                information = await asyncio.to_thread(search_with_fallback, query, count, lambda: self._search(query, count, backend="duckduckgo_lite"))
+            elif self.backend == "wikipedia":
+                from .search_provider import wikipedia_search
+
+                hits = await asyncio.to_thread(wikipedia_search, query, count)
+                information = {"results": hits, "backend": "wikipedia", "search_scope": "encyclopedia", "fallback_reason": None, "coverage_note": "Encyclopedia search only; this is not a general web index."}
+            else:
+                hits = await asyncio.to_thread(self._search, query, count)
+                information = {"results": hits, "backend": self.backend, "search_scope": "web", "fallback_reason": None}
+        for hit in information["results"]:
+            self.sources[hit["url"]] = hit
+        return {"query": query, "configured_backend": self.backend, **information}
+
+    def _search(self, query: str, count: int, *, backend: str | None = None) -> list[dict[str, str]]:
+        backend = backend or self.backend
+        if backend == "duckduckgo_lite":
             raw = _request("https://lite.duckduckgo.com/lite/?" + urllib.parse.urlencode({"q": query}))
             if "anomaly-modal" in raw or "challenge-form" in raw:
                 raise InfrastructureError("DuckDuckGo challenged this request; use a configured search API")
             parser = _DuckDuckGoResults()
             parser.feed(raw)
             hits = parser.hits
-        elif self.backend == "serper":
+        elif backend == "serper":
             key = os.environ.get("SERPER_API_KEY")
             if not key:
                 raise InfrastructureError("SERPER_API_KEY is required for serper")
             data = json.loads(_request("https://google.serper.dev/search", payload={"q": query, "num": count}, headers={"X-API-KEY": key}))
             hits = [{"title": item.get("title", ""), "url": item["link"], "snippet": item.get("snippet", "")} for item in data.get("organic", [])]
-        elif self.backend == "brave":
+        elif backend == "brave":
             key = os.environ.get("BRAVE_SEARCH_API_KEY")
             if not key:
                 raise InfrastructureError("BRAVE_SEARCH_API_KEY is required for brave")
             url = "https://api.search.brave.com/res/v1/web/search?" + urllib.parse.urlencode({"q": query, "count": count})
             data = json.loads(_request(url, headers={"X-Subscription-Token": key}))
             hits = [{"title": item.get("title", ""), "url": item["url"], "snippet": item.get("description", "")} for item in data.get("web", {}).get("results", [])]
-        elif self.backend == "searxng":
+        elif backend == "searxng":
             endpoint = os.environ.get("DCC_SEARCH_URL", "").rstrip("/")
             if not endpoint:
                 raise InfrastructureError("DCC_SEARCH_URL is required for searxng")
             data = json.loads(_request(endpoint + "/search?" + urllib.parse.urlencode({"q": query, "format": "json"})))
             hits = [{"title": item.get("title", ""), "url": item["url"], "snippet": item.get("content", "")} for item in data.get("results", [])]
-        elif self.backend == "bing_rss":
+        elif backend == "bing_rss":
             raw = _request("https://www.bing.com/search?" + urllib.parse.urlencode({"q": query, "format": "rss", "count": count}))
             try:
                 root = ET.fromstring(raw)
@@ -275,15 +287,21 @@ class WebTools:
                 raise InfrastructureError("search endpoint returned invalid RSS") from exc
             hits = [{"title": item.findtext("title", ""), "url": item.findtext("link", ""), "snippet": visible_text(item.findtext("description", ""))} for item in root.findall("./channel/item")]
         else:
-            raise ValueError(f"unknown search backend: {self.backend}")
+            raise ValueError(f"unknown search backend: {backend}")
         return [item for item in hits if item["url"].startswith(("https://", "http://"))][:count]
 
     async def fetch_url(self, url: str, start: int = 0) -> dict[str, Any]:
         if url not in self.pages:
             try:
-                async with self._semaphore:
-                    raw, content_type, encoding = await asyncio.to_thread(_download_public, url)
-                self.pages[url] = await asyncio.to_thread(extract_page, raw, content_type, encoding)
+                from .search_provider import wikipedia_page
+
+                article = await asyncio.to_thread(wikipedia_page, url)
+                if article is not None:
+                    self.pages[url] = article
+                else:
+                    async with self._semaphore:
+                        raw, content_type, encoding = await asyncio.to_thread(_download_public, url)
+                    self.pages[url] = await asyncio.to_thread(extract_page, raw, content_type, encoding)
             except (InfrastructureError, ValueError, socket.gaierror) as exc:
                 # Dead/blocked pages are normal web-agent observations. An
                 # unavailable search backend, in contrast, aborts the episode.

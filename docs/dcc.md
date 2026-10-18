@@ -69,13 +69,30 @@ and returns `next_start` to page through long documents without redownloading.
 
 ## Web providers
 
-Set `DCC_SEARCH_BACKEND` to `duckduckgo_lite` (default), `serper`, `brave`,
-`searxng`, or `bing_rss`. API providers require `SERPER_API_KEY` or
+Set `DCC_SEARCH_BACKEND` to `duckduckgo_wikipedia` (default), `wikipedia`,
+`duckduckgo_lite`, `serper`, `brave`, `searxng`, or `bing_rss`.
+The default tries DuckDuckGo, serializes its requests, and caches successful
+queries in the process. A challenge or service error starts a 300-second
+process-local cooldown and falls back to English/Chinese Wikipedia's official
+search API. Every observation records the actual `backend`, `search_scope`, and
+`fallback_reason`. Wikipedia covers encyclopedia articles and does not provide
+the coverage of a general web index. Its reader retrieves article HTML through
+the official parse API and preserves tables. MediaWiki's plaintext extracts
+omit tables and would discard many enumeration answers.
+
+API providers require `SERPER_API_KEY` or
 `BRAVE_SEARCH_API_KEY`; SearXNG requires `DCC_SEARCH_URL`. Requests use
 `DCC_WEB_TIMEOUT` seconds (default 30). Configure these outside version control.
-DuckDuckGo can issue bot challenges, which invalidate the episode instead of
-creating a misleading training reward. A reliable search API is recommended
-for the full WideSearch run. Validate query relevance before using Bing RSS.
+Standalone `duckduckgo_lite` treats bot challenges as infrastructure failures.
+If both the default provider and its fallback fail, the episode is invalidated
+instead of creating a misleading training reward. A reliable search API is
+recommended for broad coverage in the full WideSearch run. Record provider
+coverage alongside scores. Validate query relevance before using Bing RSS.
+WideSearch reports include `search_coverage`: actual and configured backend
+counts, scope counts, fallback categories, the fraction of recorded search
+calls using the encyclopedia, and the fraction of all evaluation tasks with
+encyclopedia search. Tasks without recorded search remain visible. Raw fallback
+errors and operator-configured URLs are never copied into these statistics.
 
 ## Scoring
 

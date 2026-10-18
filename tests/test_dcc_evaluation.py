@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from slime_plugins.dcc import Task
@@ -66,3 +68,86 @@ def test_infrastructure_episode_does_not_count_as_complete_evaluation():
     )
     assert not report["complete"]
     assert report["widesearch"]["score"] == 0
+
+
+def test_search_coverage_counts_actual_scopes_and_exports_no_operator_details():
+    report = evaluate_results(
+        [wide("a"), wide("b"), wide("c")],
+        [
+            {
+                "task_id": "a",
+                "answer": [],
+                "tool_events": [
+                    {
+                        "tool": "web_search",
+                        "observation": {
+                            "configured_backend": "duckduckgo_wikipedia",
+                            "backend": "wikipedia",
+                            "search_scope": "encyclopedia",
+                            "fallback_reason": "DuckDuckGo challenged this request",
+                        },
+                    },
+                    {
+                        "tool": "web_search",
+                        "observation": {
+                            "configured_backend": "serper",
+                            "backend": "serper",
+                            "search_scope": "web",
+                            "fallback_reason": None,
+                        },
+                    },
+                    {"tool": "fetch_url", "observation": {"backend": "wikipedia"}},
+                ],
+            },
+            {
+                "task_id": "b",
+                "answer": [],
+                "tool_events": [
+                    {
+                        "tool": "web_search",
+                        "observation": {
+                            "configured_backend": "http://private.invalid/server/path",
+                            "backend": "http://private.invalid",
+                            "search_scope": "private/path",
+                            "fallback_reason": "HTTP retrieval failed http://private.invalid/server/path",
+                        },
+                    },
+                ],
+            },
+        ],
+    )
+    coverage = report["widesearch"]["search_coverage"]
+    assert coverage["search_calls"] == 3
+    assert coverage["tasks_with_search"] == 2
+    assert coverage["tasks_without_search"] == 1
+    assert coverage["tasks_with_web_search"] == 1
+    assert coverage["tasks_with_encyclopedia_search"] == 1
+    assert coverage["encyclopedia_search_fraction"] == pytest.approx(1 / 3)
+    assert coverage["tasks_with_encyclopedia_search_fraction"] == pytest.approx(1 / 3)
+    assert coverage["backend_counts"] == {"wikipedia": 1, "serper": 1, "unknown": 1}
+    assert coverage["fallback_calls"] == 2
+    assert coverage["fallback_reason_counts"] == {"challenge": 1, "provider_error": 1}
+    assert "private.invalid" not in json.dumps(coverage)
+    assert "server/path" not in json.dumps(coverage)
+
+
+def test_search_coverage_handles_legacy_missing_and_malformed_observations():
+    report = evaluate_results(
+        [wide("a"), wide("b")],
+        [
+            {
+                "task_id": "a",
+                "tool_events": ["bad", {"tool": "web_search", "observation": None}],
+            },
+            {"task_id": "b", "tool_events": None},
+        ],
+    )
+    coverage = report["widesearch"]["search_coverage"]
+    assert coverage["backend_counts"] == {"unknown": 1}
+    assert coverage["scope_counts"] == {"unknown": 1}
+    assert coverage["encyclopedia_search_fraction"] == 0
+    no_search = evaluate_results([wide("a")], [])
+    assert (
+        no_search["widesearch"]["search_coverage"]["encyclopedia_search_fraction"]
+        is None
+    )

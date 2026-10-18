@@ -12,6 +12,62 @@ from .metrics import evaluate_cuad
 from .widesearch_metrics import Judge, JudgeError, evaluate_widesearch
 
 
+def _search_coverage(tasks: list[Task], saved: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Summarize recorded search observations without echoing URLs or errors."""
+    known_backends = {"duckduckgo_lite", "duckduckgo_wikipedia", "wikipedia", "serper", "brave", "searxng", "bing_rss", "auto"}
+    backend_counts: Counter[str] = Counter()
+    configured_counts: Counter[str] = Counter()
+    scope_counts: Counter[str] = Counter()
+    fallback_counts: Counter[str] = Counter()
+    searched: set[str] = set()
+    web: set[str] = set()
+    encyclopedia: set[str] = set()
+    for task in tasks:
+        events = saved.get(task.id, {}).get("tool_events", [])
+        if not isinstance(events, list):
+            continue
+        for event in events:
+            if not isinstance(event, dict) or event.get("tool") != "web_search":
+                continue
+            observation = event.get("observation")
+            observation = observation if isinstance(observation, dict) else {}
+            searched.add(task.id)
+            backend = observation.get("backend")
+            configured = observation.get("configured_backend")
+            scope = observation.get("search_scope")
+            backend_counts[backend if isinstance(backend, str) and backend in known_backends else "unknown"] += 1
+            configured_counts[configured if isinstance(configured, str) and configured in known_backends else "unknown"] += 1
+            scope = scope if scope in ("web", "encyclopedia") else "unknown"
+            scope_counts[scope] += 1
+            if scope == "web":
+                web.add(task.id)
+            elif scope == "encyclopedia":
+                encyclopedia.add(task.id)
+            reason = observation.get("fallback_reason")
+            if reason:
+                # Raw exception strings may contain operator-configured server
+                # details. Export only fixed reason categories.
+                reason = reason.lower() if isinstance(reason, str) else ""
+                category = "cooldown" if "cooldown" in reason else "challenge" if "challeng" in reason or "captcha" in reason else "no_results" if "no search results" in reason else "provider_error"
+                fallback_counts[category] += 1
+    calls = sum(scope_counts.values())
+    return {
+        "tasks": len(tasks),
+        "tasks_with_search": len(searched),
+        "tasks_without_search": len(tasks) - len(searched),
+        "tasks_with_web_search": len(web),
+        "tasks_with_encyclopedia_search": len(encyclopedia),
+        "tasks_with_encyclopedia_search_fraction": len(encyclopedia) / len(tasks),
+        "search_calls": calls,
+        "backend_counts": dict(backend_counts),
+        "configured_backend_counts": dict(configured_counts),
+        "scope_counts": dict(scope_counts),
+        "encyclopedia_search_fraction": scope_counts["encyclopedia"] / calls if calls else None,
+        "fallback_calls": sum(fallback_counts.values()),
+        "fallback_reason_counts": dict(fallback_counts),
+    }
+
+
 def evaluate_results(tasks: Iterable[Task], predictions: Iterable[dict[str, Any]], *, judge: Judge | None = None, workers: int = 1) -> dict[str, Any]:
     tasks = list(tasks)
     if not tasks:
@@ -57,6 +113,7 @@ def evaluate_results(tasks: Iterable[Task], predictions: Iterable[dict[str, Any]
             "judge_failures": len(per_task) - len(successful),
             "evaluation_protocol": "official_protocol_custom_judge" if judge else "strict_exact_proxy",
             "judge_model": getattr(judge, "model", None),
+            "search_coverage": _search_coverage(wide, saved),
             **{key: sum(value[key] for value in successful) / len(successful) if successful else None for key in keys},
             "per_task": per_task,
         }
