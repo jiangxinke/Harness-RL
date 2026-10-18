@@ -305,11 +305,16 @@ class WebTools:
 
                 article = await asyncio.to_thread(wikipedia_page, url)
                 if article is not None:
-                    self.pages[url] = article
+                    text = article
                 else:
                     async with self._semaphore:
                         raw, content_type, encoding = await asyncio.to_thread(_download_public, url)
-                    self.pages[url] = await asyncio.to_thread(extract_page, raw, content_type, encoding)
+                    text = await asyncio.to_thread(extract_page, raw, content_type, encoding)
+                # PDF extractors can emit unpaired UTF-16 surrogates in a
+                # Python str. Rust tokenizers reject those strings. Clean at
+                # this external-page boundary before caching, slicing, or
+                # exposing text so observations and continuation offsets agree.
+                self.pages[url] = text.encode("utf-8", errors="replace").decode("utf-8")
             except (InfrastructureError, ValueError, socket.gaierror) as exc:
                 # Dead/blocked pages are normal web-agent observations. An
                 # unavailable search backend, in contrast, aborts the episode.
