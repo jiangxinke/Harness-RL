@@ -13,6 +13,12 @@ from 102 contracts. WideSearch is the official ByteDance-Seed benchmark:
 all 200 tasks, comprising 100 English and 100 Chinese tasks, are held out.
 No official WideSearch question or reference answer enters training.
 
+Data versions are pinned: CUAD is from `The-Atticus-Project/cuad` at Git
+revision `67faa0e6023b04fcaae6cc09497ab00e5d63a2a2`; WideSearch uses Hugging
+Face dataset `ByteDance-Seed/WideSearch` revision
+`6531a7e5b497d44c8912407e0cb3dc95bd98cc09`. The reference WideSearch evaluator
+is Git revision `9825ba7b140b71d81b364793f86dabe4cfed6749` of the same project.
+
 ## Training
 
 The frozen BF16 base model is replicated across eight workers. Attention
@@ -73,8 +79,26 @@ model and has not been calibrated.
 
 ## Test protocol and status
 
-Full test evaluation is in progress. Final results will be added after full
-coverage, infrastructure checks, and judge validation finish.
+CUAD test evaluation is complete. WideSearch evaluation is in progress; its
+results will be added after full coverage and judge validation finish.
+
+| Full CUAD test metric | Selected adapter |
+| --- | ---: |
+| Questions / coverage | 4,182 / 100% |
+| AUPR | 0.182906 |
+| Micro precision | 0.457637 |
+| Micro recall | 0.310632 |
+| Micro F1 | 0.370070 |
+| Precision at 80% / 90% recall | 0 / 0 |
+
+There were 4,180 completed episodes and two exhausted turn budgets, with zero
+infrastructure failures. All 4,182 questions remain in the denominator. Model
+generation took approximately 2,033 seconds across eight workers, excluding
+model initialization. The full-test recall and zero high-recall precision show
+that this short training run still has substantial extraction and retrieval
+limitations; no convergence or leaderboard-quality claim is made.
+The run used 6,815,159 prompt and 178,444 completion tokens. It made no
+additional document-tool calls: all answers relied on initial retrieval.
 
 CUAD uses the official word-set Jaccard threshold of 0.5, with the official
 Parties substring exception. Reports include AUPR, precision at 80% and 90%
@@ -86,6 +110,22 @@ tokens per turn. The default `public_web` provider tries DuckDuckGo, Seznam
 for non-Chinese queries, Baidu mobile, and Wikipedia; actual backend coverage
 is recorded with predictions. An independent English/Chinese tool preflight
 must pass before running the held-out tasks.
+
+An initial independent preflight exposed premature final answers without any
+search or page read, including unsupported URLs. The WideSearch-only
+`search-fetch-citations-v1` guard now requires a successful search with source
+URLs and a successful nonempty page read before accepting a final answer.
+Every returned row must cite an observed source URL. Rejected finals receive
+explicit corrective feedback within the original turn budget; exhausted guards
+are model failures scored as zero, not infrastructure exclusions. CUAD behavior
+is unchanged. A fresh output directory and manifest version prevent mixing
+these predictions with the initial failed preflight.
+With the guard, the first four-turn GPU preflight completed six of eight
+independent tasks with successful searches, page reads, and valid citations.
+Two tasks exhausted their budget after premature finals or multiple action
+objects in one response; there were no infrastructure or generation-length
+failures. An independent six-turn rerun is in progress. The full benchmark's
+fixed budget remains 12 turns.
 
 The WideSearch report will include a deterministic strict proxy and the official
 metric pipeline with a **custom frozen base-Qwen judge**. This is not the
@@ -107,6 +147,6 @@ Validation predictions are in `dcc-run/dev82-v2-baseline` and
 `dcc-run/dev82-v2-trained`. Planned full-test outputs are `dcc-run/cuad-final`
 and `dcc-run/widesearch-final`.
 
-The code revision preceding this report passed 322 CPU regression checks with
+The code revision preceding this report passed 343 CPU regression checks with
 one optional real-tokenizer check skipped. This includes real tiny-Qwen3MoE
 generation/log-probability parity checks and retained Harness-RL/OLE tests.
