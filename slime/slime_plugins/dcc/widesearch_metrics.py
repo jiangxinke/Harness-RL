@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Callable, Iterator
+from functools import lru_cache
 from io import StringIO
 from typing import Any
 from urllib.parse import urlparse
@@ -20,7 +22,7 @@ from urllib.request import Request, urlopen
 
 import pandas as pd
 
-ALIGNMENT_PROTOCOL = "same_entity_v8"
+ALIGNMENT_PROTOCOL = "same_entity_v9"
 
 HEADER_ALIGN_PROMPT = """Your task is to align two vocabularies of table column headers: response-table labels and the required reference schema. Column headers describe fields, not the identity of named entities.
 
@@ -203,7 +205,30 @@ def _judge_json(judge: Judge, prompt: str) -> dict:
         if isinstance(result, dict):
             return result
         matches = re.findall(r"```json\s*(\{.*?\})\s*```", result, re.DOTALL)
-        result = json.loads(matches[-1] if matches else result)
+        if matches:
+            result = json.loads(matches[-1])
+        else:
+            try:
+                result = json.loads(result)
+            except json.JSONDecodeError:
+                # Some judges omit the requested fence after their rationale.
+                # Accept one complete terminal object, never an inner object
+                # salvaged from malformed JSON, a list, or multiple objects.
+                first = result.find("{")
+                prefix = result[:first] if first >= 0 else result
+                if first < 0 or any(char in prefix for char in "[]{}"):
+                    raise
+                quoted, escaped = False, False
+                for char in prefix:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        quoted = not quoted
+                if quoted:
+                    raise
+                result = json.loads(result[first:])
         if not isinstance(result, dict):
             raise ValueError("expected JSON object")
         return result
@@ -227,8 +252,97 @@ def _batches(values: list[Any], batch_size: int, max_chars: int) -> Iterator[tup
         yield start, batch
 
 
+def _identity_text(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
+@lru_cache(maxsize=1)
+def _geographic_qualifier_names() -> frozenset[str]:
+    """Use ISO country/subdivision names, without benchmark-specific aliases."""
+    import pycountry
+
+    names = {
+        _identity_text(getattr(country, field))
+        for country in pycountry.countries
+        for field in ("name", "official_name", "common_name")
+        if hasattr(country, field)
+    }
+    names.update(_identity_text(subdivision.name) for subdivision in pycountry.subdivisions)
+    return frozenset(names)
+
+
+_IDENTITY_YEAR = r"[12][0-9]{3}"
+_MEDIA_TYPE = (
+    r"(?:novel|novella|book|film|movie|short film|documentary|television film|tv film|"
+    r"television series|tv series|television show|tv show|web series|video game|"
+    r"short story|play|musical|opera|poem|album|song|manga|anime|comic|comic book)"
+)
+_EDITION_VERSION = (
+    r"(?:(?:[0-9]+(?:st|nd|rd|th)?|first|second|third|fourth|fifth|sixth|seventh|"
+    r"eighth|ninth|tenth|revised|updated|expanded|special|anniversary)\s+edition|"
+    r"(?:edition|version)\s+[0-9]+(?:\.[0-9]+)*|v[0-9]+(?:\.[0-9]+)*|"
+    + _IDENTITY_YEAR + r"\s+(?:edition|version))"
+)
+
+
+def _explicit_identity_qualifier(value: str) -> bool:
+    if re.fullmatch(_IDENTITY_YEAR + "|" + _EDITION_VERSION, value):
+        return True
+    if re.fullmatch(
+        rf"(?:{_IDENTITY_YEAR}\s*,?\s*)?{_MEDIA_TYPE}(?:\s*,?\s*{_IDENTITY_YEAR})?",
+        value,
+    ):
+        return True
+    names = _geographic_qualifier_names()
+    return value in names or ("," in value and all(part.strip() in names for part in value.split(",")))
+
+
+def _has_missing_identity_qualifier(origin: str, candidate: str) -> bool:
+    """Abstain only for the same literal base with an added explicit qualifier.
+
+    This is a deterministic production decision, not a raw model verdict.
+    Different bases, translations and expanded aliases remain for the judge.
+    """
+    origin, candidate = _identity_text(origin), _identity_text(candidate)
+    if not origin or origin == candidate:
+        return False
+    removed = []
+    while candidate:
+        base, qualifier = None, None
+        parenthetical = re.fullmatch(r"(.+?)\s*\(([^()]*)\)", candidate)
+        if parenthetical and _explicit_identity_qualifier(parenthetical[2].strip()):
+            base = parenthetical[1].rstrip(" ,:;–—-").strip()
+            qualifier = parenthetical[2].strip()
+        if base is None and "," in candidate:
+            names = _geographic_qualifier_names()
+            for index, char in enumerate(candidate):
+                if char != ",":
+                    continue
+                suffix = candidate[index + 1:].strip()
+                if suffix in names or all(part.strip() in names for part in suffix.split(",")):
+                    base, qualifier = candidate[:index].strip(), suffix
+                    break
+        if base is None:
+            suffix = re.fullmatch(
+                rf"(.+?)(?:\s+|\s*[:,;–—-]\s*)({_IDENTITY_YEAR}|{_EDITION_VERSION})",
+                candidate,
+            )
+            if suffix:
+                base, qualifier = suffix[1].strip(), suffix[2]
+        if not base or base == candidate:
+            return False
+        removed.append(qualifier)
+        if base == origin:
+            # Repeating a qualifier already present is not underqualification.
+            return any(not re.search(rf"(?<!\w){re.escape(value)}(?!\w)", origin) for value in removed)
+        candidate = base
+    return False
+
+
 def _verify_entity_identity(origin: str, candidate: str, judge: Judge) -> str:
     """Validate a pair in isolation; only YES permits an entity match."""
+    if _has_missing_identity_qualifier(origin, candidate):
+        return "UNCERTAIN"
     pair = json.dumps({"origin": origin, "candidate": candidate}, ensure_ascii=False)
     verification = _judge_json(judge, ENTITY_VERIFY_PROMPT.format(data=pair))
     if set(verification) != {"same_entity"} or verification["same_entity"] not in ("YES", "NO", "UNCERTAIN"):

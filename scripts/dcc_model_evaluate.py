@@ -443,7 +443,7 @@ def _prediction_quantization(output):
 
 def _judge_configuration(args):
     quantization = getattr(args, "quantization", "none")
-    packages = ["torch", "transformers", "peft"]
+    packages = ["torch", "transformers", "peft", "pycountry"]
     if quantization == "nf4":
         packages.append("bitsandbytes")
     versions = {}

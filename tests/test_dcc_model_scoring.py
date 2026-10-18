@@ -394,6 +394,7 @@ def test_local_judge_loads_frozen_base_with_full_context_and_records_configurati
     assert report["judge_configuration"]["adapter"] is None
     assert report["judge_configuration"]["context"] == 65536
     assert report["judge_configuration"]["runtime_versions"]["torch"] != "unavailable"
+    assert report["judge_configuration"]["runtime_versions"]["pycountry"] == "24.6.1"
     assert report["judge_configuration"]["alignment_protocol"] == ALIGNMENT_PROTOCOL
     assert report["widesearch"]["alignment_protocol"] == ALIGNMENT_PROTOCOL
     assert all(record["alignment_protocol"] == ALIGNMENT_PROTOCOL for record in report["widesearch"]["per_task"])

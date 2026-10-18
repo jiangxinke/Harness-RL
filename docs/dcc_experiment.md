@@ -380,7 +380,28 @@ sentences checking identity evidence and missing qualifiers before its final
 fenced JSON. The existing parser already supports this format. General rules
 also distinguish a bare recurring-event name from established, qualified event
 aliases. Implementation, schema, numeric scoring, frozen development cases and
-acceptance thresholds remain unchanged. V8 calibration and final semantic
+acceptance thresholds remain unchanged. V8 is rejected: 95 format errors occur
+because many model responses provide a rationale followed by bare JSON rather
+than fenced JSON. Original metrics pass 27/39, final mappings 8/46, and pair
+verdicts 25/73 under the unchanged production parser. A diagnostic reading of
+existing raw outputs finds all 20 positive selector choices correct, but only
+seven positive verifier calls were reached; the missing calls are not inferred
+or counted. Separately parsed existing pair responses still have three semantic
+errors. These diagnostics do not replace the rejected calibration or complete
+its missing calls. No formal v8 scoring is launched.
+
+Revision `same_entity_v9` retains the v8 prompts and adds two general guards.
+The parser accepts a single complete final JSON object after explanatory prose,
+while rejecting malformed or multiple objects and trailing garbage. A separate
+underqualification check abstains when the origin is the full base name of a
+candidate that adds an explicit identity qualifier, such as a year, medium,
+edition/version or a recognized geographic suffix. Geography uses the public
+`pycountry` country/subdivision names, without fixture-specific locations.
+Different-base translations and abbreviations continue to use model judgment.
+Deterministic abstentions, actual raw model verdicts and effective production
+verdicts are reported separately; skipped calls are not model successes.
+The original 39, 46 mapping and 73 effective pair-verifier expectations and
+acceptance thresholds remain unchanged. V9 calibration and final semantic
 scoring are pending.
 
 ## Checks, reproduction and artifacts
