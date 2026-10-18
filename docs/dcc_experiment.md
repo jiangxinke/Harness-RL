@@ -211,8 +211,8 @@ these evidence failures cannot all be attributed to model behavior alone.
 CUAD official test scoring and all 200 WideSearch generations are complete;
 WideSearch custom judging is **in progress**. Both final generation runs use
 source snapshot `b25a4d63`, graph vLLM/BF16 and eight independent TP1 engines.
-The separately frozen final scoring snapshot is `0b060a63`, protocol
-`same_entity_v5`; the first v3 attempt is retained as historical evidence.
+The separately frozen v5 scoring attempt uses `0b060a63`; earlier attempts
+are retained as historical evidence. Its replacement is described below.
 CUAD uses the training-only profile, eight initial chunks,
 8,192/1,024 prompt/completion budgets, three turns and batch size eight.
 WideSearch uses 16,384/8,192 budgets, 12 turns, batch size four, automatic page
@@ -333,8 +333,27 @@ the expected zero score. The combined calibration remains 38/39 and
 ambiguity allowed. All generation logits checked during calibration are finite.
 The eight-worker run takes 80.1 seconds including loading. Seventeen separate
 artificial format/deduplication probes also pass; these do not enlarge the
-39-case semantic calibration denominator. The final full-200 semantic scoring
-is pending.
+39-case semantic calibration denominator.
+
+The subsequent formal v5 run is also held: one alignment response contains
+unknown non-reference self mappings and incorrect mappings to other entities.
+The guard correctly rejects the response. No v5 semantic aggregate is accepted,
+and unknown mappings are not silently discarded to make the run pass.
+
+Revision `same_entity_v6` replaces only nonexact entity alignment with two
+stages. Each origin independently sees the complete unique reference list and
+selects a stable integer candidate ID or null. A separate verifier sees only
+that origin and candidate and must explicitly confirm the same entity before
+a match is accepted. Valid rejection or uncertainty abstains; invalid IDs,
+types or response schemas remain judge errors. Neither stage treats a related
+entity, sequel, remake, different edition or version as the same entity.
+The v3 header/cell prompts and numeric scoring remain unchanged. Independent
+development fixtures freeze 46 final-mapping cases (20 positive, 20 hard
+negative, six ambiguous) plus 73 separate pair-verifier cases before GPU
+results. These supplement the original 39 cases and retain separate
+denominators. Using the same frozen model for both stages can produce
+correlated errors; a second call alone does not establish judge accuracy.
+V6 GPU calibration and final semantic scoring are pending.
 
 ## Checks, reproduction and artifacts
 
@@ -362,6 +381,12 @@ initial v3 scoring source. The 17 format/deduplication probes and eight
 additional runner-check scenarios pass independently. Fatal-error Ruff rules
 and diff checks pass; this does not claim that all existing style warnings
 are resolved.
+
+The v6 two-stage implementation passes 141 targeted CPU checks and 58
+independent boundary assertions. Independent review confirms unchanged old
+prompt strings, header-alignment implementation and numeric scoring body;
+the evaluation docstring now distinguishes per-origin entity calls from
+batched header/cell grading.
 
 Judge provenance changes at `360971f5` pass 90 targeted checks and reject
 mixed judge models, budgets, runtime versions, adapters or generation records.

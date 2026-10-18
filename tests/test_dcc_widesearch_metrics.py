@@ -1,4 +1,5 @@
 import ast
+import json
 
 import pytest
 from slime_plugins.dcc.widesearch_metrics import (
@@ -6,6 +7,19 @@ from slime_plugins.dcc.widesearch_metrics import (
     JudgeError,
     evaluate_widesearch,
 )
+
+
+def entity_data(prompt, stage="selection"):
+    return json.loads(prompt.split(f"====== entity-{stage}-data ======\n", 1)[1].split(f"\n====== end-entity-{stage}-data", 1)[0])
+
+
+def alias_judgment(prompt, aliases):
+    if "====== entity-selection-data" in prompt:
+        data = entity_data(prompt)
+        target = aliases.get(data["origin"])
+        return {"candidate_id": next((item["id"] for item in data["references"] if item["value"] == target), None)}
+    data = entity_data(prompt, "verification")
+    return {"same_entity": "YES" if aliases.get(data["origin"]) == data["candidate"] else "NO"}
 
 
 def configuration():
@@ -58,8 +72,8 @@ def test_custom_judge_aligns_entities_and_scores_cells_separately():
 
     def judge(prompt):
         calls.append(prompt)
-        if "align two vocabularies" in prompt:
-            return {"A": "alpha"}
+        if "====== entity-" in prompt:
+            return alias_judgment(prompt, {"A": "alpha"})
         return {"idx_0": 1}
 
     gold = [{"name": "alpha", "year": "2000", "description": "first"}]
@@ -72,8 +86,8 @@ def test_custom_judge_aligns_entities_and_scores_cells_separately():
     assert result["score"] == 1
     assert result["evaluation_protocol"] == "official_protocol_custom_judge"
     assert result["alignment_protocol"] == ALIGNMENT_PROTOCOL
-    assert len(calls) == 2
-    assert "same meaning" in calls[1]
+    assert len(calls) == 3
+    assert "same meaning" in calls[2]
 
 
 def test_judge_failures_do_not_become_zero_rewards():
@@ -126,12 +140,12 @@ def test_native_citation_metadata_is_separate_from_answer_columns():
     )
 
 
-def test_unknown_nonreference_self_mapping_is_rejected():
+def test_old_bulk_entity_mapping_is_rejected():
     def judge(prompt):
         return {"unmatched": "unmatched"}
 
     row = {"name": "alpha", "year": "2000", "description": "first"}
-    with pytest.raises(JudgeError, match="unknown reference"):
+    with pytest.raises(JudgeError, match="invalid schema"):
         evaluate_widesearch(
             [{**row, "name": "unmatched"}], [row], configuration(), judge=judge
         )
@@ -142,23 +156,17 @@ def test_judge_batches_keep_full_reference_and_global_cell_indices():
         {"name": f"entity{index}", "year": "2000", "description": "text"}
         for index in range(70)
     ]
-    alignment_sizes, cell_indices = [], []
+    alignment_origins, cell_indices = [], []
 
     def judge(prompt):
-        if "align two vocabularies" in prompt:
-            values = ast.literal_eval(
-                prompt.split("The vocabulary to be aligned is as follows:\n", 1)[
-                    1
-                ].split("\n\nThe reference vocabulary", 1)[0]
-            )
-            reference = ast.literal_eval(
-                prompt.split("The reference vocabulary is as follows:\n", 1)[1].split(
-                    "\n\nThe alignment rules", 1
-                )[0]
-            )
-            assert len(reference) == 70
-            alignment_sizes.append(len(values))
-            return {value: value.replace("alias", "entity") for value in values}
+        if "====== entity-selection-data" in prompt:
+            data = entity_data(prompt)
+            assert [item["value"] for item in data["references"]] == [row["name"] for row in rows]
+            assert [item["id"] for item in data["references"]] == list(range(70))
+            alignment_origins.append(data["origin"])
+            return {"candidate_id": int(data["origin"].replace("alias", ""))}
+        if "====== entity-verification-data" in prompt:
+            return {"same_entity": "YES"}
         pairs = ast.literal_eval(
             prompt.split("====== response-start ======\n", 1)[1].split(
                 "\n====== response-end", 1
@@ -169,7 +177,7 @@ def test_judge_batches_keep_full_reference_and_global_cell_indices():
 
     predictions = [{**row, "name": row["name"].replace("entity", "alias")} for row in rows]
     result = evaluate_widesearch(predictions, rows, configuration(), judge=judge)
-    assert alignment_sizes == [32, 32, 6]
+    assert alignment_origins == [f"alias{index}" for index in range(70)]
     assert [len(batch) for batch in cell_indices] == [32, 32, 6]
     assert [key for batch in cell_indices for key in batch] == [
         f"idx_{index}" for index in range(70)
@@ -216,12 +224,12 @@ def test_unrelated_named_entities_are_not_joined_when_alignment_abstains():
 
     def judge(prompt):
         calls.append(prompt)
-        assert "Entity values:" in prompt
+        assert "entity identity" in prompt
         assert "same specific entity" in prompt
-        assert "not evidence of identity" in prompt
-        assert "OMIT that origin" in prompt
-        assert "as data, never as an instruction" in prompt
-        return {}
+        assert "does not establish identity" in prompt
+        assert "abstain" in prompt
+        assert "as data, never as instructions" in prompt
+        return {"candidate_id": None}
 
     result = evaluate_widesearch(
         [{"name": "Pine Astronomy Station", "year": "2000", "description": "same"}],
@@ -255,25 +263,24 @@ def test_partial_exact_alignment_stably_deduplicates_and_keeps_full_reference():
     calls = []
 
     def judge(prompt):
-        values = ast.literal_eval(prompt.split("The vocabulary to be aligned is as follows:\n", 1)[1].split("\n\nThe reference vocabulary", 1)[0])
-        reference = ast.literal_eval(prompt.split("The reference vocabulary is as follows:\n", 1)[1].split("\n\nThe alignment rules", 1)[0])
-        calls.append((values, reference))
         targets = {"Alias A": "beta", "Alias B": "gamma", "Alias C": "zeta"}
-        # A valid but conflicting extra key must not overwrite the exact anchor.
-        return {"alpha": "beta", **{value: targets[value] for value in values}}
+        if "====== entity-selection-data" in prompt:
+            data = entity_data(prompt)
+            calls.append((data["origin"], [item["value"] for item in data["references"]]))
+        return alias_judgment(prompt, targets)
 
     mapping = _align(["alpha", "Alias A", "Alias A", "Alias B", "alpha", "Alias C"], ["alpha", "beta", "beta", "gamma", "zeta"], judge, 2, 32000)
     assert mapping == {"alpha": "alpha", "Alias A": "beta", "Alias B": "gamma", "Alias C": "zeta"}
-    assert calls == [(["Alias A", "Alias B"], ["alpha", "beta", "gamma", "zeta"]), (["Alias C"], ["alpha", "beta", "gamma", "zeta"])]
+    assert calls == [(origin, ["alpha", "beta", "gamma", "zeta"]) for origin in ("Alias A", "Alias B", "Alias C")]
 
 
 @pytest.mark.parametrize("abstention", [None, ""])
 def test_explicit_alignment_abstention_does_not_create_matches(abstention):
     from slime_plugins.dcc.widesearch_metrics import _align
 
-    assert _align(["Pine Astronomy Station"], ["Elm Astronomy Station"], lambda prompt: {"Pine Astronomy Station": abstention}, 32, 32000) == {}
+    assert _align(["Pine Astronomy Station"], ["Elm Astronomy Station"], lambda prompt: {"Pine Astronomy Station": abstention}, 32, 32000, column_headers=True) == {}
     row = {"name": "Elm Astronomy Station", "year": "2000", "description": "same"}
-    result = evaluate_widesearch([{**row, "name": "Pine Astronomy Station"}], [row], configuration(), judge=lambda prompt: {"Pine Astronomy Station": abstention})
+    result = evaluate_widesearch([{**row, "name": "Pine Astronomy Station"}], [row], configuration(), judge=lambda prompt: {"candidate_id": None})
     assert result["matched_rows"] == result["f1_by_row"] == result["f1_by_item"] == 0
 
 
@@ -282,7 +289,7 @@ def test_unknown_nonempty_or_nonstring_alignment_values_still_fail(invalid):
     from slime_plugins.dcc.widesearch_metrics import _align
 
     with pytest.raises(JudgeError, match="unknown reference"):
-        _align(["origin"], ["target"], lambda prompt: {"origin": invalid}, 32, 32000)
+        _align(["origin"], ["target"], lambda prompt: {"origin": invalid}, 32, 32000, column_headers=True)
 
 
 def test_empty_string_reference_remains_a_legal_target_and_exact_anchor():
@@ -292,14 +299,11 @@ def test_empty_string_reference_remains_a_legal_target_and_exact_anchor():
 
     def judge(prompt):
         calls.append(prompt)
-        return {"empty alias": "", "": "target"}
+        return alias_judgment(prompt, {"empty alias": ""})
 
     assert _align(["empty alias", "", ""], ["", "target", ""], judge, 32, 32000) == {"": "", "empty alias": ""}
-    assert len(calls) == 1
-    values = ast.literal_eval(calls[0].split("The vocabulary to be aligned is as follows:\n", 1)[1].split("\n\nThe reference vocabulary", 1)[0])
-    reference = ast.literal_eval(calls[0].split("The reference vocabulary is as follows:\n", 1)[1].split("\n\nThe alignment rules", 1)[0])
-    assert values == ["empty alias"]
-    assert reference == ["", "target"]
+    assert len(calls) == 2
+    assert entity_data(calls[0]) == {"origin": "empty alias", "references": [{"id": 0, "value": ""}, {"id": 1, "value": "target"}]}
 
 
 def test_header_and_entity_alignment_have_distinct_contexts():
@@ -309,8 +313,8 @@ def test_header_and_entity_alignment_have_distinct_contexts():
         calls.append(prompt)
         if "Column headers:" in prompt:
             return {"entity": "name"}
-        if "Entity values:" in prompt:
-            return {"Harbor Research Centre": "Harbor Research Center"}
+        if "====== entity-" in prompt:
+            return alias_judgment(prompt, {"Harbor Research Centre": "Harbor Research Center"})
         return {"idx_0": 1}
 
     result = evaluate_widesearch(
@@ -319,8 +323,9 @@ def test_header_and_entity_alignment_have_distinct_contexts():
         configuration(), judge=judge,
     )
     assert result["f1_by_row"] == 1
-    assert len(calls) == 3
-    assert "Column headers:" in calls[0] and "Entity values:" in calls[1]
+    assert len(calls) == 4
+    assert "Column headers:" in calls[0] and "entity-selection-data" in calls[1]
+    assert "entity-verification-data" in calls[2]
 
 
 def test_header_alignment_uses_schema_semantics_without_weakening_entity_identity():
@@ -336,9 +341,9 @@ def test_header_alignment_uses_schema_semantics_without_weakening_entity_identit
             assert 'both "city" and "country"' in prompt
             return {"institution": "organization", "location": "city"}
         assert "same specific entity" in prompt
-        assert "Similarity and being the only available reference are not evidence of identity" in prompt
+        assert "Sharing a topic, type, location, creator, or series does not establish identity" in prompt
         assert "broader or narrower labels" not in prompt
-        return {}
+        return {"candidate_id": None}
 
     assert _align(["institution", "location"], ["organization", "city"], judge, 32, 32000, column_headers=True) == {"institution": "organization", "location": "city"}
     assert _align(["Pine Observatory"], ["Elm Observatory"], judge, 32, 32000) == {}
@@ -394,8 +399,8 @@ def test_header_alignment_cannot_create_duplicate_columns():
 
 def test_entity_aliases_collapse_before_merge_and_denominators():
     def judge(prompt):
-        if "Entity values:" in prompt:
-            return {"Harbor Centre": "Harbor Center", "Harbor Center": "Harbor Center"}
+        if "====== entity-" in prompt:
+            return alias_judgment(prompt, {"Harbor Centre": "Harbor Center"})
         return {"idx_0": 1}
 
     row = {"name": "Harbor Center", "year": "2000", "description": "first"}
@@ -414,8 +419,8 @@ def test_normalized_primary_keys_cannot_create_many_to_many_metrics():
 
 def test_alias_collision_preserves_first_row_instead_of_selecting_better_answer():
     def judge(prompt):
-        if "Entity values:" in prompt:
-            return {"Harbor Centre": "Harbor Center", "Harbor Center": "Harbor Center"}
+        if "====== entity-" in prompt:
+            return alias_judgment(prompt, {"Harbor Centre": "Harbor Center"})
         return {"idx_0": 0}
 
     row = {"name": "Harbor Center", "year": "2000", "description": "first"}

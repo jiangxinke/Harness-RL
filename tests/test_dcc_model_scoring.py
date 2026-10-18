@@ -383,7 +383,9 @@ def test_judge_failures_remain_explicit_and_can_be_rejudged(failure):
             if failure == "context":
                 raise ValueError("Judge input exceeds its context budget; refusing to truncate evidence")
             return "invalid JSON"
-        return {"alpha alias": "alpha"}
+        if "entity-selection-data" in prompt:
+            return {"candidate_id": 0}
+        return {"same_entity": "YES"}
 
     failed = evaluate_results([task], [prediction], judge=judge)
     assert not failed["complete"]
