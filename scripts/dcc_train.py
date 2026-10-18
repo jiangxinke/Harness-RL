@@ -21,7 +21,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "slime"))
 
 import torch
 import torch.distributed as dist
-
 from slime_plugins.dcc import EpisodeRunner, load_tasks
 from slime_plugins.dcc.hf_policy import (
     HFPolicy,
@@ -79,9 +78,9 @@ def supervised_example(task, runner, tokenizer, max_prompt: int, max_response: i
 
 
 async def train(args):
-    rank = int(os.environ.get("RANK", 0))
-    local = int(os.environ.get("LOCAL_RANK", 0))
-    world = int(os.environ.get("WORLD_SIZE", 1))
+    rank = int(os.environ.get("RANK", "0"))
+    local = int(os.environ.get("LOCAL_RANK", "0"))
+    world = int(os.environ.get("WORLD_SIZE", "1"))
     torch.cuda.set_device(local)
     if world > 1:
         from datetime import timedelta
@@ -134,12 +133,14 @@ async def train(args):
         max_steps=args.max_steps,
         max_new_tokens=args.max_new_tokens,
         initial_chunks=args.initial_chunks,
+        temperature=1.0,
     )
     policy = HFPolicy(
         model,
         tokenizer,
         batch_size=args.group_size,
         max_prompt_tokens=args.max_prompt_tokens,
+        raw_sampling=True,
     )
     positives = [task for task in tasks if task.gold]
     negatives = [task for task in tasks if not task.gold]

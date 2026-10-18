@@ -39,10 +39,11 @@ def encode_messages(tokenizer, messages: list[dict[str, str]], max_prompt_tokens
 
 
 class HFPolicy:
-    def __init__(self, model, tokenizer, *, batch_size: int = 4, max_prompt_tokens: int = 4096, allow_truncation: bool = True):
+    def __init__(self, model, tokenizer, *, batch_size: int = 4, max_prompt_tokens: int = 4096, allow_truncation: bool = True, raw_sampling: bool = False):
         self.model, self.tokenizer = model, tokenizer
         self.batch_size, self.max_prompt_tokens = batch_size, max_prompt_tokens
         self.allow_truncation = allow_truncation
+        self.raw_sampling = raw_sampling
         self.queue: asyncio.Queue = asyncio.Queue()
         self.worker: asyncio.Task | None = None
 
@@ -93,22 +94,50 @@ class HFPolicy:
 
     @torch.inference_mode()
     def generate(self, messages_batch, max_new_tokens: int, temperature: float) -> list[PolicyCompletion]:
+        if self.raw_sampling and temperature > 0 and temperature != 1.0:
+            raise ValueError("Raw policy sampling requires temperature=1")
         prompts = [encode_messages(self.tokenizer, messages, self.max_prompt_tokens, allow_truncation=self.allow_truncation) for messages in messages_batch]
         width = max(map(len, prompts))
         pad = self.tokenizer.pad_token_id
         ids = torch.tensor([[pad] * (width - len(p)) + p for p in prompts], device=self.model.device)
         attention = torch.tensor([[0] * (width - len(p)) + [1] * len(p) for p in prompts], device=ids.device)
         self.model.eval()
+        options = {
+            "do_sample": temperature > 0,
+            "temperature": temperature if temperature > 0 else None,
+            "top_p": 0.95 if temperature > 0 else None,
+            "top_k": 20 if temperature > 0 else None,
+        }
+        if self.raw_sampling and temperature > 0:
+            options.update(temperature=1.0, top_p=1.0, top_k=0)
+            # Explicit kwargs override inherited generation_config values,
+            # including None-valued controls in Transformers 5. A fresh
+            # GenerationConfig alone would inherit the model's penalties.
+            neutral = {
+                "top_h": None, "min_p": None, "typical_p": 1.0,
+                "epsilon_cutoff": 0.0, "eta_cutoff": 0.0,
+                "repetition_penalty": 1.0, "encoder_repetition_penalty": 1.0,
+                "no_repeat_ngram_size": 0, "encoder_no_repeat_ngram_size": 0,
+                "bad_words_ids": None, "min_length": 0, "min_new_tokens": 0,
+                "forced_bos_token_id": None, "forced_eos_token_id": None,
+                "suppress_tokens": None, "begin_suppress_tokens": None,
+                "sequence_bias": None, "guidance_scale": None,
+                "exponential_decay_length_penalty": None,
+                "watermarking_config": None, "renormalize_logits": False,
+                "remove_invalid_values": False, "num_beams": 1,
+                "num_beam_groups": 1, "diversity_penalty": 0.0,
+                "constraints": None, "force_words_ids": None,
+                "penalty_alpha": None, "num_return_sequences": 1,
+                "return_dict_in_generate": False,
+            }
+            options.update({key: value for key, value in neutral.items() if hasattr(self.model.generation_config, key)})
         output = self.model.generate(
             input_ids=ids,
             attention_mask=attention,
             max_new_tokens=max_new_tokens,
-            do_sample=temperature > 0,
-            temperature=temperature if temperature > 0 else None,
-            top_p=0.95 if temperature > 0 else None,
-            top_k=20 if temperature > 0 else None,
             pad_token_id=pad,
             use_cache=True,
+            **options,
         )
         eos = self.model.generation_config.eos_token_id
         eos = {eos} if isinstance(eos, int) else set(eos or [])

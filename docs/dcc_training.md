@@ -22,9 +22,17 @@ torchrun --standalone --nproc-per-node="$WORKERS" scripts/dcc_train.py \
 
 The warmup balances positive and negative CUAD questions and uses only exact
 answers visible in the actual encoded prompt. Overlong examples are skipped.
-GRPO samples independent trajectories from each prompt, computes fixed old
-policy log probabilities, normalizes rewards within each valid group, and
-optimizes the clipped token objective. Its optional grounded CUAD SFT auxiliary
+GRPO samples independent trajectories with temperature 1, top-p 1 and top-k 0.
+Inherited sampling filters, repetition penalties, n-gram constraints and forced
+or suppressed tokens are disabled, so rollout probabilities match the raw
+model log probabilities used for both old and current policy scores. Greedy
+evaluation is unchanged. The earliest trial used temperature 0.8 with nucleus
+and top-k sampling; its sampling policy did not exactly match those raw scores.
+
+Training computes fixed old policy log probabilities and normalizes rewards
+within each valid group. Each rollout batch receives one optimizer update,
+with no policy epochs or rollout reuse, so the initial probability ratio is
+one and clipping normally does not activate. Its grounded CUAD SFT auxiliary
 has coefficient 0.1 by default. Groups with equal rewards have zero policy
 gradient; the auxiliary may still update the adapter. Infrastructure failures
 are excluded. Only generated assistant tokens receive loss, including tool
@@ -39,8 +47,14 @@ auxiliary applies only to CUAD. An all-web run should set `--sft-steps 0`.
 
 Adapter checkpoints, optimizer/RNG state, exact token trajectories and per-rank
 training logs are written under the explicitly configured output directory.
-`--adapter` initializes an adapter for a new run; it does not resume optimizer
-or RNG state. Keep runtime paths and credentials outside the repository.
+`--adapter` warm-starts adapter weights for a new run; it does not restore the
+optimizer, step counter or RNG state from `training_state.pt`. To continue with
+pure RL, use `--sft-steps 0 --sft-coefficient 0` and a new output directory.
+Equal-reward groups contribute zero RL gradient. If all workers have zero
+reward variance, there is no new policy-gradient signal, although existing Adam
+momentum can still move parameters. Inspect reward variance and gradient norms
+before describing such a run as successful RL learning. Keep runtime paths and
+credentials outside the repository.
 
 Evaluate each benchmark in a separate directory, with a budget appropriate to
 its answer size. For example:
