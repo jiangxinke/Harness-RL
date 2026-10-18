@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
 import runpy
 import sys
@@ -67,7 +68,8 @@ def test_merge_rejects_judge_precision_change_before_publishing(monkeypatch, tmp
     assert not (tmp_path / "scores_local_judge.json").exists()
 
 
-def test_vllm_evaluation_uses_optional_policy_and_keeps_resume_separate(monkeypatch, tmp_path):
+@pytest.mark.parametrize("explicit_shard", [False, True])
+def test_vllm_evaluation_uses_optional_policy_and_keeps_resume_separate(monkeypatch, tmp_path, explicit_shard):
     evaluate = cli()["evaluate"]
     task = Task("contract", "cuad", "validation", "Find clause", document="exact clause", gold=["exact clause"])
     monkeypatch.setitem(evaluate.__globals__, "load_tasks", lambda path: [task])
@@ -97,6 +99,8 @@ def test_vllm_evaluation_uses_optional_policy_and_keeps_resume_separate(monkeypa
                            vllm_tensor_parallel_size=1, vllm_memory_utilization=.88,
                            vllm_batched_tokens=8192, vllm_enforce_eager=True,
                            batch_size=1, timeout=30, save_tokens=False)
+    if explicit_shard:
+        args.eval_shard_index, args.eval_num_shards = 0, 1
     asyncio.run(evaluate(args))
     assert calls[0]["max_model_len"] == 9216
     assert calls[-1] == "closed"
@@ -106,7 +110,7 @@ def test_vllm_evaluation_uses_optional_policy_and_keeps_resume_separate(monkeypa
     prediction = json.loads((tmp_path / "predictions_rank0.jsonl").read_text())
     assert prediction["status"] == "completed"
     args.inference_backend = "hf"
-    with pytest.raises(ValueError, match="configuration changed"):
+    with pytest.raises(ValueError, match="configuration changed|require vLLM generation"):
         asyncio.run(evaluate(args))
 
 
@@ -137,6 +141,112 @@ def stub_evaluation(monkeypatch, tmp_path, policy, tasks):
                            vllm_batched_tokens=8192, vllm_enforce_eager=True,
                            batch_size=1, timeout=30, save_tokens=False)
     return evaluate, args
+
+
+@pytest.mark.parametrize("index,count,backend,flag,match", [
+    (None, 2, "vllm", None, "Provide both"),
+    (0, None, "vllm", None, "Provide both"),
+    (-1, 2, "vllm", None, "0 <= shard index"),
+    (2, 2, "vllm", None, "0 <= shard index"),
+    (0, 0, "vllm", None, "positive shard count"),
+    (0, 2, "hf", None, "require vLLM generation"),
+    (0, 2, "vllm", "score_only", "without scoring or judge"),
+    (0, 2, "vllm", "local_judge", "without scoring or judge"),
+    (0, 2, "vllm", "merge_judge", "without scoring or judge"),
+])
+def test_explicit_shards_reject_invalid_configuration_before_loading(monkeypatch, index, count, backend, flag, match):
+    evaluate = cli()["evaluate"]
+    for name in ("RANK", "LOCAL_RANK"):
+        monkeypatch.setenv(name, "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    args = SimpleNamespace(eval_shard_index=index, eval_num_shards=count, inference_backend=backend)
+    if flag:
+        setattr(args, flag, True)
+    with pytest.raises(ValueError, match=match):
+        asyncio.run(evaluate(args))
+
+
+@pytest.mark.parametrize("name,value", [("RANK", "1"), ("LOCAL_RANK", "1"), ("WORLD_SIZE", "2")])
+def test_explicit_data_shards_do_not_enable_multirank_vllm_launchers(monkeypatch, name, value):
+    evaluate = cli()["evaluate"]
+    for key, default in (("RANK", "0"), ("LOCAL_RANK", "0"), ("WORLD_SIZE", "1")):
+        monkeypatch.setenv(key, default)
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match="one evaluation process"):
+        asyncio.run(evaluate(SimpleNamespace(inference_backend="vllm", eval_shard_index=0, eval_num_shards=2)))
+
+
+def test_scoring_rejects_explicit_generation_shards():
+    with pytest.raises(ValueError, match="require vLLM generation"):
+        cli()["score"](SimpleNamespace(inference_backend="vllm", eval_shard_index=0, eval_num_shards=2))
+
+
+def test_independent_vllm_shards_cover_once_resume_and_score_shared_predictions(monkeypatch, tmp_path):
+    import torch
+
+    policies, seeds = [], []
+
+    class Policy:
+        def __init__(self):
+            self.provenance = {"replica": len(policies)}
+            self.closed = False
+
+        async def __call__(self, messages, **kwargs):
+            return PolicyCompletion('{"answer":[]}', [1], [2])
+
+        async def close(self):
+            self.closed = True
+
+    tasks = [Task(f"contract{i}", "cuad", "validation", "Find clause", document="A contract", gold=[]) for i in range(5)]
+    evaluate, args = stub_evaluation(monkeypatch, tmp_path, None, tasks)
+
+    def load(*unused, **kwargs):
+        assert [os.environ[key] for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE")] == ["0", "0", "1"]
+        policy = Policy()
+        policies.append(policy)
+        return policy
+
+    monkeypatch.setitem(sys.modules, "slime_plugins.dcc.vllm_policy", SimpleNamespace(load_vllm_policy=load))
+    monkeypatch.setattr(torch, "manual_seed", seeds.append)
+    first = SimpleNamespace(**vars(args), eval_shard_index=0, eval_num_shards=2)
+    second = SimpleNamespace(**vars(args), eval_shard_index=1, eval_num_shards=2)
+
+    async def run():
+        await asyncio.gather(evaluate(first), evaluate(second))
+
+    asyncio.run(run())
+    assert seeds == [42, 43]
+    assert len(policies) == 2 and all(policy.closed for policy in policies)
+    ids = []
+    for rank in range(2):
+        records = [json.loads(line) for line in (tmp_path / f"predictions_rank{rank}.jsonl").read_text().splitlines()]
+        ids.append({record["task_id"] for record in records})
+        manifest = json.loads((tmp_path / f"manifest_rank{rank}.json").read_text())
+        assert manifest["world_size"] == manifest["eval_num_shards"] == 2
+        assert json.loads((tmp_path / f"rank{rank}.done").read_text())["tasks"] == len(records)
+        assert json.loads((tmp_path / f"inference_runtime_rank{rank}.json").read_text())["replica"] == rank
+    assert ids[0] == {task.id for task in tasks[::2]}
+    assert ids[1] == {task.id for task in tasks[1::2]}
+    assert not ids[0] & ids[1] and ids[0] | ids[1] == {task.id for task in tasks}
+    assert not (tmp_path / "inference_runtime.json").exists()
+    before = [path.read_text() for path in sorted(tmp_path.glob("predictions_rank*.jsonl"))]
+    asyncio.run(run())
+    assert len(policies) == 2
+    assert before == [path.read_text() for path in sorted(tmp_path.glob("predictions_rank*.jsonl"))]
+
+    for change in ({"eval_num_shards": 3}, {"max_new_tokens": 1025}, {"eval_shard_index": 2, "eval_num_shards": 3},
+                   {"inference_backend": "hf", "eval_shard_index": None, "eval_num_shards": None}):
+        changed = SimpleNamespace(**(vars(first) | change))
+        with pytest.raises(ValueError, match="configuration changed"):
+            asyncio.run(evaluate(changed))
+    assert len(policies) == 2
+    scorer = cli()["score"]
+    monkeypatch.setitem(scorer.__globals__, "load_tasks", lambda path: tasks)
+    score_args = SimpleNamespace(**vars(args), merge_judge=False, local_judge=False, model_name="example/model")
+    scorer(score_args)
+    report = json.loads((tmp_path / "scores_strict.json").read_text())
+    assert report["policy_inference_backend"] == "vllm"
+    assert report["complete"]
 
 
 @pytest.mark.parametrize("close_fails", [False, True])

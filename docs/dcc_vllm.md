@@ -56,6 +56,36 @@ uses spawned workers, and explicitly selects the pinned V1 uni/MP executor.
 These executors assign worker ranks and a fresh TCP rendezvous internally;
 the `external_launcher` executor is not used.
 
+For data parallel evaluation, launch independent engines with
+`--eval-shard-index INDEX --eval-num-shards COUNT`. Supply both options, with
+`0 <= INDEX < COUNT`, and give every engine the same complete `--data` list and
+shared `--output-dir`. Each process keeps launcher `RANK=0`, `LOCAL_RANK=0` and
+`WORLD_SIZE=1`; select its own GPU with `CUDA_VISIBLE_DEVICES`. The logical
+shard only controls task assignment, per-rank output names and the PyTorch seed.
+Model settings, greedy sampling and token budgets remain the same.
+
+For example, invoke this once per assigned GPU, setting `SHARD_INDEX` from zero
+through `SHARD_COUNT - 1`:
+
+```bash
+RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 CUDA_VISIBLE_DEVICES="$WORKER_GPU" \
+  "$VLLM_ENV/bin/python" scripts/dcc_model_evaluate.py \
+  --model "$MODEL" --adapter "$ADAPTER" --inference-backend vllm \
+  --eval-shard-index "$SHARD_INDEX" --eval-num-shards "$SHARD_COUNT" \
+  --data "$TASKS" --output-dir "$EVAL_OUTPUT"
+```
+
+This writes disjoint `predictions_rankN.jsonl`, `manifest_rankN.json` and
+`rankN.done` files. Multiple shards also use `inference_runtime_rankN.json`;
+a single engine retains `inference_runtime.json`. All existing rank manifests
+must agree on the full generation configuration, including shard count and
+backend. Repeating a worker resumes its own predictions. Wait for every worker
+to finish, then run the existing `--score-only` command against the full data
+and shared output directory, omitting both shard options. Scoring requires
+complete task coverage across all prediction files. Explicit shard options
+are rejected for HF generation and for scoring or judge modes. Omitting them
+preserves the existing HF launcher rank/world behavior.
+
 Set GPU visibility before creating an engine. Guard standalone launchers with
 `if __name__ == "__main__":` so worker subprocesses cannot rerun the launcher.
 The queue serializes engine access and batches requests. `close()` drains the

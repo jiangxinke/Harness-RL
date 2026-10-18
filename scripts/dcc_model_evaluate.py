@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Shard local GPU benchmark episodes and score persisted predictions.
 
-Launch with torchrun for one model replica per GPU. Re-running resumes saved
-predictions; infrastructure failures can be retried explicitly. Dataset labels
-are consulted only by the separate scoring pass after policy episodes finish.
+Launch HF replicas with torchrun, or use explicit evaluation shards for
+independent vLLM engines. Re-running resumes saved predictions; infrastructure
+failures can be retried explicitly. Dataset labels are consulted only by the
+separate scoring pass after policy episodes finish.
 """
 
 from __future__ import annotations
@@ -26,6 +27,27 @@ from slime_plugins.dcc.hf_judge import HFBatchedJudge
 from slime_plugins.dcc.hf_policy import HFPolicy, load_policy_model
 from slime_plugins.dcc.tools import WebTools
 from slime_plugins.dcc.retrieval import load_retrieval_profile
+
+
+def _evaluation_shard(args, *, generation):
+    index = getattr(args, "eval_shard_index", None)
+    count = getattr(args, "eval_num_shards", None)
+    if index is None and count is None:
+        return None
+    if index is None or count is None:
+        raise ValueError("Provide both --eval-shard-index and --eval-num-shards")
+    if count < 1 or not 0 <= index < count:
+        raise ValueError("Evaluation shards require 0 <= shard index < a positive shard count")
+    if (not generation or getattr(args, "inference_backend", "hf") != "vllm"
+            or any(getattr(args, name, False) for name in ("score_only", "local_judge", "merge_judge"))):
+        raise ValueError("Explicit evaluation shards require vLLM generation without scoring or judge flags")
+    return index, count
+
+
+def _check_generation_manifests(output, manifest):
+    for path in output.glob("manifest_rank*.json"):
+        if json.loads(path.read_text()) != manifest:
+            raise ValueError("Evaluation configuration changed; use a new output directory")
 
 
 async def _finish_evaluation(policy, stream, workers, failure):
@@ -66,10 +88,13 @@ async def evaluate(args):
     world = int(os.environ.get("WORLD_SIZE", "1"))
     backend = getattr(args, "inference_backend", "hf")
     quantization = getattr(args, "quantization", "none")
-    if backend == "vllm" and (world != 1 or local != 0):
+    if backend == "vllm" and (world != 1 or local != 0 or rank != 0):
         raise ValueError("Use one evaluation process for vLLM; configure tensor parallelism instead of torchrun replicas")
     if backend == "vllm" and quantization != "none":
         raise ValueError("The vLLM evaluation backend currently requires BF16 base weights")
+    shard = _evaluation_shard(args, generation=True)
+    if shard is not None:
+        rank, world = shard
     torch.manual_seed(args.seed + rank)
     tasks = [task for path in args.data for task in load_tasks(path)]
     if any(task.split == "train" for task in tasks):
@@ -94,6 +119,8 @@ async def evaluate(args):
         )
     }
     manifest["world_size"] = world
+    if shard is not None:
+        manifest["eval_num_shards"] = world
     if retrieval_profile is not None:
         # Profiles contain tuples in memory, while JSON persists them as lists.
         # Compare the same representation when resuming an unchanged profile.
@@ -122,9 +149,13 @@ async def evaluate(args):
         if auto_read_sources:
             manifest["auto_read_sources"] = auto_read_sources
     manifest_path = output / f"manifest_rank{rank}.json"
-    if manifest_path.exists() and json.loads(manifest_path.read_text()) != manifest:
-        raise ValueError("Evaluation configuration changed; use a new output directory")
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    _check_generation_manifests(output, manifest)
+    if not manifest_path.exists():
+        # Other independently launched shards must never read partial JSON.
+        temporary = output / f".manifest_rank{rank}.{os.getpid()}.tmp"
+        temporary.write_text(json.dumps(manifest, indent=2) + "\n")
+        temporary.replace(manifest_path)
+    _check_generation_manifests(output, manifest)
     file = output / f"predictions_rank{rank}.jsonl"
     done = {}
     if file.exists():
@@ -157,7 +188,8 @@ async def evaluate(args):
                     max_num_batched_tokens=args.vllm_batched_tokens,
                     enforce_eager=args.vllm_enforce_eager, seed=args.seed,
                 )
-                (output / "inference_runtime.json").write_text(json.dumps(policy.provenance, indent=2) + "\n")
+                runtime_file = f"inference_runtime_rank{rank}.json" if world > 1 else "inference_runtime.json"
+                (output / runtime_file).write_text(json.dumps(policy.provenance, indent=2) + "\n")
             else:
                 model, tokenizer = load_policy_model(
                     args.model, adapter=args.adapter, rank=local, quantization=quantization
@@ -234,6 +266,7 @@ def _prediction_quantization(output):
 
 
 def score(args):
+    _evaluation_shard(args, generation=False)
     rank = int(os.environ.get("RANK", "0"))
     local = int(os.environ.get("LOCAL_RANK", "0"))
     world = int(os.environ.get("WORLD_SIZE", "1"))
@@ -401,6 +434,8 @@ def main():
     parser.add_argument("--vllm-memory-utilization", type=float, default=0.88)
     parser.add_argument("--vllm-batched-tokens", type=int, default=8192)
     parser.add_argument("--vllm-enforce-eager", action="store_true")
+    parser.add_argument("--eval-shard-index", type=int, help="Zero-based data shard for an independent vLLM engine")
+    parser.add_argument("--eval-num-shards", type=int, help="Total independent vLLM evaluation data shards")
     parser.add_argument("--data", nargs="+", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--batch-size", type=int, default=4)
