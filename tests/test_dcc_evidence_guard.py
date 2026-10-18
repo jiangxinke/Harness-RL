@@ -11,7 +11,7 @@ import pytest
 
 from slime_plugins.dcc import EpisodeRunner, PolicyCompletion, Task
 from slime_plugins.dcc import tools
-from slime_plugins.dcc.episode import WIDESEARCH_EVIDENCE_GUARD_VERSION
+from slime_plugins.dcc.episode import WIDESEARCH_EVIDENCE_GUARD_VERSION, parse_action
 from slime_plugins.dcc.evaluation import evaluate_results
 
 SOURCE = "https://example.org/source"
@@ -51,7 +51,8 @@ def run(actions, *, steps=None, item=None):
 
     async def policy(messages, **kwargs):
         prompts.append(messages)
-        return PolicyCompletion(json.dumps(next(iterator)), [1], [2], [-0.1])
+        action = next(iterator)
+        return PolicyCompletion(action if isinstance(action, str) else json.dumps(action), [1], [2], [-0.1])
 
     runner = EpisodeRunner(max_steps=steps or len(actions), web_tools_factory=lambda: tools.WebTools(backend="duckduckgo_lite"))
     return asyncio.run(runner.run(item or wide(), policy, evaluation=True)), prompts
@@ -225,3 +226,81 @@ def test_private_manifest_versions_only_widesearch_without_loading_gpu_model(mon
     else:
         assert "evidence_guard_version" not in manifest
         assert "search_backend" not in manifest
+
+
+def ndjson_rows():
+    return '\n'.join(json.dumps(row) for row in [
+        {"item": "Alpha", "value": "one", "citations": [SOURCE]},
+        {"item": "Beta", "value": "two", "citations": [SOURCE]},
+    ])
+
+
+@pytest.mark.parametrize("fenced", [False, True])
+def test_terminal_widesearch_ndjson_rows_require_explicit_parser_opt_in(fenced):
+    payload = ndjson_rows()
+    if fenced:
+        payload = "```json\n" + payload + "\n```"
+    assert parse_action(payload) is None
+    action = parse_action(payload, widesearch_rows=True)
+    assert [row["item"] for row in action["answer"]] == ["Alpha", "Beta"]
+
+
+@pytest.mark.parametrize("payload", [
+    "Reasoning about candidates:\n" + ndjson_rows(),
+    ndjson_rows() + "\nThese are preliminary notes.",
+    json.dumps({"item": "Alpha", "citations": [SOURCE]}) + '\n{"item":"missing citations"}',
+    ndjson_rows() + '\n{}',
+    ndjson_rows() + '\nnot JSON',
+    '```json\n' + ndjson_rows() + '\n```\nMore reasoning',
+    '```json\n' + ndjson_rows() + '\n```\n```json\n' + ndjson_rows() + '\n```',
+])
+def test_widesearch_ndjson_rejects_reasoning_fragments_and_partial_payloads(payload):
+    assert parse_action(payload, widesearch_rows=True) is None
+
+
+@pytest.mark.parametrize("tool_first", [False, True])
+def test_widesearch_ndjson_never_turns_mixed_tool_actions_into_final(tool_first):
+    pieces = [json.dumps(SEARCH), ndjson_rows()]
+    payload = '\n'.join(pieces if tool_first else reversed(pieces))
+    action = parse_action(payload, widesearch_rows=True)
+    assert action == SEARCH
+    assert "answer" not in action
+
+
+@pytest.mark.parametrize("fenced", [False, True])
+def test_real_widesearch_episode_accepts_ndjson_only_after_evidence(public_transport, fenced):
+    payload = ndjson_rows()
+    if fenced:
+        payload = "```json\n" + payload + "\n```"
+    result, _ = run([SEARCH, FETCH, payload])
+    assert result.status == "completed"
+    assert len(result.answer) == 2
+    assert result.metrics["evidence_guard"]["accepted"]
+    assert result.metrics["citation_validity"] == 1
+    assert len(result.tool_events) == 2
+
+
+def test_widesearch_ndjson_without_search_and_fetch_is_still_rejected():
+    result, _ = run([ndjson_rows()])
+    assert result.status == "evidence_failure" and result.answer == []
+    assert "missing_successful_search" in result.metrics["evidence_guard"]["rejections"][0]["reasons"]
+    assert result.tool_events == []
+
+
+def test_widesearch_ndjson_preserves_schema_and_citation_checks(public_transport):
+    bad_schema = json.dumps({"item": "Alpha", "citations": "not a list"})
+    result, _ = run([SEARCH, FETCH, bad_schema])
+    assert result.status == "evidence_failure"
+    assert "invalid_answer_format" in result.metrics["evidence_guard"]["rejections"][0]["reasons"]
+    bad_citation = ndjson_rows().replace(SOURCE, "https://example.org/unobserved")
+    result, _ = run([SEARCH, FETCH, bad_citation])
+    assert result.status == "evidence_failure"
+    assert "unobserved_citation_url" in result.metrics["evidence_guard"]["rejections"][0]["reasons"]
+
+
+def test_cuad_never_enables_widesearch_ndjson_normalization():
+    item = Task("contract", "cuad", "test", "Find clause", document="Exact clause", gold=["Exact clause"])
+    result, _ = run([ndjson_rows()], item=item)
+    assert result.status == "max_steps" and result.answer == []
+    assert "evidence_guard" not in result.metrics
+    assert "Invalid action" in result.messages[-1]["content"]

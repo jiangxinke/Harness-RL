@@ -16,7 +16,7 @@ from .data import Task
 from .metrics import cuad_predictions, cuad_task_metrics
 from .tools import DocumentTools, InfrastructureError, WebTools
 
-WIDESEARCH_EVIDENCE_GUARD_VERSION = "search-fetch-citations-v1"
+WIDESEARCH_EVIDENCE_GUARD_VERSION = "search-fetch-citations-ndjson-v2"
 
 
 @dataclasses.dataclass(slots=True)
@@ -69,10 +69,36 @@ class EpisodeResult:
         return result
 
 
-def parse_action(text: str) -> dict[str, Any] | None:
+def _terminal_widesearch_rows(text: str) -> list[dict[str, Any]] | None:
+    """Recognize only a complete payload of one JSON row per nonblank line."""
+    payload = text.strip()
+    if payload.startswith("```"):
+        fenced = re.fullmatch(r"```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```", payload, re.IGNORECASE)
+        if fenced is None:
+            return None
+        payload = fenced[1]
+    rows = []
+    for line in payload.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(row, dict) or not row or "citations" not in row or "tool" in row or "answer" in row:
+            return None
+        rows.append(row)
+    return rows or None
+
+
+def parse_action(text: str, *, widesearch_rows: bool = False) -> dict[str, Any] | None:
     """Take the final action JSON, allowing a model's visible reasoning prefix."""
 
     text = text.rsplit("</think>", 1)[-1]
+    if widesearch_rows:
+        rows = _terminal_widesearch_rows(text)
+        if rows is not None:
+            return {"answer": rows}
     decoder = json.JSONDecoder()
     candidates = []
     position = 0
@@ -274,7 +300,7 @@ class EpisodeRunner:
                         raise TypeError("policy must return PolicyCompletion")
                     steps.append(completion)
                     messages.append({"role": "assistant", "content": completion.text})
-                    action = parse_action(completion.text)
+                    action = parse_action(completion.text, widesearch_rows=task.benchmark == "widesearch")
                     if action is not None and "answer" in action:
                         if evidence is not None:
                             reasons = evidence.reject_reasons(task, action["answer"])
