@@ -118,6 +118,7 @@ three turns, and batch size eight.
 | Early adapter, matched four-engine control | 0.277331 | 0.453435 | 0.478261 | 0.465517 | 4 |
 | Round 2, step 32 | 0.225080 | 0.521028 | 0.359098 | 0.425167 | 4 |
 | Round 2, step 48 | 0.207676 | 0.589577 | 0.291465 | 0.390086 | 4 |
+| Selected round 3, step 8 | 0.251273 | 0.576623 | 0.357488 | 0.441352 | 2 |
 
 All 820 questions complete with zero infrastructure failures in each run.
 Engine counts change batch composition and can cause numerical differences,
@@ -192,13 +193,26 @@ schema and citations pass the same checks. Page text is sanitized at the web
 cache boundary for tokenizer compatibility. Optional automatic reads fetch
 actual search URLs, retain source events and have a cumulative attempt budget.
 
-Full official scoring of the frozen optimized policy is **in progress**.
-Both new runs use source snapshot `b25a4d63`, graph vLLM/BF16 and eight independent
-TP1 engines. CUAD uses the training-only profile, eight initial chunks,
+CUAD official test scoring is complete; full WideSearch generation and judging
+are **in progress**. Both final runs use source snapshot `b25a4d63`, graph
+vLLM/BF16 and eight independent TP1 engines. CUAD uses the training-only profile, eight initial chunks,
 8,192/1,024 prompt/completion budgets, three turns and batch size eight.
 WideSearch uses 16,384/8,192 budgets, 12 turns, batch size four, automatic page
 reads off and the same evidence guard. Each engine has memory utilization 0.88,
 8,192 scheduled prefill tokens and seed 42. No test result changes selection.
+
+The frozen adapter scores **AUPR 0.228265** and **micro F1 0.422087** on all
+4,182 official CUAD questions from 102 contracts. Micro precision is 0.553035
+and recall is 0.341279; precision at 80% and 90% recall is zero. Coverage is
+100%: 4,179 tasks complete and three exhaust the turn budget, with zero
+infrastructure failures. All questions, including budget failures, remain in
+the denominator. Span confidence comes from model output and is not separately
+calibrated. The eight-engine run takes 390.3 seconds from first launch to final
+generation exit, including model loading and compilation, consuming 11,878,691
+prompt tokens and 168,150 completion tokens. This CUAD run makes zero tool
+calls: it answers from the eight retrieved initial chunks. The harness supports
+additional retrieval tools, but these scores do not demonstrate tool use.
+
 The earlier adapter's original CUAD test run is retained as historical context:
 4,182/4,182 questions, AUPR 0.182906, micro F1 0.370070, precision 0.457637,
 recall 0.310632, 4,180 completed, two exhausted budgets and zero infrastructure
@@ -250,4 +264,5 @@ Artifact paths relative to that root include `dcc-run/training/final`,
 `full-validation-graph-summary.json` under `dcc-run/`. The frozen selection is
 `dcc-run/final-selection.json`; final predictions and scores use the new
 `dcc-run/cuad-final-selected` and `dcc-run/widesearch-final-selected` directories.
-Complete test scores will be recorded after generation and judging finish.
+CUAD scores are in `dcc-run/cuad-final-selected/scores_strict.json`. WideSearch
+scores will be recorded after full generation and judging finish.
