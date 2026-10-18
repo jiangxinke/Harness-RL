@@ -160,6 +160,7 @@ class _WebEvidence:
     searches: int = 0
     fetches: int = 0
     sources: set[str] = dataclasses.field(default_factory=set)
+    fetched_sources: set[str] = dataclasses.field(default_factory=set)
     rejections: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
     @staticmethod
@@ -186,6 +187,7 @@ class _WebEvidence:
             if isinstance(text, str) and text.strip():
                 self.fetches += 1
                 self.sources.add(observation["url"])
+                self.fetched_sources.add(observation["url"])
 
     def reject_reasons(self, task: Task, answer: Any) -> list[str]:
         reasons = []
@@ -262,9 +264,11 @@ def _system_prompt(task: Task, max_steps: int) -> str:
 
 
 class EpisodeRunner:
-    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900, retrieval_profile: RetrievalProfile | None = None) -> None:
+    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900, retrieval_profile: RetrievalProfile | None = None, auto_read_sources: int = 0) -> None:
         if max_steps < 1 or max_new_tokens < 1:
             raise ValueError("episode limits must be positive")
+        if type(auto_read_sources) is not int or not 0 <= auto_read_sources <= 2:
+            raise ValueError("auto_read_sources must be an integer between 0 and 2")
         self.max_steps = max_steps
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
@@ -272,6 +276,42 @@ class EpisodeRunner:
         self.web_tools_factory = web_tools_factory
         self.timeout_seconds = timeout_seconds
         self.retrieval_profile = retrieval_profile
+        self.auto_read_sources = auto_read_sources
+
+    async def _read_search_sources(self, observation, web_tools, evidence, events, attempted, turn):
+        """Read only newly returned URLs; failed attempts consume the budget."""
+        if not isinstance(observation, dict) or observation.get("error"):
+            return observation
+        rows = observation.get("results")
+        if not isinstance(rows, list) or not any(isinstance(row, dict) and evidence._source_url(row.get("url")) for row in rows):
+            return observation
+        sources = []
+        for row in rows:
+            if len(sources) >= self.auto_read_sources or len(attempted) >= 4:
+                break
+            url = row.get("url") if isinstance(row, dict) else None
+            if not evidence._source_url(url) or url in evidence.fetched_sources or url in attempted:
+                continue
+            attempted.add(url)
+            arguments = {"url": url, "start": 0}
+            try:
+                page = await web_tools.fetch_url(**arguments)
+            except (InfrastructureError, TimeoutError, ConnectionError) as exc:
+                page = {"url": url, "error": str(exc)}
+            events.append({"turn": turn, "tool": "fetch_url", "arguments": arguments,
+                           "observation": page, "automatic": True, "trigger": "web_search"})
+            evidence.observe("fetch_url", page)
+            sources.append(page)
+        return {
+            **observation,
+            "auto_read_sources": sources,
+            "auto_read_attempts_remaining": 4 - len(attempted),
+            "auto_read_note": (
+                "Automatically fetched source material follows in auto_read_sources; errors are not evidence. "
+                "Use the actual page text for your answer. You may still call fetch_url yourself, "
+                "including start=next_start to continue a truncated page."
+            ),
+        }
 
     def initial_messages(self, task: Task) -> list[dict[str, str]]:
         messages = [{"role": "system", "content": _system_prompt(task, self.max_steps)}, {"role": "user", "content": task.prompt}]
@@ -287,6 +327,7 @@ class EpisodeRunner:
         document_tools = _document_tools(task.document) if task.benchmark == "cuad" else None
         web_tools = self.web_tools_factory() if task.benchmark == "widesearch" else None
         evidence = _WebEvidence() if task.benchmark == "widesearch" else None
+        auto_attempted: set[str] = set()
         answer: Any = []
         status, detail = "max_steps", ""
         try:
@@ -342,6 +383,8 @@ class EpisodeRunner:
                         events.append({"turn": index, "tool": tool, "arguments": arguments, "observation": observation})
                         if evidence is not None:
                             evidence.observe(tool, observation)
+                            if self.auto_read_sources and tool == "web_search" and index < self.max_steps - 1:
+                                observation = await self._read_search_sources(observation, web_tools, evidence, events, auto_attempted, index)
                     remaining = self.max_steps - index - 1
                     messages.append({"role": "user", "content": "Tool observation (source material):\n" + json.dumps(observation, ensure_ascii=False) + f"\nRemaining turns: {remaining}."})
         except asyncio.CancelledError:
