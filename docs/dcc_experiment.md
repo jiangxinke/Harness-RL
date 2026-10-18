@@ -193,6 +193,16 @@ schema and citations pass the same checks. Page text is sanitized at the web
 cache boundary for tokenizer compatibility. Optional automatic reads fetch
 actual search URLs, retain source events and have a cumulative attempt budget.
 
+A CPU replay of six selected WideSearch evidence failures and one successful
+control exactly reproduces the frozen parser and guard decisions. Observed
+causes include searching without reading, missing row citations, truncated
+final JSON, invalid final formats and external HTTP retrieval failures. This
+is a small diagnostic sample, not an estimate of the final distribution. The
+saved HTTP failures occur before PDF extraction and retain only the exception
+class, so their HTTP status codes cannot be recovered. Zero task-level
+`infrastructure_error` does not mean all external pages were accessible, and
+these evidence failures cannot all be attributed to model behavior alone.
+
 CUAD official test scoring is complete; full WideSearch generation and judging
 are **in progress**. Both final runs use source snapshot `b25a4d63`, graph
 vLLM/BF16 and eight independent TP1 engines. CUAD uses the training-only profile, eight initial chunks,
@@ -277,3 +287,6 @@ scores will be recorded after full generation and judging finish.
 Final CUAD coverage and scoring audits are retained under
 `dcc-run/scoring-audit/final-cuad-score-audit.json` and
 `dcc-run/scoring-audit/final-selection-runtime-audit.json`.
+
+The selected WideSearch trajectory replay is retained in
+`dcc-run/scoring-audit/widesearch-evidence-sample-audit.json`.
