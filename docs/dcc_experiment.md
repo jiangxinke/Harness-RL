@@ -1,7 +1,77 @@
 # DCC experiment
 
-The final run uses one validation-selected rank-8 LoRA adapter for both tests.
-All questions, including policy and evidence failures, remain in the metrics.
+## Strict-30B derivative: training complete, evaluation pending
+
+`DCC-Qwen3MoE-29.85B-125E-traincal` physically retains 125 of 128 experts in
+each of the original model's 48 layers, with eight experts selected per token.
+Its base has **29,852,350,464 parameters**. Rank-8 attention LoRA adds
+**5,701,632**, giving **29,858,052,096 total parameters**, below the strict
+30,000,000,000 cap. This is a distinct model; the historical full-expert scores
+below do not establish its performance.
+
+The compliance protocol was frozen at `2026-10-19T09:41:31Z`. Routing counts
+come from 1,024 training-only examples, seed 47, using the historical round-3
+step-8 adapter. Each layer removes its three least-used experts under actual
+top-eight routing counts, with deterministic expert-ID ties. Router rows and
+expert projections are remapped together; validation and official-test examples
+do not enter this calibration.
+
+The BF16 mixed-SFT continuation uses execution source `b84a211d`, the same
+round-3 step-8 adapter on the pruned base, a fresh optimizer, eight workers,
+32 steps, learning rate `2e-6` and seed 47, saving every eight steps. Only
+attention `q_proj`, `v_proj` and `o_proj` LoRA tensors are trainable; the base
+stays frozen. It completed **1,024 examples from 707 task IDs**: 636 direct
+CUAD positives, 100 direct negatives, 251 web segments and 37 CUAD tool
+segments. Preparation skipped 233 ungrounded or overlong direct candidates.
+All 256 local loss records are finite; gradient norms are finite, positive
+and synchronized across workers at all 32 steps. Maximum recorded per-rank
+training elapsed time is 469.0 seconds, including loading and checkpoint work.
+These log checks establish training completion, not benchmark improvement;
+the final independent tensor, optimizer and scoring audit remains pending.
+The adapter inherits the historical training lineage, including the earlier
+RL sampling discrepancy described below.
+
+Validation is running on all 820 CUAD validation questions and eight independent
+web validation tasks for steps 8, 16, 24 and 32. Each candidate uses identical
+graph-vLLM BF16 settings within each benchmark, with two logical CUAD shards
+and one web shard. Select the highest harmonic mean `2*c*w/(c+w)` of CUAD
+micro F1 `c` and web strict-proxy macro row F1 `w` (zero when both are zero),
+then CUAD AUPR, then the earlier step. Complete denominators and zero
+infrastructure errors are required. The historical eligibility floors below
+do not apply. One selected adapter must be frozen before fresh official
+generation and used unchanged on both complete tests.
+
+Earlier official-test results have already been observed. The frozen protocol
+excludes old and new official scores from new expert selection, hyperparameter
+choice and checkpoint selection. Training and selection exclude official-test
+examples; this repeat is not an untouched first-use holdout evaluation.
+
+Fresh WideSearch semantic scoring will use the unchanged `same_entity_v9`
+scorer at `4ece9e7a` and the original unadapted Qwen base as a separate evaluator.
+That evaluator has 30,532,122,624 parameters; the strict policy total above
+includes its own LoRA. This custom judge is not the official GPT-4.1 leaderboard
+judge. Its reused development calibration retains the known header-ambiguity
+failure (11/12 raw header checks): `calibration_passed=false`,
+`accepted_with_known_limitation=true`. CPU raw-response replay verifies
+provenance and metric reconstruction, not every semantic judgment.
+
+No new validation selection or official-test score is available yet. Fresh
+generation, full-200 judging and the independent final audit remain pending.
+Artifacts use a separate `dcc-run/strict30b-v1/` subtree, including
+`training-complete.json`, `validate-summary.json` and `selection.json`.
+
+| Strict-30B derivative test | Questions | Status |
+| --- | ---: | --- |
+| CUAD AUPR / micro F1 | 4,182 | Pending |
+| WideSearch custom-v9 macro row / item F1 | 200 | Pending |
+| WideSearch strict-proxy macro row / item F1 | 200 | Pending |
+
+## Historical original 128-expert results
+
+The remaining report describes the original policy, which exceeds the strict
+30B cap. Its final run uses one validation-selected rank-8 LoRA adapter for
+both tests. All questions, including policy and evidence failures, remain in
+the metrics.
 
 | Benchmark | Test questions | Metric | Final score |
 | --- | ---: | --- | ---: |
@@ -16,12 +86,13 @@ The strict string-match proxy is reported separately below. WideSearch remains
 weak: 127 of 200 tasks fail the evidence guard, and all searches use fallback
 providers. The report retains these failures and the scoring limitations.
 
-## Model and held-out data
+### Model and held-out data
 
 The model is `Qwen/Qwen3-30B-A3B-Instruct-2507`, revision
 `0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe`. Its nominal size is 30B, but
-its actual total parameter count is approximately **30.53B**, with about 3.3B
-activated per token. It exceeds a strict 30B total-parameter limit.
+its base contains **30,532,122,624 parameters**, with about 3.3B activated per
+token. Including the attention LoRA, its total is **30,537,824,256**. It exceeds
+a strict 30B total-parameter limit.
 
 CUAD has 15,908 training questions from 388 contracts, 820 validation questions
 from 20 contracts, and 4,182 official test questions from 102 contracts. Its
@@ -29,9 +100,10 @@ source is `The-Atticus-Project/cuad` revision
 `67faa0e6023b04fcaae6cc09497ab00e5d63a2a2`. Official WideSearch is
 `ByteDance-Seed/WideSearch` revision
 `6531a7e5b497d44c8912407e0cb3dc95bd98cc09`: all 200 tasks, 100 English and
-100 Chinese, remain held out. No official WideSearch question or reference
-answer becomes a training target or checkpoint-selection example. The reference
-WideSearch evaluator revision is `9825ba7b140b71d81b364793f86dabe4cfed6749`.
+100 Chinese, are excluded from training and checkpoint selection. No official
+WideSearch question or reference answer becomes a training target or
+checkpoint-selection example. The reference WideSearch evaluator revision is
+`9825ba7b140b71d81b364793f86dabe4cfed6749`.
 
 The independent web curriculum has 58 bilingual training tasks from three IANA
 registries and eight validation tasks from two different registries. All 58
@@ -42,7 +114,7 @@ categories. Queries use question/profile terms; read offsets come from actual
 search hits. Training gold selects valid teachers but never enters evaluation
 queries or source selection.
 
-## Runtime and training lineage
+### Runtime and training lineage
 
 Only attention `q_proj`, `v_proj` and `o_proj` adapters are trainable: LoRA rank
 8, alpha 16, dropout zero, 288 tensors and **5,701,632 trainable parameters**.
@@ -107,14 +179,14 @@ under fused BF16. BF16 fits, so experiments retain it; NF4 is available when
 frozen base weights leave insufficient memory. Quantization changes predictions
 and does not reduce the original logical parameter count.
 
-## Validation and further optimization
+### Validation and further optimization
 
 Selection uses CUAD validation and the independent eight-task web validation,
 not either official test set. The original 82-question sample and all 820
 validation questions share the same 20 contracts; they are not independent
 contract holdouts. Small-sample checkpoint rankings failed to generalize.
 
-All current selection runs use graph vLLM 0.11.2, PyTorch 2.9.0,
+The historical graph selection runs use vLLM 0.11.2, PyTorch 2.9.0,
 Transformers 4.57.6, BF16 policy/LoRA/KV computation, TP1, greedy decoding and
 seed 42. The actual manifests record memory utilization 0.88 and an
 8,192-token prefill scheduling budget. HF and vLLM can produce different greedy
@@ -123,9 +195,9 @@ validation improved from F1 0.340426 without query expansion to 0.433333 with
 it, and round-1 final reached 0.467290. Those HF scores are not substituted for
 graph runtime results.
 
-Current graph CUAD validation uses the training-only retrieval profile, eight
-initial chunks, 8,192 prompt tokens, 1,024 generated tokens per turn, at most
-three turns, and batch size eight.
+The historical graph CUAD validation uses the training-only retrieval profile,
+eight initial chunks, 8,192 prompt tokens, 1,024 generated tokens per turn, at
+most three turns, and batch size eight.
 
 | Complete CUAD validation, 820 questions | AUPR | Micro precision | Micro recall | Micro F1 | Engines |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -168,13 +240,15 @@ either source checkpoint; factor interpolation is not equivalent to a linear
 interpolation of effective model functions. Factors 0.25 and 0.5 give independent
 web row F1 0.650400 and 0.532705, respectively, below step 32; neither is promoted.
 
-The final selection rule is fixed before testing the selected policy: require
-independent web row F1 at least 0.78 with auto-read off and complete CUAD
+The historical selection rule was fixed before testing the selected policy:
+require independent web row F1 at least 0.78 with auto-read off and complete CUAD
 validation micro F1
 at least 0.4251668255, then maximize CUAD AUPR among eligible trained policies,
 breaking ties by micro F1. Round-2 step 32 is the existing eligible fallback.
 This balances extraction and web behavior, rather than selecting on one task
-alone. No additional training rounds or official-test-based tuning are planned.
+alone. That historical policy was frozen before its official tests. The later
+strict-30B experiment follows the separate protocol above; official-test-based
+tuning remains excluded.
 
 | Candidate | CUAD AUPR | CUAD micro F1 | Web row F1 | Eligible |
 | --- | ---: | ---: | ---: | --- |
@@ -184,8 +258,8 @@ alone. No additional training rounds or official-test-based tuning are planned.
 | Round 3, step 24 | 0.233861 | 0.422680 | 0.860174 | No |
 | Round 3, step 32 | 0.239564 | 0.433010 | 0.831909 | Yes |
 
-Selection freezes at `2026-10-18T20:10:45Z`, before new official-test generation,
-in external `dcc-run/final-selection.json`. The selected adapter is
+The historical selection froze at `2026-10-18T20:10:45Z`, before its official-test
+generation, in external `dcc-run/final-selection.json`. The selected adapter is
 `dcc-run/tool-sft-round3/step_0008`: it inherits round-2 step 32 and incorporates
 the first eight round-3 steps, or 256 global examples. The 1,024-example round-3
 diagnostic describes the complete candidate-training run. Step 24's stronger
@@ -196,7 +270,7 @@ round-1 final → round-2 step 32 → round-3 step 8. Later candidate steps are 
 part of these weights; totals for entire training runs must not be interpreted
 as the number of updates inherited by the selected adapter.
 
-## Harness and test protocol
+### Harness and test protocol
 
 Training-only query expansion fits category terms from CUAD train answers and
 combines original/expanded searches with reciprocal-rank fusion. Evaluation
@@ -458,7 +532,7 @@ separate nine-check independent audit confirms that the published results and
 embedded accepted audit exactly match the local results. The original failure
 is retained; status recovery does not alter source, predictions or scores.
 
-## Checks, reproduction and artifacts
+### Checks, reproduction and artifacts
 
 The `45a0857f` checkpoint passed 494 CPU regression checks with two optional
 checks skipped. Those checks were subsequently covered by three NF4 checks

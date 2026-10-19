@@ -2,10 +2,11 @@
 
 The optional Transformers runtime trains attention LoRA adapters using the same
 DCC episode tools and rewards as evaluation. It leaves the existing Slime,
-StackPlanner, OLE and Megatron training defaults intact. The selected model is
-`Qwen/Qwen3-30B-A3B-Instruct-2507`: nominal 30B class, **30.5B actual total
-parameters**, about 3.3B activated per token. A strict total-parameter cap of
-30B excludes this model.
+StackPlanner, OLE and Megatron training defaults intact. The historical upstream
+model is `Qwen/Qwen3-30B-A3B-Instruct-2507`: nominal 30B class,
+**30,532,122,624 base parameters**, about 3.3B activated per token. Its
+rank-8 attention LoRA adds 5,701,632 parameters, giving **30,537,824,256** total.
+A strict total-parameter cap of 30B excludes this original model.
 
 For a strict parameter cap, the optional expert-pruning exporter creates a
 distinct, physically smaller Qwen3 MoE checkpoint. On the original 48-layer
@@ -135,8 +136,8 @@ skip counts rather than assuming every eligible teacher segment was used.
 The held-out WideSearch tasks and either benchmark's official test labels must
 not enter teacher construction, retrieval-profile fitting or checkpoint selection.
 
-The third mixed phase starts from round-2 step 32, using the same training data
-and fresh optimizer. Its eight-worker configuration is:
+The historical third mixed phase starts from round-2 step 32, using the same
+training data and a fresh optimizer. Its eight-worker, seed-46 configuration is:
 
 ```bash
 python -m torch.distributed.run --standalone --nproc-per-node="$WORKERS" \
@@ -153,12 +154,56 @@ python -m torch.distributed.run --standalone --nproc-per-node="$WORKERS" \
   --batch-tokens 32768 --samples-per-step 4 --initial-chunks 8 --seed 46
 ```
 
-Its four checkpoints are compared on all 820 validation questions and the
-independent web validation. The pre-test selection rule and measured results
+Its four checkpoints were compared on all 820 validation questions and the
+independent web validation. The historical selection rule and measured results
 are recorded in [dcc_experiment.md](dcc_experiment.md).
 
+## Strict-30B continuation (seed 47)
+
+The separate 125-expert experiment warm-starts the historical round-3 step-8
+adapter on the physically pruned base, with a fresh optimizer and seed 47.
+Its total, including LoRA, is **29,858,052,096 parameters**. Set `PRUNED_MODEL`
+to the audited export, `WARMSTART_ADAPTER` to that historical adapter,
+`STRICT_RUN_ROOT` to a new artifact directory and `WORKERS=8`:
+
+```bash
+python -m torch.distributed.run --standalone --nproc-per-node="$WORKERS" \
+  scripts/dcc_tool_sft.py \
+  --model "$PRUNED_MODEL" --adapter "$WARMSTART_ADAPTER" \
+  --records "$RUN_ROOT/web-curriculum/teacher_train.jsonl" \
+  --cuad-train-data "$DATA_ROOT/cuad/train.jsonl" \
+  --cuad-tool-records "$RUN_ROOT/cuad-tool-teachers.jsonl" \
+  --retrieval-profile "$RUN_ROOT/cuad-retrieval-profile.json" \
+  --output-dir "$STRICT_RUN_ROOT/tool-sft-strict" \
+  --quantization none --lora-rank 8 \
+  --steps 32 --save-every 8 --learning-rate 2e-6 \
+  --web-fraction .25 --cuad-tool-fraction .15 --negative-fraction .10 \
+  --max-prompt-tokens 8192 --max-new-tokens 2048 \
+  --batch-tokens 32768 --samples-per-step 4 --initial-chunks 8 --seed 47
+```
+
+Routing calibration uses 1,024 training-only examples and seed 47; remove the
+three least-used experts per layer with deterministic expert-ID ties. The
+continuation has completed 32 steps and 1,024 examples; validation is in
+progress and new benchmark scores remain pending. Compare steps 8/16/24/32 on
+all 820 CUAD validation questions and the independent web8, maximizing the
+harmonic mean of CUAD micro F1 and web strict row F1, then CUAD AUPR, then the
+earlier step. Require full coverage and zero infrastructure errors. This is
+separate from the seed-46 run and its historical eligibility floors.
+
+Freeze one adapter before fresh official generation for both benchmarks.
+Earlier official-test results have already been seen; this repeat is not an
+untouched first-use holdout. Old and new official scores must not choose
+experts, hyperparameters or the checkpoint. Keep the unchanged custom-v9 judge
+and its disclosed development-calibration limitations; it is separate from
+the strict-30B policy and is not the official GPT-4.1 leaderboard judge.
+
+## Evaluation
+
 Evaluate each benchmark in a separate directory, with a budget appropriate to
-its answer size. For example:
+its answer size. These HF examples illustrate CLI usage; the strict-30B
+experiment uses the frozen validation-selected adapter and graph vLLM as
+described in [dcc_vllm.md](dcc_vllm.md):
 
 ```bash
 python -m torch.distributed.run --standalone --nproc-per-node="$WORKERS" scripts/dcc_model_evaluate.py \
@@ -227,9 +272,10 @@ The smoke records actual loading, full prefill and synthetic training-step
 memory and timing. Its synthetic prompt never reads benchmark labels. A short
 synthetic step verifies runtime correctness; it does not establish training
 quality. Raise the prefill budget in a separate run to test the intended context
-length. Full-model validation quantized all 18,432 expert matrices. Loaded
-allocation was 16.79 GiB and full 16,384-token prefill plus 16 generated tokens
-peaked at 21.17 GiB, compared with 60.65 GiB for the BF16 implementation.
+length. Historical validation on the original 128-expert model quantized all
+18,432 expert matrices. Loaded allocation was 16.79 GiB and full 16,384-token
+prefill plus 16 generated tokens peaked at 21.17 GiB, compared with 60.65 GiB
+for the BF16 implementation.
 A synthetic LoRA optimizer step produced finite, nonzero gradients.
 The unfused NF4 runtime trades speed for memory: matched single-request decode
 measured 2.12 tokens/s versus 16.22 tokens/s for fused BF16. Choose batch size
