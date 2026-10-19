@@ -150,16 +150,6 @@ separate policy-token trajectories for tool turns, and excludes infrastructure
 failures from policy training. See [the DCC workflow](docs/dcc.md) for data,
 tools, model integration, and evaluation protocols.
 
-The strict-30B experiment uses a physically pruned Qwen3 MoE with rank-8 LoRA,
-29,858,052,096 total parameters. On all 4,182 CUAD questions it reports AUPR
-23.1103% and micro F1 42.1842%. On all 200 WideSearch tasks, custom base-Qwen
-judging gives macro row F1 0.0250% and item F1 0.120044%; 195 final answers are
-empty, so WideSearch remains weak. These are not official GPT-4.1 leaderboard
-scores. The independent final audit passes all 284 checks. See [the experiment
-report](docs/dcc_experiment.md) for training, selection, full results,
-reproduction and limitations, including historical results from the larger
-original model.
-
 ## Optional OLE sample selection
 
 OLE is disabled by default in all three templates. Enable it for A, B, or C

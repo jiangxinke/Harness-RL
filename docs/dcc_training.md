@@ -59,8 +59,7 @@ GRPO samples independent trajectories with temperature 1, top-p 1 and top-k 0.
 Inherited sampling filters, repetition penalties, n-gram constraints and forced
 or suppressed tokens are disabled, so rollout probabilities match the raw
 model log probabilities used for both old and current policy scores. Greedy
-evaluation is unchanged. The earliest trial used temperature 0.8 with nucleus
-and top-k sampling; its sampling policy did not exactly match those raw scores.
+evaluation is unchanged. Rollout sampling and recorded policy probabilities must describe the same distribution.
 
 Training computes fixed old policy log probabilities and normalizes rewards
 within each valid group. Each rollout batch receives one optimizer update,
@@ -106,138 +105,36 @@ python scripts/dcc_prepare_cuad_tools.py \
   --output "$RUN_ROOT/cuad-tool-teachers.jsonl"
 ```
 
-The following reproduces the second mixed phase's configuration. Set
-`WARMSTART_ADAPTER` to the first mixed phase's saved adapter, whose actual
-lineage and validation results are recorded in [dcc_experiment.md](dcc_experiment.md).
-This creates a fresh optimizer; it does not restore optimizer state.
+Use the mixed teacher records with a fresh adapter, or add `--adapter` to
+warm-start an existing one. Select checkpoints on held-out validation data and
+keep official benchmark tests outside all data preparation and selection.
 
 ```bash
 python -m torch.distributed.run --standalone --nproc-per-node="$WORKERS" \
   scripts/dcc_tool_sft.py \
-  --model "$MODEL_CACHE" --adapter "$WARMSTART_ADAPTER" \
+  --model "$MODEL_CACHE" \
   --records "$RUN_ROOT/web-curriculum/teacher_train.jsonl" \
   --cuad-train-data "$DATA_ROOT/cuad/train.jsonl" \
   --cuad-tool-records "$RUN_ROOT/cuad-tool-teachers.jsonl" \
   --retrieval-profile "$RUN_ROOT/cuad-retrieval-profile.json" \
-  --output-dir "$RUN_ROOT/tool-sft-round2" \
-  --steps 64 --save-every 16 --learning-rate 5e-6 \
-  --web-fraction .25 --cuad-tool-fraction .3 --negative-fraction .25 \
-  --max-prompt-tokens 8192 --max-new-tokens 2048 \
-  --batch-tokens 32768 --samples-per-step 4 --initial-chunks 4 --seed 45
-```
-
-The measured run used eight workers. Each worker accumulates gradients over
-individual examples; `--batch-tokens` is a sampling budget, not a padded
-forward batch allocation. Averaging weights each actual example equally across
-workers, including steps where workers sample unequal counts. Dynamic direct
-CUAD examples are skipped when gold text is not visible in the encoded prompt
-or the target exceeds its budget. Inspect the saved sampled IDs, stages and
-skip counts rather than assuming every eligible teacher segment was used.
-The held-out WideSearch tasks and either benchmark's official test labels must
-not enter teacher construction, retrieval-profile fitting or checkpoint selection.
-
-The historical third mixed phase starts from round-2 step 32, using the same
-training data and a fresh optimizer. Its eight-worker, seed-46 configuration is:
-
-```bash
-python -m torch.distributed.run --standalone --nproc-per-node="$WORKERS" \
-  scripts/dcc_tool_sft.py \
-  --model "$MODEL_CACHE" --adapter "$RUN_ROOT/tool-sft-round2/step_0032" \
-  --records "$RUN_ROOT/web-curriculum/teacher_train.jsonl" \
-  --cuad-train-data "$DATA_ROOT/cuad/train.jsonl" \
-  --cuad-tool-records "$RUN_ROOT/cuad-tool-teachers.jsonl" \
-  --retrieval-profile "$RUN_ROOT/cuad-retrieval-profile.json" \
-  --output-dir "$RUN_ROOT/tool-sft-round3" \
-  --steps 32 --save-every 8 --learning-rate 2e-6 \
-  --web-fraction .25 --cuad-tool-fraction .15 --negative-fraction .10 \
-  --max-prompt-tokens 8192 --max-new-tokens 2048 \
-  --batch-tokens 32768 --samples-per-step 4 --initial-chunks 8 --seed 46
-```
-
-Its four checkpoints were compared on all 820 validation questions and the
-independent web validation. The historical selection rule and measured results
-are recorded in [dcc_experiment.md](dcc_experiment.md).
-
-## Strict-30B continuation (seed 47)
-
-The separate 125-expert experiment warm-starts the historical round-3 step-8
-adapter on the physically pruned base, with a fresh optimizer and seed 47.
-Its total, including LoRA, is **29,858,052,096 parameters**. Set `PRUNED_MODEL`
-to the audited export, `WARMSTART_ADAPTER` to that historical adapter,
-`STRICT_RUN_ROOT` to a new artifact directory and `WORKERS=8`:
-
-```bash
-python -m torch.distributed.run --standalone --nproc-per-node="$WORKERS" \
-  scripts/dcc_tool_sft.py \
-  --model "$PRUNED_MODEL" --adapter "$WARMSTART_ADAPTER" \
-  --records "$RUN_ROOT/web-curriculum/teacher_train.jsonl" \
-  --cuad-train-data "$DATA_ROOT/cuad/train.jsonl" \
-  --cuad-tool-records "$RUN_ROOT/cuad-tool-teachers.jsonl" \
-  --retrieval-profile "$RUN_ROOT/cuad-retrieval-profile.json" \
-  --output-dir "$STRICT_RUN_ROOT/tool-sft-strict" \
-  --quantization none --lora-rank 8 \
+  --output-dir "$RUN_ROOT/tool-sft" \
   --steps 32 --save-every 8 --learning-rate 2e-6 \
   --web-fraction .25 --cuad-tool-fraction .15 --negative-fraction .10 \
   --max-prompt-tokens 8192 --max-new-tokens 2048 \
   --batch-tokens 32768 --samples-per-step 4 --initial-chunks 8 --seed 47
 ```
 
-Routing calibration uses 1,024 training-only examples and seed 47; remove the
-three least-used experts per layer with deterministic expert-ID ties. The
-continuation completed 32 steps and 1,024 examples. Validation of steps
-8/16/24/32 is complete on all 820 CUAD questions and the independent web8,
-with full denominators and zero infrastructure errors. The frozen rule
-maximizes the harmonic mean of CUAD micro F1 and web strict row F1, then CUAD
-AUPR, then the earlier step. It selected step 24 and froze that adapter at
-`2026-10-19T10:40:45Z`. The selected weights inherit **24 new continuation
-steps and 768 sampled examples**, plus historical warm-start training; the
-last eight steps of the complete run are absent from them. The four-candidate
-results are recorded in [dcc_experiment.md](dcc_experiment.md). This is
-separate from the seed-46 run and its historical eligibility floors.
-
-Fresh official generation started at `2026-10-19T10:41:11Z` with this same
-frozen adapter for both benchmarks; generation and strict-proxy scoring finished
-at `2026-10-19T11:25:40Z`. Both tests have full coverage and zero infrastructure
-failures. CUAD full-test aggregation is complete for
-all 4,182 questions (coverage 1.0): 4,180 completed, two reached `max_steps`
-and remain in the denominators, and none had infrastructure failures. Its AUPR
-is 23.1103% and micro F1 is 42.1842%; the independent final tensor, optimizer
-and scoring audit passes all 284 checks. See [dcc_experiment.md](dcc_experiment.md)
-for the other metrics and artifact record. WideSearch retains all 200 tasks:
-75 completed and 125 evidence failures. Its strict-proxy macro row F1 is 0%,
-macro item F1 is 0.089230% and complete-table accuracy is 0%.
-The full-200 custom-v9 judge completed at `2026-10-19T11:33:22Z` with zero
-judge failures: macro row F1 is 0.0250%, macro item F1 is 0.120044%, and
-complete-table accuracy is 0%. These are custom-Qwen judge scores. Of all 200
-outputs, 195 are empty: 70 of the 75 completed episodes and all 125 evidence
-failures. This exposes a severe answer-coverage and citation problem; it is
-not evidence of improved WideSearch performance. The independent final audit
-passes all 284 checks, including replay of all 25 fresh captured judge calls.
-The final verified record is `strict30b-v1/final-result-verified.json` within
-the run artifact directory; original pre-audit records remain unchanged.
-
-In this frozen runtime, `--timeout 1800` is an episode limit starting after
-the concurrency semaphore is acquired. WideSearch allows 8,192 generated
-tokens per turn and up to 12 turns. Synchronous vLLM `LLM.generate` returns
-only after the entire batch finishes; cancellation of an awaiting episode
-cannot abort a `generate` already running through `asyncio.to_thread`. GPU
-execution can outlast the episode deadline, and slow batch members can delay
-other results. Direct cross-thread aborts are avoided because vLLM V1 is not
-thread-safe for that use. The frozen official execution source remains
-`b84a211d`.
-
-Earlier official-test results have already been seen; this repeat is not an
-untouched first-use holdout. Old and new official scores must not choose
-experts, hyperparameters or the checkpoint. Keep the unchanged custom-v9 judge
-and its disclosed development-calibration limitations; it is separate from
-the strict-30B policy and is not the official GPT-4.1 leaderboard judge.
+Each worker accumulates gradients over individual examples; `--batch-tokens`
+is a sampling budget. Inspect saved sampled IDs, stages and skipped candidates
+rather than assuming every eligible teacher segment was used. Use the same
+base checkpoint for base-versus-adapter comparisons, and freeze the harness,
+precision, semantic budgets and scoring protocol before measuring test gains.
 
 ## Evaluation
 
 Evaluate each benchmark in a separate directory, with a budget appropriate to
-its answer size. These HF examples illustrate CLI usage; the strict-30B
-experiment uses the frozen validation-selected adapter and graph vLLM as
-described in [dcc_vllm.md](dcc_vllm.md):
+its answer size. These HF examples illustrate CLI usage. For the optional fused inference
+backend, see [dcc_vllm.md](dcc_vllm.md):
 
 ```bash
 python -m torch.distributed.run --standalone --nproc-per-node="$WORKERS" scripts/dcc_model_evaluate.py \
@@ -306,15 +203,8 @@ The smoke records actual loading, full prefill and synthetic training-step
 memory and timing. Its synthetic prompt never reads benchmark labels. A short
 synthetic step verifies runtime correctness; it does not establish training
 quality. Raise the prefill budget in a separate run to test the intended context
-length. Historical validation on the original 128-expert model quantized all
-18,432 expert matrices. Loaded allocation was 16.79 GiB and full 16,384-token
-prefill plus 16 generated tokens peaked at 21.17 GiB, compared with 60.65 GiB
-for the BF16 implementation.
-A synthetic LoRA optimizer step produced finite, nonzero gradients.
-The unfused NF4 runtime trades speed for memory: matched single-request decode
-measured 2.12 tokens/s versus 16.22 tokens/s for fused BF16. Choose batch size
-using actual memory and throughput measurements; quantization alone does not
-establish faster training or better benchmark scores.
+length. Choose batch size using actual memory and throughput measurements;
+quantization alone does not establish faster training or better scores.
 
 The evaluator resumes saved task IDs and rejects changed generation settings
 in the same directory. Use different directories for base and trained policies.

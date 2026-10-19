@@ -43,18 +43,8 @@ inference never reads evaluation labels or arbitrary task metadata. A free-form
 follow-up search therefore usually uses the ordinary document tool. The
 enhancement changes ranking only, with the existing chunking and top-k cap.
 
-The recipe was selected after CPU diagnostics on CUAD validation data. On the
-820 validation questions, complete gold-span visibility in the initial four
-chunks rose from 307/621 to 411/621 while mean source context stayed near 5.3k
-characters. A later diagnostic explicitly requiring the full unnormalized
-answer string inside one actual chunk finds 407/621 with four chunks and
-481/621 with eight; see [dcc_experiment.md](dcc_experiment.md). Retain the
-earlier 411 figure as historical context, and use the later stated matching
-definition for comparisons. These are retrieval diagnostics, not model
-benchmark scores. The
-82-question development set and the remaining 738 questions share the same 20
-validation contracts; the latter are question-disjoint, not an independent
-contract holdout. Parameters and the recipe must be frozen before the next
-model comparison, using identical model and generation settings. A clean new
-contract-level development split requires reserving additional training
-contracts and excluding them from both profile fitting and any new training.
+Measure retrieval visibility on held-out development contracts before model
+comparisons. Freeze profile fitting, chunking and top-k settings for both the
+base policy and trained adapters. Reserve development contracts before fitting
+or training; question-disjoint subsets from the same contracts do not create
+an independent contract holdout.
