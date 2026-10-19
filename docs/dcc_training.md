@@ -196,13 +196,28 @@ results are recorded in [dcc_experiment.md](dcc_experiment.md). This is
 separate from the seed-46 run and its historical eligibility floors.
 
 Fresh official generation started at `2026-10-19T10:41:11Z` with this same
-frozen adapter for both benchmarks. CUAD full-test aggregation is complete for
+frozen adapter for both benchmarks; generation and strict-proxy scoring finished
+at `2026-10-19T11:25:40Z`. Both tests have full coverage and zero infrastructure
+failures. CUAD full-test aggregation is complete for
 all 4,182 questions (coverage 1.0): 4,180 completed, two reached `max_steps`
 and remain in the denominators, and none had infrastructure failures. Its AUPR
 is 23.1103% and micro F1 is 42.1842%; the independent final tensor, optimizer
 and scoring audit remains pending. See [dcc_experiment.md](dcc_experiment.md)
-for the other metrics and artifact record. WideSearch generation is still
-running; full-200 judging and its scores remain pending.
+for the other metrics and artifact record. WideSearch retains all 200 tasks:
+75 completed and 125 evidence failures. Its strict-proxy macro row F1 is 0%,
+macro item F1 is 0.089230% and complete-table accuracy is 0%.
+The full-200 custom-v9 judge started at `2026-10-19T11:29:03Z`; semantic scores
+and the independent final audit remain pending.
+
+In this frozen runtime, `--timeout 1800` is an episode limit starting after
+the concurrency semaphore is acquired. WideSearch allows 8,192 generated
+tokens per turn and up to 12 turns. Synchronous vLLM `LLM.generate` returns
+only after the entire batch finishes; cancellation of an awaiting episode
+cannot abort a `generate` already running through `asyncio.to_thread`. GPU
+execution can outlast the episode deadline, and slow batch members can delay
+other results. Direct cross-thread aborts are avoided because vLLM V1 is not
+thread-safe for that use. The frozen official execution source remains
+`b84a211d`.
 
 Earlier official-test results have already been seen; this repeat is not an
 untouched first-use holdout. Old and new official scores must not choose

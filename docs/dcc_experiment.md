@@ -1,6 +1,6 @@
 # DCC experiment
 
-## Strict-30B derivative: training and validation complete, official evaluation in progress
+## Strict-30B derivative: generation complete, judging and audit pending
 
 `DCC-Qwen3MoE-29.85B-125E-traincal` physically retains 125 of 128 experts in
 each of the original model's 48 layers, with eight experts selected per token.
@@ -66,7 +66,7 @@ excludes old and new official scores from new expert selection, hyperparameter
 choice and checkpoint selection. Training and selection exclude official-test
 examples; this repeat is not an untouched first-use holdout evaluation.
 
-Fresh WideSearch semantic scoring will use the unchanged `same_entity_v9`
+Fresh WideSearch semantic scoring uses the unchanged `same_entity_v9`
 scorer at `4ece9e7a` and the original unadapted Qwen base as a separate evaluator.
 That evaluator has 30,532,122,624 parameters; the strict policy total above
 includes its own LoRA. This custom judge is not the official GPT-4.1 leaderboard
@@ -76,14 +76,35 @@ failure (11/12 raw header checks): `calibration_passed=false`,
 provenance and metric reconstruction, not every semantic judgment.
 
 Training and validation selection are complete. Fresh official generation
-started at `2026-10-19T10:41:11Z`. CUAD full-test aggregation is complete
+started at `2026-10-19T10:41:11Z`; generation and strict-proxy scoring finished
+at `2026-10-19T11:25:40Z`. Both tests have full coverage and zero infrastructure
+failures. CUAD full-test aggregation is complete
 (`complete=true`) for all **4,182 questions**, with coverage 1.0: 4,180 completed,
 two reached `max_steps`, and none had infrastructure failures. Both turn-budget
 failures remain in the metric denominators. CUAD micro precision is 55.4187%
 and micro recall is 34.0522%; AUPR and micro F1 are below. These are aggregated
 scores awaiting the independent final tensor, optimizer and scoring audit.
-WideSearch generation is still running; full-200 judging and its scores remain
+
+All **200 WideSearch tasks** remain in the denominator: 75 completed and 125
+have `evidence_failure`. Its strict exact proxy has macro row F1 **0%**, macro
+item F1 **0.089230%** and complete-table accuracy **0%**. Search
+coverage is 199/200: 198 tasks use web search and two use encyclopedia search,
+with one task using both. All 1,031 search calls use `public_web` fallback:
+722 `baidu_mobile`, 297 `seznam` and 12 `wikipedia`, with fallback reasons
+29 `challenge` and 1,002 `cooldown`. The full-200 custom-v9 judge started at
+`2026-10-19T11:29:03Z`; its results and the independent final audit remain
 pending.
+
+The frozen runtime's `--timeout 1800` limits each episode after it acquires
+the concurrency semaphore; it does not limit a whole shard. WideSearch's
+8,192 generated-token budget applies to each turn, with up to 12 turns.
+Synchronous vLLM `LLM.generate` delivers results only after its entire batch
+finishes. An episode timeout cancels its awaiting future but cannot abort a
+`generate` already executing through `asyncio.to_thread`; GPU work may continue
+and a slow batch member can delay other results. Cross-thread aborts are not
+used because of vLLM V1 thread-safety constraints. The official run retains
+its frozen execution source `b84a211d`.
+
 Artifacts use a separate `dcc-run/strict30b-v1/` subtree, including
 `training-complete.json`, `validate-summary.json`, `selection.json` and
 `cuad-final-selected/scores_strict.json`.
@@ -91,8 +112,8 @@ Artifacts use a separate `dcc-run/strict30b-v1/` subtree, including
 | Strict-30B derivative test | Questions | Score / status |
 | --- | ---: | --- |
 | CUAD AUPR / micro F1 | 4,182 | 23.1103% / 42.1842%; independent audit pending |
-| WideSearch custom-v9 macro row / item F1 | 200 | Generation running; judging pending |
-| WideSearch strict-proxy macro row / item F1 | 200 | Generation running; scores pending |
+| WideSearch custom-v9 macro row / item F1 | 200 | Judging running; scores pending |
+| WideSearch strict-proxy macro row / item F1 | 200 | 0% / 0.089230%; independent audit pending |
 
 ## Historical original 128-expert results
 
