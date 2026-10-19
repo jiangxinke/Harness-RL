@@ -1,6 +1,6 @@
 # DCC experiment
 
-## Strict-30B derivative: generation complete, judging and audit pending
+## Strict-30B derivative: audited full-test results
 
 `DCC-Qwen3MoE-29.85B-125E-traincal` physically retains 125 of 128 experts in
 each of the original model's 48 layers, with eight experts selected per token.
@@ -26,8 +26,8 @@ segments. Preparation skipped 233 ungrounded or overlong direct candidates.
 All 256 local loss records are finite; gradient norms are finite, positive
 and synchronized across workers at all 32 steps. Maximum recorded per-rank
 training elapsed time is 469.0 seconds, including loading and checkpoint work.
-These log checks establish training completion, not benchmark improvement;
-the final independent tensor, optimizer and scoring audit remains pending.
+These log checks establish training completion, not benchmark improvement.
+The final independent tensor, optimizer and scoring audit passes all 284 checks.
 The adapter inherits the historical training lineage, including the earlier
 RL sampling discrepancy described below.
 
@@ -83,7 +83,7 @@ failures. CUAD full-test aggregation is complete
 two reached `max_steps`, and none had infrastructure failures. Both turn-budget
 failures remain in the metric denominators. CUAD micro precision is 55.4187%
 and micro recall is 34.0522%; AUPR and micro F1 are below. These are aggregated
-scores awaiting the independent final tensor, optimizer and scoring audit.
+scores verified by the independent final tensor, optimizer and scoring audit.
 
 All **200 WideSearch tasks** remain in the denominator: 75 completed and 125
 have `evidence_failure`. Its strict exact proxy has macro row F1 **0%**, macro
@@ -91,9 +91,38 @@ item F1 **0.089230%** and complete-table accuracy **0%**. Search
 coverage is 199/200: 198 tasks use web search and two use encyclopedia search,
 with one task using both. All 1,031 search calls use `public_web` fallback:
 722 `baidu_mobile`, 297 `seznam` and 12 `wikipedia`, with fallback reasons
-29 `challenge` and 1,002 `cooldown`. The full-200 custom-v9 judge started at
-`2026-10-19T11:29:03Z`; its results and the independent final audit remain
-pending.
+29 `challenge` and 1,002 `cooldown`. All search calls return nonempty results;
+`fallback` records provider selection, and a cooldown can skip a primary
+request, so these counts are not 1,031 HTTP failures. Page reading makes 1,150
+calls: 835 return nonempty text, 47 return empty text without an error, and
+268 report an HTTP, URL, parsing or other error.
+
+The full-200 custom-v9 judge started at `2026-10-19T11:29:03Z` and its durable
+result completed at `2026-10-19T11:33:22Z`, with `complete=true`, all 200 tasks
+and zero judge failures. Macro row F1 is **0.0250%**, macro item F1 is
+**0.120044%**, and complete-table accuracy is **0%**. These are custom-Qwen
+judge scores, not official GPT-4.1 leaderboard scores. The independent final
+audit passes all 284 checks with no failed checks.
+
+A local post-hoc analysis explains the low score without changing selection:
+75 completed episodes contain **70 empty tables and only five nonempty tables**;
+all 125 evidence failures are empty, giving **195/200 empty final answers**.
+The five nonempty outputs have 27 raw rows, reduced to 26 by scoring, against
+314 reference rows for those five tasks. Their schemas are valid and there
+are no exact repeated rows after ignoring citations or copied whole tables
+across tasks. One car table contains two versions of the same model with the
+same rank and loses a row in scoring. Only one task has positive row F1 and
+four have positive item F1. Completion status therefore does not establish
+substantive answer coverage.
+
+The 125 evidence failures break down into 76 missing row citations, 26 missing
+a successful fetch, two missing both, two citing unobserved URLs, one missing
+both search and fetch, and 18 exhausting their turn budget without a supported
+final answer. Of these failures, 124 previously searched successfully and 96
+previously fetched nonempty text. The observed bottlenecks are sparse answer
+coverage and failure to produce supported row-level citations, rather than a
+general JSON-format failure. This analysis uses the frozen outputs only and
+does not select a checkpoint or tune the policy after official scoring.
 
 The frozen runtime's `--timeout 1800` limits each episode after it acquires
 the concurrency semaphore; it does not limit a whole shard. WideSearch's
@@ -105,15 +134,32 @@ and a slow batch member can delay other results. Cross-thread aborts are not
 used because of vLLM V1 thread-safety constraints. The official run retains
 its frozen execution source `b84a211d`.
 
-Artifacts use a separate `dcc-run/strict30b-v1/` subtree, including
-`training-complete.json`, `validate-summary.json`, `selection.json` and
-`cuad-final-selected/scores_strict.json`.
+The independent CPU audit exits successfully with `accepted=true`, **284/284
+checks passed**, and `failed_checks=[]`. It verifies exact execution-source
+identity, parameter-count and expert-mapping metadata, all 288 adapter tensors,
+optimizer state and synchronized training records, four-candidate selection,
+complete-test ownership and denominators, CUAD metric reconstruction and
+WideSearch raw-response replay. This fresh judge captures **25 actual model
+calls**, with rank counts `[10, 2, 4, 8, 1, 0, 0, 0]`; every captured prompt is
+replayed and consumed exactly. Empty responses and deterministic scoring paths
+do not require a model call. Durable scoring artifacts equal the local records
+byte for byte. This audit establishes provenance and arithmetic; the disclosed
+semantic-judge limitations remain.
 
-| Strict-30B derivative test | Questions | Score / status |
+Artifacts use a separate `dcc-run/strict30b-v1/` subtree, including
+`training-complete.json`, `validate-summary.json`, `selection.json`,
+`cuad-final-selected/scores_strict.json`,
+`widesearch-final-judge-v9/scores_local_judge.json`,
+`audit-independent-strict30b-result.json` and `final-result-verified.json`.
+The original `judge-result-v9.json` retains its creation-time audit-pending
+flag for reproducibility; `final-result-verified.json` supersedes that flag
+with the accepted audit and completed verification status.
+
+| Strict-30B derivative test | Questions | Audited score |
 | --- | ---: | --- |
-| CUAD AUPR / micro F1 | 4,182 | 23.1103% / 42.1842%; independent audit pending |
-| WideSearch custom-v9 macro row / item F1 | 200 | Judging running; scores pending |
-| WideSearch strict-proxy macro row / item F1 | 200 | 0% / 0.089230%; independent audit pending |
+| CUAD AUPR / micro F1 | 4,182 | 23.1103% / 42.1842% |
+| WideSearch custom-v9 macro row / item F1 | 200 | 0.0250% / 0.120044% |
+| WideSearch strict-proxy macro row / item F1 | 200 | 0% / 0.089230% |
 
 ## Historical original 128-expert results
 

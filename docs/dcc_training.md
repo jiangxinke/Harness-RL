@@ -202,12 +202,19 @@ failures. CUAD full-test aggregation is complete for
 all 4,182 questions (coverage 1.0): 4,180 completed, two reached `max_steps`
 and remain in the denominators, and none had infrastructure failures. Its AUPR
 is 23.1103% and micro F1 is 42.1842%; the independent final tensor, optimizer
-and scoring audit remains pending. See [dcc_experiment.md](dcc_experiment.md)
+and scoring audit passes all 284 checks. See [dcc_experiment.md](dcc_experiment.md)
 for the other metrics and artifact record. WideSearch retains all 200 tasks:
 75 completed and 125 evidence failures. Its strict-proxy macro row F1 is 0%,
 macro item F1 is 0.089230% and complete-table accuracy is 0%.
-The full-200 custom-v9 judge started at `2026-10-19T11:29:03Z`; semantic scores
-and the independent final audit remain pending.
+The full-200 custom-v9 judge completed at `2026-10-19T11:33:22Z` with zero
+judge failures: macro row F1 is 0.0250%, macro item F1 is 0.120044%, and
+complete-table accuracy is 0%. These are custom-Qwen judge scores. Of all 200
+outputs, 195 are empty: 70 of the 75 completed episodes and all 125 evidence
+failures. This exposes a severe answer-coverage and citation problem; it is
+not evidence of improved WideSearch performance. The independent final audit
+passes all 284 checks, including replay of all 25 fresh captured judge calls.
+The final verified record is `strict30b-v1/final-result-verified.json` within
+the run artifact directory; original pre-audit records remain unchanged.
 
 In this frozen runtime, `--timeout 1800` is an episode limit starting after
 the concurrency semaphore is acquired. WideSearch allows 8,192 generated
