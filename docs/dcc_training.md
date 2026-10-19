@@ -184,14 +184,20 @@ python -m torch.distributed.run --standalone --nproc-per-node="$WORKERS" \
 
 Routing calibration uses 1,024 training-only examples and seed 47; remove the
 three least-used experts per layer with deterministic expert-ID ties. The
-continuation has completed 32 steps and 1,024 examples; validation is in
-progress and new benchmark scores remain pending. Compare steps 8/16/24/32 on
-all 820 CUAD validation questions and the independent web8, maximizing the
-harmonic mean of CUAD micro F1 and web strict row F1, then CUAD AUPR, then the
-earlier step. Require full coverage and zero infrastructure errors. This is
+continuation completed 32 steps and 1,024 examples. Validation of steps
+8/16/24/32 is complete on all 820 CUAD questions and the independent web8,
+with full denominators and zero infrastructure errors. The frozen rule
+maximizes the harmonic mean of CUAD micro F1 and web strict row F1, then CUAD
+AUPR, then the earlier step. It selected step 24 and froze that adapter at
+`2026-10-19T10:40:45Z`. The selected weights inherit **24 new continuation
+steps and 768 sampled examples**, plus historical warm-start training; the
+last eight steps of the complete run are absent from them. The four-candidate
+results are recorded in [dcc_experiment.md](dcc_experiment.md). This is
 separate from the seed-46 run and its historical eligibility floors.
 
-Freeze one adapter before fresh official generation for both benchmarks.
+Fresh official generation started at `2026-10-19T10:41:11Z` with this same
+frozen adapter for both benchmarks; official scores, full-200 judging and the
+independent final audit remain pending.
 Earlier official-test results have already been seen; this repeat is not an
 untouched first-use holdout. Old and new official scores must not choose
 experts, hyperparameters or the checkpoint. Keep the unchanged custom-v9 judge

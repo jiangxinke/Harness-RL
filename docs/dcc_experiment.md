@@ -1,6 +1,6 @@
 # DCC experiment
 
-## Strict-30B derivative: training complete, evaluation pending
+## Strict-30B derivative: training and validation complete, official evaluation pending
 
 `DCC-Qwen3MoE-29.85B-125E-traincal` physically retains 125 of 128 experts in
 each of the original model's 48 layers, with eight experts selected per token.
@@ -31,15 +31,35 @@ the final independent tensor, optimizer and scoring audit remains pending.
 The adapter inherits the historical training lineage, including the earlier
 RL sampling discrepancy described below.
 
-Validation is running on all 820 CUAD validation questions and eight independent
+Validation is complete on all 820 CUAD validation questions and eight independent
 web validation tasks for steps 8, 16, 24 and 32. Each candidate uses identical
 graph-vLLM BF16 settings within each benchmark, with two logical CUAD shards
-and one web shard. Select the highest harmonic mean `2*c*w/(c+w)` of CUAD
+and one web shard. The frozen selection rule maximizes the harmonic mean
+`2*c*w/(c+w)` of CUAD
 micro F1 `c` and web strict-proxy macro row F1 `w` (zero when both are zero),
 then CUAD AUPR, then the earlier step. Complete denominators and zero
 infrastructure errors are required. The historical eligibility floors below
-do not apply. One selected adapter must be frozen before fresh official
-generation and used unchanged on both complete tests.
+do not apply.
+
+| Strict-30B validation step | CUAD micro F1 | Web strict row F1 | Harmonic mean | CUAD AUPR |
+| --- | ---: | ---: | ---: | ---: |
+| 8 | 0.356044 | 0.756639 | 0.484229 | 0.175777 |
+| 16 | 0.426989 | 0.795101 | 0.555604 | 0.243807 |
+| **24 (selected)** | **0.425403** | **0.868946** | **0.571179** | **0.235791** |
+| 32 | 0.440914 | 0.737633 | 0.551921 | 0.246452 |
+
+All four candidates complete CUAD's 820 questions with zero infrastructure
+failures. All eight web tasks remain in each denominator: steps 8 and 32 each
+have seven completions and one evidence failure scored as zero; steps 16 and
+24 complete all eight. Step 24 wins the frozen rule and was frozen at
+`2026-10-19T10:40:45Z` for unchanged use on both complete official tests.
+These selected weights inherit **24 new continuation optimizer steps and
+768 sampled examples**, plus the historical warm-start lineage. The complete
+candidate-training run's 32 steps and 1,024 examples include later updates
+absent from the selected adapter; its 707 unique task IDs are not a count for
+step 24. Full validation and selection records are
+`dcc-run/strict30b-v1/validate-summary.json` and
+`dcc-run/strict30b-v1/selection.json`.
 
 Earlier official-test results have already been observed. The frozen protocol
 excludes old and new official scores from new expert selection, hyperparameter
@@ -55,8 +75,10 @@ failure (11/12 raw header checks): `calibration_passed=false`,
 `accepted_with_known_limitation=true`. CPU raw-response replay verifies
 provenance and metric reconstruction, not every semantic judgment.
 
-No new validation selection or official-test score is available yet. Fresh
-generation, full-200 judging and the independent final audit remain pending.
+Training and validation selection are complete. Fresh official generation
+started at `2026-10-19T10:41:11Z`; no new official-test score is available yet.
+Official generation completion, full-200 judging and the independent final
+audit remain pending.
 Artifacts use a separate `dcc-run/strict30b-v1/` subtree, including
 `training-complete.json`, `validate-summary.json` and `selection.json`.
 
