@@ -7,6 +7,38 @@ StackPlanner, OLE and Megatron training defaults intact. The selected model is
 parameters**, about 3.3B activated per token. A strict total-parameter cap of
 30B excludes this model.
 
+For a strict parameter cap, the optional expert-pruning exporter creates a
+distinct, physically smaller Qwen3 MoE checkpoint. On the original 48-layer
+model, retaining 125 of 128 experts per layer yields **29,852,350,464** base
+parameters, or **29,858,052,096** including the rank-8 attention adapters.
+Routing still selects eight experts per token. Exporting changes the model;
+the original model's scores do not establish this derivative's scores.
+
+Collect actual router top-k counts using `RouterCounter` from
+`scripts/dcc_prune_experts.py` on training examples only, before choosing experts.
+Its `report` requires the source model ID/revision and training task IDs; use
+`counter.valid_tokens(attention_mask)` around padded forward passes and call
+`counter.close()` afterwards. The exporter selects the most-used experts in
+each layer, retaining original expert order and remapping every router row and
+expert projection consistently. Its metadata plan reads checkpoint headers;
+the export audits saved shapes and logical parameter counts before publication.
+
+```bash
+python scripts/dcc_prune_experts.py plan \
+  --source "$MODEL_CACHE" --calibration "$RUN_ROOT/routing-counts.json" \
+  --keep-experts 125 --max-parameters 30000000000
+python scripts/dcc_prune_experts.py export \
+  --source "$MODEL_CACHE" --calibration "$RUN_ROOT/routing-counts.json" \
+  --keep-experts 125 --max-parameters 30000000000 --workers 2 \
+  --model-id DCC-Qwen3MoE-29.85B-125E-traincal \
+  --output "$RUN_ROOT/base-125"
+```
+
+Use the exported directory as `--model` for training and evaluation. A compatible
+attention adapter may warm-start it; subsequent adapter checkpoints record the
+explicitly loaded base instead of the adapter's historical base path. Validate
+the derivative with the intended HF and inference runtimes before benchmarking.
+
 Install `configs/dcc/requirements-training.txt` in a separate environment with
 a CUDA-compatible PyTorch build. The grouped MoE implementation requires
 PyTorch 2.10 or newer and an SM80-or-newer GPU. One BF16 model replica must fit

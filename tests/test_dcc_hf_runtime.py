@@ -19,6 +19,39 @@ HFPolicy = _POLICY.HFPolicy
 completion_logprobs = _POLICY.completion_logprobs
 encode_messages = _POLICY.encode_messages
 
+
+def test_warmstart_checkpoint_records_the_explicitly_loaded_base(tmp_path, monkeypatch):
+    from peft import LoraConfig, get_peft_model
+    from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen3MoeConfig, Qwen3MoeForCausalLM
+
+    config = Qwen3MoeConfig(
+        vocab_size=48, hidden_size=16, intermediate_size=24, moe_intermediate_size=8,
+        num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=1,
+        head_dim=8, num_experts=4, num_experts_per_tok=2,
+    )
+    base = Qwen3MoeForCausalLM(config)
+    source = tmp_path / "explicit-derived-base"
+    base.save_pretrained(source)
+    adapter = get_peft_model(base, LoraConfig(r=2, target_modules=["q_proj", "v_proj", "o_proj"], task_type="CAUSAL_LM"))
+    adapter.peft_config["default"].base_model_name_or_path = "historical/upstream-base"
+    warmstart = tmp_path / "warmstart"
+    adapter.save_pretrained(warmstart)
+    original_loader = AutoModelForCausalLM.from_pretrained
+
+    def cpu_loader(name, **kwargs):
+        kwargs.pop("device_map")
+        kwargs.pop("experts_implementation")
+        kwargs["dtype"] = torch.float32
+        return original_loader(name, **kwargs)
+
+    monkeypatch.setattr(torch.cuda, "set_device", lambda rank: None)
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", lambda name: SimpleNamespace(pad_token_id=0))
+    monkeypatch.setattr(AutoModelForCausalLM, "from_pretrained", cpu_loader)
+    restored, _ = _POLICY.load_policy_model(str(source), adapter=str(warmstart))
+    destination = tmp_path / "new-checkpoint"
+    restored.save_pretrained(destination)
+    assert json.loads((destination / "adapter_config.json").read_text())["base_model_name_or_path"] == str(source)
+
 _SPEC = importlib.util.spec_from_file_location(
     "dcc_train_runtime_tests", Path(__file__).resolve().parents[1] / "scripts/dcc_train.py"
 )

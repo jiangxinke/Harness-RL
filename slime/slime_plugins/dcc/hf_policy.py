@@ -198,6 +198,10 @@ def load_policy_model(model_name: str, *, adapter: str | None = None, trainable:
         report = quantization_report(model)
     if adapter:
         model = PeftModel.from_pretrained(model, adapter, is_trainable=trainable)
+        # A compatible adapter can warm-start a derived base. Persist the base
+        # actually loaded here, rather than the adapter's historical source.
+        for adapter_config in model.peft_config.values():
+            adapter_config.base_model_name_or_path = model_name
     elif trainable:
         model = get_peft_model(
             model,
