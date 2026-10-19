@@ -196,8 +196,14 @@ results are recorded in [dcc_experiment.md](dcc_experiment.md). This is
 separate from the seed-46 run and its historical eligibility floors.
 
 Fresh official generation started at `2026-10-19T10:41:11Z` with this same
-frozen adapter for both benchmarks; official scores, full-200 judging and the
-independent final audit remain pending.
+frozen adapter for both benchmarks. CUAD full-test aggregation is complete for
+all 4,182 questions (coverage 1.0): 4,180 completed, two reached `max_steps`
+and remain in the denominators, and none had infrastructure failures. Its AUPR
+is 23.1103% and micro F1 is 42.1842%; the independent final tensor, optimizer
+and scoring audit remains pending. See [dcc_experiment.md](dcc_experiment.md)
+for the other metrics and artifact record. WideSearch generation is still
+running; full-200 judging and its scores remain pending.
+
 Earlier official-test results have already been seen; this repeat is not an
 untouched first-use holdout. Old and new official scores must not choose
 experts, hyperparameters or the checkpoint. Keep the unchanged custom-v9 judge

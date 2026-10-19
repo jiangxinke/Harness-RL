@@ -1,6 +1,6 @@
 # DCC experiment
 
-## Strict-30B derivative: training and validation complete, official evaluation pending
+## Strict-30B derivative: training and validation complete, official evaluation in progress
 
 `DCC-Qwen3MoE-29.85B-125E-traincal` physically retains 125 of 128 experts in
 each of the original model's 48 layers, with eight experts selected per token.
@@ -76,17 +76,23 @@ failure (11/12 raw header checks): `calibration_passed=false`,
 provenance and metric reconstruction, not every semantic judgment.
 
 Training and validation selection are complete. Fresh official generation
-started at `2026-10-19T10:41:11Z`; no new official-test score is available yet.
-Official generation completion, full-200 judging and the independent final
-audit remain pending.
+started at `2026-10-19T10:41:11Z`. CUAD full-test aggregation is complete
+(`complete=true`) for all **4,182 questions**, with coverage 1.0: 4,180 completed,
+two reached `max_steps`, and none had infrastructure failures. Both turn-budget
+failures remain in the metric denominators. CUAD micro precision is 55.4187%
+and micro recall is 34.0522%; AUPR and micro F1 are below. These are aggregated
+scores awaiting the independent final tensor, optimizer and scoring audit.
+WideSearch generation is still running; full-200 judging and its scores remain
+pending.
 Artifacts use a separate `dcc-run/strict30b-v1/` subtree, including
-`training-complete.json`, `validate-summary.json` and `selection.json`.
+`training-complete.json`, `validate-summary.json`, `selection.json` and
+`cuad-final-selected/scores_strict.json`.
 
-| Strict-30B derivative test | Questions | Status |
+| Strict-30B derivative test | Questions | Score / status |
 | --- | ---: | --- |
-| CUAD AUPR / micro F1 | 4,182 | Pending |
-| WideSearch custom-v9 macro row / item F1 | 200 | Pending |
-| WideSearch strict-proxy macro row / item F1 | 200 | Pending |
+| CUAD AUPR / micro F1 | 4,182 | 23.1103% / 42.1842%; independent audit pending |
+| WideSearch custom-v9 macro row / item F1 | 200 | Generation running; judging pending |
+| WideSearch strict-proxy macro row / item F1 | 200 | Generation running; scores pending |
 
 ## Historical original 128-expert results
 
