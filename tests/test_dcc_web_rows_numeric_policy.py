@@ -238,7 +238,7 @@ def test_literal_spans_repeat_telemetry_and_v2_ledger_all_use_original_tools():
         (r["start"], r["end"]) for r in first["row_view"]["records"]}
     extra = [w for w in snapshot["recent_windows"] if w.get("kind") == "literal-record-window"]
     assert extra and all(w["selector_version"] == new.WEB_CACHED_ROWS_VERSION for w in extra)
-    assert first["row_view"]["version"] == new.WEB_CACHED_ROWS_VERSION == "cached-literal-record-windows-v2"
+    assert first["row_view"]["version"] == new.WEB_CACHED_ROWS_VERSION == "cached-literal-record-windows-v3"
 
 
 def test_original_entire_observation_14k_budget_paginates_without_marking_hidden_rows():

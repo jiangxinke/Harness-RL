@@ -23,6 +23,35 @@ BOM retain correct source character offsets. Width mismatches, duplicate column
 names and malformed records reject the entire selection, including when the bad
 record follows a requested first page. Unknown columns fail explicitly.
 
+Cached-row protocol v3 adds an explicit per-selection CSV/TSV option,
+`csv_trailing_empty_columns`. Its default `"reject"` retains the strict behavior
+above. A source whose header ends in unnamed padding columns may be selected
+with `"verified_empty_padding"`:
+
+```json
+{"tool":"fetch_url","arguments":{"url":"https://example.org/export.csv","select_rows":{"format":"csv","columns":["code","name"],"csv_trailing_empty_columns":"verified_empty_padding"}}}
+```
+
+This option applies to CSV and TSV, including explicitly selected worksheet or
+archive sections. Only a trailing suffix of header cells equal to the empty
+string may be excluded from column mapping. Before predicate filtering, the
+`after` cursor or any returned page, the entire bounded table must have the
+header's original full width and every excluded cell must equal the empty
+string. A quoted empty CSV cell is empty; a space, `"null"`, `"0"` or any other
+nonempty text is not. Empty names inside the content header, duplicate content
+names, all-empty headers, ragged records and later malformed records still
+reject the whole selection. No columns are guessed, renamed, trimmed or filled.
+The original header and row text, delimiters, numeric spelling and offsets
+remain intact. The policy field in the returned view is navigation metadata,
+not extra row evidence. JSON requests explicitly carrying this option fail.
+All original parser limits, observation budgets and read-provenance rules apply.
+
+Enabled v3 manifests, inference runtime and paired protocol declarations record
+the same complete supported padding policy configuration. Missing or old
+enabled configurations cannot resume as v3. Disabled configuration and ordinary
+tool schemas retain their previous serialized fields. Existing frozen v1/v2
+sources keep their original identities and are not relabeled or rewritten.
+
 JSON requires an array at the explicit RFC 6901 `path`; the empty pointer selects
 a root array. Each selected column or predicate column is a pointer relative to
 a record. Array indices must be explicit nonnegative decimal indices without
@@ -97,6 +126,8 @@ Synthetic parser, tool, decoder, actual episode, runtime/resume and paired tests
 live in `tests/test_dcc_web_rows.py`. They require no live source or benchmark
 answers. These tests establish implementation behavior, not a benchmark score or
 an improvement over another harness.
+
+Additional padding controls live in `tests/test_dcc_web_rows_padding.py`.
 
 
 Cached-row protocol v2 adds optional `select_rows.numeric_source_policy`:

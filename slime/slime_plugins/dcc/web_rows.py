@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
-WEB_CACHED_ROWS_VERSION = "cached-literal-record-windows-v2"
+WEB_CACHED_ROWS_VERSION = "cached-literal-record-windows-v3"
 WEB_CACHED_ROWS_LIMITS = {"source_chars": 5_000_000, "records": 100_000, "nodes": 300_000,
                           "depth": 32, "columns": 32, "predicates": 8, "returned_rows": 64}
 WEB_CACHED_ROWS_INSTRUCTIONS = (
@@ -22,6 +22,12 @@ WEB_CACHED_ROWS_INSTRUCTIONS = (
     '(csv, tsv or json), exact columns, optional where predicates, limit (1..64), and after '
     '(zero-based data-record cursor). CSV/TSV use an explicit zero-based header_row (default 0), '
     'exact header names and optional exact worksheet or archive_member from observed metadata. '
+    'CSV/TSV reject empty header names by default. Explicitly set '
+    'csv_trailing_empty_columns=verified_empty_padding only to verify and exclude a suffix of '
+    'empty header names whose cells are strictly empty in every cached data record. The full '
+    'bounded table must retain the original record width; inner empty names, duplicate names, '
+    'nonempty padding cells and malformed records still fail. Spaces, null and 0 are not empty. '
+    'Literal source text and offsets, including the padding, are preserved. '
     'JSON uses an explicit RFC 6901 path to an array (default empty pointer for a root array), '
     'and columns/predicate column are RFC 6901 pointers relative to each record, e.g. /name. '
     'Predicates are ANDed: eq/ne compare exact strings, booleans or null without coercion; '
@@ -48,12 +54,19 @@ WEB_CACHED_ROWS_INSTRUCTIONS = (
 def web_cached_rows_configuration(enabled=False):
     if type(enabled) is not bool:
         raise ValueError("web_cached_rows must be a boolean")
-    return {"enabled": enabled, "version": WEB_CACHED_ROWS_VERSION if enabled else None,
+    configuration = {"enabled": enabled, "version": WEB_CACHED_ROWS_VERSION if enabled else None,
             "scope": "structured-web-evaluation" if enabled else None,
             "cache": "episode-downloaded-extracted-text-only" if enabled else None,
             "output": "literal-record-windows-with-cell-provenance" if enabled else None,
             "budget": "original-max-page-chars-entire-json-observation" if enabled else None,
             "limits": dict(WEB_CACHED_ROWS_LIMITS) if enabled else None}
+    if enabled:
+        configuration["csv_trailing_empty_columns"] = {
+            "default": "reject", "supported": ["reject", "verified_empty_padding"],
+            "formats": ["csv", "tsv"],
+            "validation": "full-bounded-table-original-width-and-strict-empty-tail-cells",
+            "source_text_and_offsets": "unchanged"}
+    return configuration
 
 
 def validate_web_cached_rows_records(records):
@@ -89,6 +102,7 @@ def select_rows_schema():
         }, "required": ["column", "op"], "additionalProperties": False}},
         "path": {"type": "string"}, "worksheet": {"type": "string"},
         "numeric_source_policy": {"type": "string", "enum": ["error", "exclude_uncomparable"]},
+        "csv_trailing_empty_columns": {"type": "string", "enum": ["reject", "verified_empty_padding"]},
         "archive_member": {"type": "string"}, "header_row": {"type": "integer", "minimum": 0},
         "after": {"type": "integer", "minimum": 0},
         "limit": {"type": "integer", "minimum": 1, "maximum": 64},
@@ -125,6 +139,10 @@ def _request(request):
     if (not isinstance(numeric_source_policy, str)
             or numeric_source_policy not in {"error", "exclude_uncomparable"}):
         raise ValueError("numeric_source_policy must be error or exclude_uncomparable")
+    trailing_empty_columns = request.get("csv_trailing_empty_columns", "reject")
+    if (not isinstance(trailing_empty_columns, str)
+            or trailing_empty_columns not in {"reject", "verified_empty_padding"}):
+        raise ValueError("csv_trailing_empty_columns must be reject or verified_empty_padding")
     if (not isinstance(columns, list) or not 1 <= len(columns) <= WEB_CACHED_ROWS_LIMITS["columns"]
             or any(not safe_string(c) or len(c) > 2048 for c in columns) or len(set(columns)) != len(columns)):
         raise ValueError("select_rows requires distinct exact columns within the column limit")
@@ -138,6 +156,8 @@ def _request(request):
         if key in request and (not safe_string(request[key]) or not request[key] or len(request[key]) > 1024):
             raise ValueError(f"select_rows {key} must be an exact nonempty observed name")
     if kind == "json":
+        if "csv_trailing_empty_columns" in request:
+            raise ValueError("JSON selection does not accept a CSV/TSV header padding policy")
         if "header_row" in request or "worksheet" in request:
             raise ValueError("JSON selection does not accept a CSV header or worksheet")
         if not safe_string(request.get("path", "")):
@@ -334,10 +354,10 @@ class _Lines:
         return line
 
 
-def _csv_records(text, kind, header_index):
+def _csv_records(text, kind, header_index, *, trailing_empty_columns="reject"):
     lines = _Lines(text)
     reader = csv.reader(lines, delimiter="," if kind == "csv" else "\t", strict=True)
-    header, records, header_span = None, [], None
+    header, records, header_span, source_width = None, [], None, None
     try:
         for index in range(WEB_CACHED_ROWS_LIMITS["records"] + header_index + 2):
             start = lines.stream.tell()
@@ -349,14 +369,23 @@ def _csv_records(text, kind, header_index):
             if index < header_index:
                 continue
             if index == header_index:
-                if not values or len(values) > 4096 or any(not c for c in values) or len(set(values)) != len(values):
+                source_width = len(values)
+                content_width = source_width
+                if trailing_empty_columns == "verified_empty_padding":
+                    while content_width and values[content_width - 1] == "":
+                        content_width -= 1
+                content_header = values[:content_width]
+                if (not content_header or source_width > 4096 or any(not c for c in content_header)
+                        or len(set(content_header)) != len(content_header)):
                     raise ValueError("CSV header must contain distinct nonempty exact column names")
-                header, header_span = values, (start, end)
+                header, header_span = content_header, (start, end)
             else:
                 if len(records) >= WEB_CACHED_ROWS_LIMITS["records"]:
                     raise ValueError("CSV source exceeds the bounded data-record limit")
-                if len(values) != len(header):
+                if len(values) != source_width:
                     raise ValueError("CSV record width differs from the explicit header; no cells were filled")
+                if any(value != "" for value in values[len(header):]):
+                    raise ValueError("CSV trailing empty header columns contain a nonempty data cell")
                 records.append((start, end, dict(zip(header, values))))
     except csv.Error as exc:
         raise ValueError("CSV source is malformed or exceeds the parser's field limit") from exc
@@ -434,7 +463,8 @@ def select_cached_rows(text, request, *, worksheets=(), archives=()):
                 value.update(start=base + node.start, end=base + node.end)
             return value
     else:
-        headers, span, rows = _csv_records(source, kind, request.get("header_row", 0))
+        headers, span, rows = _csv_records(source, kind, request.get("header_row", 0),
+                                         trailing_empty_columns=request.get("csv_trailing_empty_columns", "reject"))
         requested = set(columns) | {predicate["column"] for predicate in predicates}
         if requested - set(headers):
             raise ValueError("Requested exact CSV column is absent from the explicit header")
@@ -476,4 +506,6 @@ def select_cached_rows(text, request, *, worksheets=(), archives=()):
                                      "uncomparable_count": uncomparable_counts[index]}
                                     for index in range(len(predicates))],
                           "note": "Independent counts need not share a matching record. Uncomparable counts cover present numeric operands without an accepted finite decimal spelling; ranges are not interpreted, missing cells remain nonmatches. Counts are navigation metadata, not observed row evidence or remote completeness."})
+    if kind != "json" and request.get("csv_trailing_empty_columns") == "verified_empty_padding":
+        result["csv_trailing_empty_columns"] = "verified_empty_padding"
     return result
