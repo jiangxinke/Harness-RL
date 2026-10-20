@@ -39,8 +39,9 @@ def _inputs(dp_rank, short):
 def _serial_advantages(dp_rank, short):
     totals, responses, rewards, masks, values, logps, refs = _inputs(dp_rank, short)
     advantages = []
-    for reward, value, logp, ref in zip(rewards, values, logps, refs, strict=True):
-        token_rewards = -.2 * (logp - ref)
+    for reward, value, logp, ref, mask in zip(rewards, values, logps, refs, masks, strict=True):
+        # Only actor tokens contribute KL rewards before the serial GAE.
+        token_rewards = -.2 * (logp - ref) * mask
         token_rewards[-1] += reward
         result = torch.zeros_like(value)
         next_value, carry = value.new_zeros(()), value.new_zeros(())

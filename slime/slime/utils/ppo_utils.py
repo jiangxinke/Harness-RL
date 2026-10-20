@@ -125,6 +125,7 @@ def compute_opsm_mask(
     full_old_log_probs: list[torch.Tensor],
     advantages: list[torch.Tensor],
     loss_masks: list[torch.Tensor],
+    local_loss_masks: list[torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute Off-Policy Sequence Masking (OPSM) mask.
 
@@ -134,25 +135,32 @@ def compute_opsm_mask(
         full_old_log_probs: Old policy log-probs per sample.
         advantages: Advantage values per sample.
         loss_masks: Loss masks per sample.
+        local_loss_masks: Response-aligned actor masks for this CP rank.
+            Defaults to the full masks for callers without CP slicing.
 
     Returns:
         Tuple of `(opsm_mask, opsm_clipfrac)` where `opsm_mask` is a
         concatenated tensor of per-token masks and
-        `opsm_clipfrac` is the count of masked sequences.
+        `opsm_clipfrac` sums per-sample fractions of valid actor tokens
+        masked by this rank. With sequence-constant advantage signs, its
+        CP sum counts rejected samples; sample/fanout weighting is unchanged.
     """
     opsm_mask_list = []
     device = advantages[0].device
     opsm_clipfrac = torch.tensor(0.0, device=device)
+    local_loss_masks = loss_masks if local_loss_masks is None else local_loss_masks
 
-    for full_log_prob, full_old_log_prob, advantage, loss_mask in zip(
-        full_log_probs, full_old_log_probs, advantages, loss_masks, strict=False
+    for full_log_prob, full_old_log_prob, advantage, loss_mask, local_loss_mask in zip(
+        full_log_probs, full_old_log_probs, advantages, loss_masks, local_loss_masks, strict=False
     ):
         # Calculate sequence-level KL
         seq_kl = ((full_old_log_prob - full_log_prob) * loss_mask).sum() / torch.clamp_min(loss_mask.sum(), 1)
 
         # Create mask: 0 if (advantage < 0 and seq_kl > delta), else 1
         mask = ((advantage < 0) & (seq_kl > args.opsm_delta)).float()
-        opsm_clipfrac += mask.sum() / torch.clamp_min(loss_mask.sum(), 1)
+        if mask.shape != local_loss_mask.shape:
+            raise ValueError("OPSM metrics require a response-aligned local loss mask")
+        opsm_clipfrac += (mask * local_loss_mask).sum() / torch.clamp_min(loss_mask.sum(), 1)
 
         opsm_mask_list.append(1 - mask)
 
