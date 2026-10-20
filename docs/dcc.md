@@ -9,9 +9,10 @@ The optional [Web research checkpoints](dcc_web_research.md) add public-column
 and remaining-turn guidance to structured Web evaluation. They are disabled by
 default and preserve the existing evidence rules and generation budgets.
 
-For native Thinking evaluation, [the native base harness candidates](dcc_native_base_harness.md)
-record the portable CUAD configuration and unselected WideSearch presets. This
-draft does not yet bind a selected Web harness.
+For native Thinking evaluation, [the native reference harness](dcc_native_base_harness.md)
+records the selected `cuad_native16k` and `web_steps20_32k` presets. Web reference
+selection used 34 independently authored development tasks; the 200 released
+WideSearch tasks form a separate TEST set.
 
 ## Data boundaries
 
