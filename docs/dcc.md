@@ -161,6 +161,14 @@ reported separately. Add `--base-url` and `--model` to generate missing episodes
 using an OpenAI-compatible endpoint. Generation resumes from existing task IDs.
 Use the local Hugging Face policy for training so exact token IDs are retained.
 
+`scripts/dcc_train.py` provides ordinary Hugging Face SFT/GRPO with thinking
+disabled. It does not implement the native Thinking protocol documented in
+[dcc-native-thinking.md](dcc-native-thinking.md). GRPO requires zero dropout in
+the loaded base and adapter: rollouts and old logprobs use evaluation mode,
+whereas current logprobs use training mode. The trainer rejects incompatible
+dropout before creating the optimizer. Pure SFT (`--rl-steps 0`) retains support
+for nonzero dropout.
+
 Store generated data, trajectories, logs, checkpoints, and reports in the run's
 externally configured artifact directory. Runtime paths, credentials, hostnames,
 and hardware identifiers must stay out of committed configuration and reports.

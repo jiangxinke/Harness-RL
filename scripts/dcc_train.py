@@ -38,6 +38,44 @@ def grpo_loss(logprobs, old_logprobs, advantage: float, *, clip: float = 0.2):
     ).mean()
 
 
+def validate_grpo_dropout(model, *, rl_steps: int):
+    """Require the same deterministic policy in eval and train mode for GRPO.
+
+    Imported adapters retain their dropout configuration. SFT can use dropout,
+    but this trainer samples and computes old scores in eval mode, so nonzero
+    dropout during current-score replay would invalidate the on-policy ratio.
+    Qwen attention uses functional dropout rather than an nn.Dropout module.
+    """
+    if rl_steps <= 0:
+        return
+    dropout_types = (
+        torch.nn.Dropout,
+        torch.nn.Dropout1d,
+        torch.nn.Dropout2d,
+        torch.nn.Dropout3d,
+        torch.nn.AlphaDropout,
+        torch.nn.FeatureAlphaDropout,
+    )
+    incompatible = []
+    for name, module in model.named_modules():
+        name = name or "<root>"
+        if isinstance(module, dropout_types) and module.p != 0:
+            incompatible.append(f"{name} (p={module.p})")
+        attention_dropout = getattr(module, "attention_dropout", 0.0)
+        if isinstance(attention_dropout, (int, float)) and attention_dropout != 0:
+            incompatible.append(f"{name}.attention_dropout={attention_dropout}")
+    if incompatible:
+        details = "; ".join(incompatible[:8])
+        if len(incompatible) > 8:
+            details += f"; and {len(incompatible) - 8} more"
+        raise ValueError(
+            "On-policy GRPO requires zero dropout because rollouts/old logprobs "
+            "use eval mode and current logprobs use train mode. Nonzero dropout: "
+            f"{details}. Use a dropout-free base and adapter, or --rl-steps 0 "
+            "for SFT-only training."
+        )
+
+
 def average_gradients(parameters, world: int):
     if world == 1:
         return
@@ -127,6 +165,7 @@ async def train(args):
         lora_rank=args.lora_rank,
         quantization=args.quantization,
     )
+    validate_grpo_dropout(model, rl_steps=args.rl_steps)
     if hasattr(model, "dcc_quantization_report"):
         record(event="quantization", **model.dcc_quantization_report)
     parameters = [
