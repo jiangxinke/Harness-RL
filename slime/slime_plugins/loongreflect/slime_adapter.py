@@ -365,6 +365,7 @@ async def generate(
         answer_validator=LabelAnswerValidator(sample.label),
         max_answer_retries=getattr(args, "reflect_max_answer_retries", 3),
         allow_reflect=(getattr(args, "reflect_action_protocol", "full") == "full"),
+        require_post_search_reflection=getattr(args, "reflect_require_post_search_reflection", False),
     )
     try:
         tree = await asyncio.to_thread(harness.run, sample.prompt)

@@ -128,3 +128,33 @@ Four independent CUDA runs passed all 44 integration checks in total, including
 the real loss/optimizer tests in all four training modes. These are small-model
 checks; they do not establish full-scale Megatron/SGLang training correctness
 or benchmark quality.
+
+
+### Optional post-search reflection stage for training smoke runs
+
+The training harness supports an optional `reflect_require_post_search_reflection`
+boolean in its custom YAML configuration. Its default is `false`; existing full
+and search/answer behavior is unchanged. `train_loongreflect.py --require-post-search-reflection` enables it, and
+`--no-require-post-search-reflection` overrides an enabled YAML setting. It
+requires `reflect_action_protocol: full`; conflicting settings fail validation.
+This switch applies to training rollouts, not the separate benchmark evaluation
+entry point.
+
+When enabled, a successful model search with nonempty evidence establishes a
+stage on the active tree path and immediately requests a separate reflection
+turn. Further searches remain available; while the stage is pending, every new
+search observation repeats the request. If the model answers before reflecting on that
+evidence, the harness requests a separate complete model-generated reflect
+action, followed by a fresh answer in a later model turn. It does not write a
+reflection, reveal a reference answer, validate the deferred answer, or replay it
+afterward. Empty search output and the retriever's fixed no-results message do
+not establish evidence. Another successful search requires reflection on that
+new evidence. Reflections from the harness, validator, or rolled-back branches
+do not satisfy the stage. The normal model-turn and token limits still apply;
+a model that never complies terminates without an accepted answer.
+
+The switch does not change correctness rewards, sampled token/log-probability
+accounting, reflection masks, distillation coefficients, optimizer/EMA checks,
+or strict smoke acceptance. Positive reflection training mass still requires a
+complete reflection actually sampled by the model. This prospective option is
+not evidence that an earlier run trained a reflection objective successfully.

@@ -65,6 +65,14 @@ def build_command(args: argparse.Namespace) -> tuple[list[str], dict]:
     if not isinstance(plugin, dict) or plugin.get("reflect_self_distill") is not True:
         raise ValueError("config must enable reflect_self_distill")
     plugin["reflect_train_mode"] = args.mode or plugin.get("reflect_train_mode", "joint")
+    stage_override = getattr(args, "require_post_search_reflection", None)
+    if stage_override is not None:
+        plugin["reflect_require_post_search_reflection"] = stage_override
+    stage_enabled = plugin.get("reflect_require_post_search_reflection", False)
+    if type(stage_enabled) is not bool:
+        raise ValueError("reflect_require_post_search_reflection must be a boolean")
+    if stage_enabled and plugin.get("reflect_action_protocol", "full") != "full":
+        raise ValueError("post-search reflection requires the full action protocol")
     if args.fast_updates is not None:
         plugin["reflect_fast_updates_per_step"] = args.fast_updates
     if int(plugin.get("reflect_fast_updates_per_step", 3)) < 1:
@@ -144,6 +152,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sequence-length", type=int, default=16384)
     parser.add_argument("--max-response-tokens", type=int, default=8192)
     parser.add_argument("--fast-updates", type=int)
+    parser.add_argument(
+        "--require-post-search-reflection",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Optional training-only full-protocol stage: require a real model reflection after search evidence before accepting an answer",
+    )
     parser.add_argument("--learning-rate", type=float, default=1e-6)
     parser.add_argument("--save-interval", type=int, default=25)
     parser.add_argument("--search-url")

@@ -13,6 +13,13 @@ class ProtocolError(ValueError):
 
 
 PROTOCOL_REPAIR_GUIDANCE = "Produce exactly one permitted action. Do not generate an observation, analysis, or text outside the action tags."
+POST_SEARCH_REFLECTION_GUIDANCE = (
+    "Your next model turn must independently emit one complete, nonempty reflect "
+    "action as its only public action. Use this separate model turn to assess the "
+    "observed search evidence and remaining uncertainty without stating the final "
+    "answer. After reflecting, you may search again if more evidence is needed, "
+    "or answer in a later model turn."
+)
 SALVAGED_SEARCH_GUIDANCE = "Only the first valid search action was executed. Observations are added only by the harness; do not predict search results or continue after </search>."
 
 
@@ -217,8 +224,14 @@ class Harness:
         answer_validator: AnswerValidator | None = None,
         max_answer_retries: int = 2,
         allow_reflect: bool = True,
+        require_post_search_reflection: bool = False,
         on_checkpoint: Callable[[RolloutTree], None] | None = None,
     ) -> None:
+        if type(require_post_search_reflection) is not bool:
+            raise ValueError("require_post_search_reflection must be a boolean")
+        if require_post_search_reflection and not allow_reflect:
+            raise ValueError("post-search reflection requires the full action protocol")
+        self.require_post_search_reflection = require_post_search_reflection
         self.actor = actor
         self.search = search
         self.backtrack_judge = backtrack_judge
@@ -348,7 +361,8 @@ class Harness:
                         self._terminate(tree, active, "search_error", search_exc)
                         self._emit(tree)
                         return tree
-                    active = tree.append(active, "observation", observation)
+                    active = tree.append(active, "observation", observation, self._search_observation_metadata(observation))
+                    active = self._request_post_search_reflection(tree, active)
                     consecutive_protocol_errors = 0
                     if self._output_limit_reached(tree, active):
                         self._emit(tree)
@@ -400,7 +414,8 @@ class Harness:
                     self._terminate(tree, active, "search_error", exc)
                     self._emit(tree)
                     return tree
-                active = tree.append(active, "observation", observation)
+                active = tree.append(active, "observation", observation, self._search_observation_metadata(observation))
+                active = self._request_post_search_reflection(tree, active)
                 if self._output_limit_reached(tree, active):
                     self._emit(tree)
                     return tree
@@ -408,6 +423,16 @@ class Harness:
                 continue
 
             if action.kind is ActionKind.ANSWER:
+                reflection_request = self._request_post_search_reflection(tree, active, deferred_answer=action.text)
+                if reflection_request != active:
+                    # Keep the real sampled turn and its token metadata intact.
+                    # The model must independently reflect, then answer again.
+                    active = reflection_request
+                    if self._output_limit_reached(tree, active):
+                        self._emit(tree)
+                        return tree
+                    self._emit(tree)
+                    continue
                 validation = self.answer_validator.validate(query=tree.query, answer=action.text) if self.answer_validator is not None else AnswerValidation(True)
                 answer_id = tree.append(
                     active,
@@ -470,7 +495,8 @@ class Harness:
                 self._emit(tree)
                 continue
 
-            active = tree.append(active, "reflect", action.text)
+            reflection_metadata = {"source": "model_action"} if self.require_post_search_reflection else None
+            active = tree.append(active, "reflect", action.text, reflection_metadata)
             if action.backtrack is None:
                 if self._output_limit_reached(tree, active):
                     self._emit(tree)
@@ -525,6 +551,47 @@ class Harness:
         self._terminate(tree, active, "max_steps_reached")
         self._emit(tree)
         return tree
+
+    def _request_post_search_reflection(
+        self, tree: RolloutTree, active: int, *, deferred_answer: str | None = None,
+    ) -> int:
+        required_observation = self._reflection_required_after(tree, active)
+        if required_observation is None:
+            return active
+        metadata = {
+            "source": "post_search_reflection",
+            "required_observation_id": required_observation,
+        }
+        if deferred_answer is not None:
+            # Audit only: the candidate is neither rendered nor sent to the
+            # validator, and cannot be automatically accepted after reflection.
+            metadata["deferred_model_answer"] = deferred_answer
+        return tree.append(active, "update", POST_SEARCH_REFLECTION_GUIDANCE, metadata)
+
+    def _search_observation_metadata(self, observation: str) -> dict[str, Any] | None:
+        if not self.require_post_search_reflection:
+            return None
+        # HttpSearch returns this fixed sentinel when there are no documents.
+        # Only successful, nonempty tool output establishes an evidence stage.
+        evidence = bool(observation.strip()) and observation.strip() != "No search results found."
+        return {"source": "search_tool", "has_evidence": evidence}
+
+    def _reflection_required_after(self, tree: RolloutTree, active: int) -> int | None:
+        if not self.require_post_search_reflection:
+            return None
+        pending = None
+        # Reconstruct from the actual active path for checkpoint recovery and
+        # backtracking. Failed sibling branches and environment reflections do
+        # not satisfy the model's independent post-evidence reflection stage.
+        for node_id in tree.path(active):
+            node = tree.nodes[node_id]
+            if (node.kind == "observation" and node.metadata.get("source") == "search_tool"
+                    and node.metadata.get("has_evidence") is True):
+                pending = node_id
+            elif (node.kind == "reflect" and node.metadata.get("source") == "model_action"
+                    and node.parent is not None and tree.nodes[node.parent].kind == "think"):
+                pending = None
+        return pending
 
     @staticmethod
     def _checkpoints_on_path(tree: RolloutTree, node_id: int) -> list[int]:
