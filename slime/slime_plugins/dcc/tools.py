@@ -691,6 +691,10 @@ class WebTools:
         query = str(query).strip()[:1000]
         if not query:
             return {"error": "query must be nonempty"}
+        from .search_query import prepare_search_query
+
+        original_query = query
+        query, scope = prepare_search_query(query)
         count = max(1, min(int(count), 10))
         async with self._semaphore:
             if self.backend == "public_web":
@@ -709,6 +713,11 @@ class WebTools:
             else:
                 hits = await asyncio.to_thread(self._search, query, count)
                 information = {"results": hits, "backend": self.backend, "search_scope": "web", "fallback_reason": None}
+        if scope is not None:
+            information["results"] = scope.filter(information["results"])
+            information["query_scope"] = scope.metadata()
+        if query != original_query:
+            information["original_query"] = original_query
         for hit in information["results"]:
             self.sources[hit["url"]] = hit
         return {"query": query, "configured_backend": self.backend, **information}

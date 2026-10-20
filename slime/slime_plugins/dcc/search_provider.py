@@ -11,6 +11,8 @@ from collections import OrderedDict
 from collections.abc import Callable
 from typing import Any
 
+from .search_query import prepare_search_query
+
 _CACHE: OrderedDict[tuple[str, str, int], tuple[float, list[dict[str, str]]]] = OrderedDict()
 _CACHE_LOCK = threading.Lock()
 _DDG_LOCK = threading.Lock()
@@ -135,14 +137,20 @@ def _duckduckgo_search(query: str, count: int, search: Callable[[], list[dict[st
 def search_with_fallback(query: str, count: int, search: Callable[[], list[dict[str, str]]]) -> dict[str, Any]:
     from .tools import InfrastructureError
 
+    query, scope = prepare_search_query(query)
     try:
         hits = _duckduckgo_search(query, count, search)
+        if scope is not None:
+            hits = scope.filter(hits)
         if hits:
             return {"results": hits, "backend": "duckduckgo_lite", "search_scope": "web", "fallback_reason": None}
         reason = "DuckDuckGo returned no search results"
     except InfrastructureError as exc:
         reason = str(exc)
-    return {"results": wikipedia_search(query, count), "backend": "wikipedia", "search_scope": "encyclopedia", "fallback_reason": reason, "coverage_note": "This is encyclopedia search, not a general web index. Adjust queries or use a configured web-search API for broader coverage."}
+    hits = wikipedia_search(query, count)
+    if scope is not None:
+        hits = scope.filter(hits)
+    return {"results": hits, "backend": "wikipedia", "search_scope": "encyclopedia", "fallback_reason": reason, "coverage_note": "This is encyclopedia search, not a general web index. Adjust queries or use a configured web-search API for broader coverage."}
 
 
 def _parse_public_results(raw: str, backend: str, count: int) -> list[dict[str, str]]:
@@ -247,6 +255,7 @@ def public_web_search(query: str, count: int, search: Callable[[], list[dict[str
     """Try general web indexes before an explicitly marked encyclopedia search."""
     from .tools import InfrastructureError
 
+    query, scope = prepare_search_query(query)
     providers: list[tuple[str, Callable[[], list[dict[str, str]]]]] = [("duckduckgo_lite", lambda: _duckduckgo_search(query, count, search))]
     # Seznam's public index returned relevant English results but no Chinese
     # coverage in live multi-query validation. Route Chinese to Baidu directly.
@@ -258,6 +267,8 @@ def public_web_search(query: str, count: int, search: Callable[[], list[dict[str
     for backend, provider in providers:
         try:
             hits = provider()
+            if scope is not None:
+                hits = scope.filter(hits)
         except InfrastructureError as exc:
             # Fixed labels avoid leaking response text, endpoint addresses or
             # client details into policy observations and experiment reports.
