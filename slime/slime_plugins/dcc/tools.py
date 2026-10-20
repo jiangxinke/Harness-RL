@@ -28,9 +28,20 @@ from html import unescape
 from html.parser import HTMLParser
 from typing import Any
 
-WEB_READER_VERSION = "bounded-http-explicit-size-v9"
+WEB_READER_VERSION = "bounded-http-csv-tsv-v10"
 
 _HTTP_FAILURE_CACHE_SIZE = 128
+
+# Generic attachments are sniffed only within these local work bounds. The HTTP
+# reader independently enforces the same byte ceiling before calling extraction.
+_DELIMITED_MAX_BYTES = 5_000_000
+_DELIMITED_MAX_TEXT_CHARS = 1_000_000
+_DELIMITED_MAX_ROWS = 10_000  # Includes the header.
+_DELIMITED_MAX_COLUMNS = 256
+_DELIMITED_MAX_CELLS = 100_000
+_DELIMITED_MAX_FIELD_CHARS = 32_768
+_DELIMITED_MAX_HEADER_CHARS = 128
+_DELIMITED_DELIMITERS = (",", "\t")
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _XLSX_MAX_MEMBERS = 1000
@@ -608,6 +619,128 @@ def _xlsx_page(content: bytes, *, sections: list[dict[str, Any]] | None = None) 
         raise ValueError("could not read this XLSX workbook") from exc
 
 
+def _strict_delimited_shape(text: str, delimiter: str) -> bool:
+    """Bound both CSV syntax validation and subsequent csv.reader allocation.
+
+    Four lexical states reject quotes inside unquoted fields, text following a
+    closing quote, and unterminated quoted fields. Escaped quotes and embedded
+    newlines are supported. No process-global csv.field_size_limit is changed:
+    page extraction can run concurrently in worker threads.
+    """
+    state = 0  # field start, unquoted, quoted, after quote
+    field_chars = rows = cells = 0
+    columns = 1
+    expected_columns = None
+    row_started = False
+    index = 0
+    while index < len(text):
+        character = text[index]
+        index += 1
+        if state == 2:
+            if character == '"':
+                state = 3
+            else:
+                field_chars += 1
+                if field_chars > _DELIMITED_MAX_FIELD_CHARS:
+                    return False
+            row_started = True
+            continue
+        if state == 3 and character == '"':
+            state = 2
+            field_chars += 1
+            if field_chars > _DELIMITED_MAX_FIELD_CHARS:
+                return False
+            continue
+        if character == delimiter:
+            columns += 1
+            if columns > _DELIMITED_MAX_COLUMNS:
+                return False
+            state = field_chars = 0
+            row_started = True
+            continue
+        if character in "\r\n":
+            if character == "\r" and index < len(text) and text[index] == "\n":
+                index += 1
+            rows += 1
+            cells += columns
+            if (rows > _DELIMITED_MAX_ROWS or cells > _DELIMITED_MAX_CELLS
+                    or columns < 2 or (expected_columns is not None and columns != expected_columns)):
+                return False
+            expected_columns = columns
+            state = field_chars = 0
+            columns = 1
+            row_started = False
+            continue
+        if state == 3:
+            return False
+        if character == '"':
+            if state != 0:
+                return False
+            state = 2
+        else:
+            state = 1
+            field_chars += 1
+            if field_chars > _DELIMITED_MAX_FIELD_CHARS:
+                return False
+        row_started = True
+    if state == 2:
+        return False
+    if row_started:
+        rows += 1
+        cells += columns
+        if (rows > _DELIMITED_MAX_ROWS or cells > _DELIMITED_MAX_CELLS
+                or columns < 2 or (expected_columns is not None and columns != expected_columns)):
+            return False
+    return rows >= 2
+
+
+def _bounded_delimited_text(content: bytes) -> str | None:
+    """Conservatively recognize bounded UTF-8 CSV/TSV generic attachments.
+
+    At most two linear syntax scans and two csv.reader passes inspect at most
+    _DELIMITED_MAX_TEXT_CHARS each; row/column/field/cell bounds are checked before
+    csv.reader allocates records. A header and at least one nonempty data record
+    are required. Ordinary prose and single-line downloads are not enough.
+    """
+    if len(content) > _DELIMITED_MAX_BYTES:
+        return None
+    try:
+        text = content.decode("utf-8-sig", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    # The returned source preserves its optional initial BOM, so count it too.
+    source_chars = len(text) + int(content.startswith(b"\xef\xbb\xbf"))
+    if (not text or source_chars > _DELIMITED_MAX_TEXT_CHARS
+            or any((ord(character) < 32 and character not in "\t\r\n")
+                   or 127 <= ord(character) <= 159 for character in text)):
+        return None
+    matches = 0
+    for delimiter in _DELIMITED_DELIMITERS:
+        if not _strict_delimited_shape(text, delimiter):
+            continue
+        try:
+            records = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter, strict=True)
+            header = next(records)
+            names = [name.strip() for name in header]
+            if (any(len(name) > _DELIMITED_MAX_HEADER_CHARS for name in header)
+                    or any(not name or name.endswith((".", "?", "!")) for name in names)
+                    or any(character in name for name in header for character in "\t\r\n")
+                    or len(set(name.casefold() for name in names)) != len(names)
+                    or not any(character.isalpha() for name in names for character in name)):
+                continue
+            has_data = False
+            for row in records:
+                if any(field.strip() for field in row):
+                    has_data = True
+            if not has_data:
+                continue
+        except (csv.Error, StopIteration):
+            continue
+        matches += 1
+    # Ambiguous delimiter interpretations do not establish a trustworthy table.
+    return content.decode("utf-8", errors="strict") if matches == 1 else None
+
+
 def extract_page(content: bytes, content_type: str, encoding: str = "utf-8", *,
                  xlsx_sections: list[dict[str, Any]] | None = None,
                  archive_sections: list[dict[str, Any]] | None = None) -> str:
@@ -646,7 +779,7 @@ def extract_page(content: bytes, content_type: str, encoding: str = "utf-8", *,
     if content_type.startswith("text/") or content_type in {"application/json", "application/xml"} or content_type.endswith(("+json", "+xml")):
         return text
     if content_type in {"application/octet-stream", "application/save-to-disk"}:
-        # Public data portals sometimes label their XML/JSON downloads as a
+        # Public data portals sometimes label XML/JSON/CSV/TSV downloads as a
         # generic attachment. Validate the format before exposing it as text;
         # decoding an arbitrary binary download is not a successful page read.
         stripped = text.lstrip("\ufeff \t\r\n")
@@ -664,6 +797,9 @@ def extract_page(content: bytes, content_type: str, encoding: str = "utf-8", *,
                 pass
             else:
                 return text
+        delimited = _bounded_delimited_text(content)
+        if delimited is not None:
+            return delimited
     raise ValueError(f"unsupported page content type: {content_type}")
 
 

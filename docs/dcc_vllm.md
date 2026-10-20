@@ -389,6 +389,18 @@ and [EngineCoreClient](https://github.com/vllm-project/vllm/blob/v0.11.2/vllm/v1
 
 The HTTP reader also accepts bounded ZIP text exports (CSV, TSV, XML, JSON and TXT). `archive_members` lists literal previews and source-wide character offsets; fetch the source URL at a readable member’s `start` before citing its contents. Downloads are limited to 5 MB, 128 members and one million decoded text characters. Archives are read in memory; encrypted, nested, unsafe, malformed or oversized archives fail without publishing evidence. XLSX keeps its existing reader. Legacy binary XLS is unsupported.
 
+Generic attachments (`application/octet-stream` or `application/save-to-disk`)
+also support validated UTF-8 CSV and TSV after the existing XML/JSON checks.
+The reader requires distinct, nonempty headers and consistent columns, and
+rejects malformed quoting, invalid UTF-8, control bytes and oversized tables.
+Numeric year headers are allowed alongside a named column. Successful reads
+preserve the original text and character offsets, including a UTF-8 BOM.
+Bounds are 5 MB, one million text characters including the BOM, 10,000 records,
+256 columns, 100,000 cells, 32,768 characters per field and 128 per header.
+Unsupported downloads fail without exposing partial evidence. This observation
+change uses reader version `bounded-http-csv-tsv-v10`; compare base and adapter
+with matching versions and preserve older runs' original reader provenance.
+
 Automatic reading seeks up to `--auto-read-sources` successful new pages after each search, while all successful, empty and failed reads count toward the unchanged four-attempt episode limit. Errors remain visible in the observation and grant no evidence. Sources exceeding the 5 MB download limit are rejected explicitly instead of returning an incomplete byte prefix.
 
 

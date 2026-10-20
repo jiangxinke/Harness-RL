@@ -72,12 +72,13 @@ def test_windows_errors_and_constructed_urls_remain_distinct_with_rereads_allowe
     ledger.observe_events(events)
     data = payload(ledger)
     assert data["frontier"][0]["state"] == "read"
-    assert data["recent_errors"] == [{"tool": "fetch_url", "url": URL, "error": "rate limited"}]
+    assert data["recent_errors"] == [{"tool": "fetch_url", "url": URL, "error": "Tool reported an error",
+                                      "http_status": None, "retryable": None}]
     assert next(w for w in data["recent_windows"] if w["url"] == api)["reads"] == 2
     assert {w["start"] for w in data["recent_windows"] if w["url"] == URL} == {0, 5}
     failed = WebNavigationLedger()
     failed.observe_events(events[:2])
-    assert payload(failed)["frontier"][0]["state"] == "unread"
+    assert payload(failed)["frontier"][0]["state"] == "failed"
     assert payload(failed)["recent_windows"] == []
 
 
