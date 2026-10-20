@@ -14,6 +14,21 @@ from typing import Any
 import torch
 
 
+def _has_valid_actor_tokens(sample: Any) -> bool:
+    """Infrastructure/removed/fully masked segments cannot set group statistics."""
+    if getattr(sample, "remove_sample", False):
+        return False
+    metadata = getattr(sample, "metadata", None) or {}
+    if metadata.get("infrastructure_failure"):
+        return False
+    loss_mask = getattr(sample, "loss_mask", None)
+    if loss_mask is not None:
+        return any(loss_mask)
+    response_length = getattr(sample, "response_length", None)
+    # Legacy/custom lightweight samples can omit the optional token fields.
+    return response_length is None or response_length > 0
+
+
 def normalize_group_rewards_by_rollout(
     samples: list[Any],
     raw_rewards: list[float],
@@ -27,6 +42,11 @@ def normalize_group_rewards_by_rollout(
     identifies one sampled episode.  Multiple Samples with the same pair are
     trajectory segments (for example Central plus sub-agent trajectories), so
     they receive the same normalized reward and do not change group statistics.
+
+    Removed segments, infrastructure failures and segments without actor loss
+    tokens receive zero and cannot affect the eligible episodes' statistics.
+    Eligibility is applied after group construction, preserving prompt and
+    legacy chunk boundaries. Normal model failures remain reward observations.
 
     Legacy/custom inputs without these ids retain the ordinary fixed-size
     grouping behavior: each Sample is treated as a distinct rollout and groups
@@ -48,12 +68,16 @@ def normalize_group_rewards_by_rollout(
     for positions in groups.values():
         rollout_positions: OrderedDict[object, list[int]] = OrderedDict()
         for position in positions:
+            if not _has_valid_actor_tokens(samples[position]):
+                continue
             rollout_id = getattr(samples[position], "rollout_id", None)
             # An absent rollout id means an ordinary one-Sample rollout.  Never
             # collapse all ``None`` ids into a single episode.
             rollout_key = ("rollout", rollout_id) if rollout_id is not None else ("sample", position)
             rollout_positions.setdefault(rollout_key, []).append(position)
 
+        if not rollout_positions:
+            continue
         episode_rewards: list[float] = []
         for rollout_key, sibling_positions in rollout_positions.items():
             sibling_rewards = [float(raw_rewards[position]) for position in sibling_positions]
