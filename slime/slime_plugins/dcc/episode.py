@@ -378,7 +378,7 @@ def final_turn_message(task: Task, evidence: _WebEvidence | None = None) -> dict
 
 
 class EpisodeRunner:
-    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900, retrieval_profile: RetrievalProfile | None = None, auto_read_sources: int = 0, retrieval_context_chars: int = 0, retrieval_max_context_chars: int = 16000, evaluation_temperature: float = 0.0, web_structured_final: bool = False, web_structured_actions: bool = False, web_explicit_review: bool = False, web_navigation_ledger: bool = False, web_research_checkpoints: bool = False, web_cached_rows: bool = False, cuad_structured_actions: bool = False) -> None:
+    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900, retrieval_profile: RetrievalProfile | None = None, auto_read_sources: int = 0, retrieval_context_chars: int = 0, retrieval_max_context_chars: int = 16000, evaluation_temperature: float = 0.0, web_structured_final: bool = False, web_structured_actions: bool = False, web_explicit_review: bool = False, web_navigation_ledger: bool = False, web_research_checkpoints: bool = False, web_data_discovery_guidance: bool = False, web_cached_rows: bool = False, cuad_structured_actions: bool = False) -> None:
         from .web_structured import web_structured_actions_configuration, web_structured_configuration
 
         from .cuad_structured import cuad_structured_configuration
@@ -396,6 +396,11 @@ class EpisodeRunner:
         self.web_navigation_ledger = web_navigation_configuration(web_navigation_ledger)["enabled"]
         if self.web_navigation_ledger and not (self.web_structured_actions and self.web_structured_final):
             raise ValueError("web_navigation_ledger requires structured Web actions and final")
+        from .web_data_discovery import web_data_discovery_configuration
+
+        self.web_data_discovery_guidance = web_data_discovery_configuration(web_data_discovery_guidance)["enabled"]
+        if self.web_data_discovery_guidance and not (self.web_structured_actions and self.web_structured_final):
+            raise ValueError("web_data_discovery_guidance requires structured Web actions and final")
         from .web_research import web_research_configuration
 
         self.web_research_checkpoints = web_research_configuration(web_research_checkpoints)["enabled"]
@@ -511,6 +516,10 @@ class EpisodeRunner:
 
             navigation = WebNavigationLedger()
             messages[0]["content"] += WEB_NAVIGATION_INSTRUCTIONS
+        if self.web_data_discovery_guidance and evaluation and task.benchmark == "widesearch":
+            from .web_data_discovery import WEB_DATA_DISCOVERY_GUIDANCE
+
+            messages[0]["content"] += WEB_DATA_DISCOVERY_GUIDANCE
         steps: list[PolicyCompletion] = []
         events: list[dict[str, Any]] = []
         document_tools = _document_tools(task.document) if task.benchmark == "cuad" else None

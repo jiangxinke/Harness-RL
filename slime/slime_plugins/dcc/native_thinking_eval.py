@@ -571,7 +571,11 @@ def validate_native_sidecars(output, saved, manifest, runtime, owners, tasks, *,
     from .episode import _WebEvidence, _answer_columns
     from .web_structured import web_action_schema, web_final_schema
     from .web_review import web_review_schema
+    from .web_data_discovery import (
+        validate_web_data_discovery_records, validate_web_data_discovery_messages,
+    )
 
+    discovery = validate_web_data_discovery_records((manifest, runtime or {}))
     config = manifest.get("native_thinking")
     history_configuration = validate_prompt_history_records((manifest, runtime or {}))
     runtime_config = (runtime or {}).get("native_thinking")
@@ -654,6 +658,8 @@ def validate_native_sidecars(output, saved, manifest, runtime, owners, tasks, *,
             traces[trace_id] = trace
     used = set()
     for task_id, record in saved.items():
+        if discovery["enabled"] and task_map[task_id].benchmark == "widesearch":
+            validate_web_data_discovery_messages(record.get("messages"))
         refs = record.get("native_thinking_traces")
         steps = record.get("steps", [])
         if not isinstance(refs, list) or not isinstance(steps, list):

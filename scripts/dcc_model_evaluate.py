@@ -39,6 +39,10 @@ from slime_plugins.dcc.web_review import web_explicit_review_configuration
 from slime_plugins.dcc.web_navigation import web_navigation_configuration, validate_web_navigation_records
 from slime_plugins.dcc.web_rows import web_cached_rows_configuration, validate_web_cached_rows_records
 from slime_plugins.dcc.web_research import web_research_configuration, validate_web_research_records
+from slime_plugins.dcc.web_data_discovery import (
+    web_data_discovery_configuration, validate_web_data_discovery_records,
+    validate_web_data_discovery_messages,
+)
 from slime_plugins.dcc.web_structured import web_structured_actions_configuration, web_structured_configuration
 from slime_plugins.dcc.prompt_history import (
     add_prompt_history_arguments, prompt_history_from_arguments, validate_prompt_history_records,
@@ -138,6 +142,11 @@ def _score_predictions(output, tasks, *, require_ownership=False):
     history_configuration = validate_prompt_history_records((manifest, runtime or {}))
     validate_web_navigation_records((manifest, runtime or {}))
     validate_web_research_records((manifest, runtime or {}))
+    discovery = validate_web_data_discovery_records((manifest, runtime or {}))
+    if discovery["enabled"]:
+        for task in tasks:
+            if task.benchmark == "widesearch":
+                validate_web_data_discovery_messages(saved[task.id].get("messages"))
     validate_web_cached_rows_records((manifest, runtime or {}))
     review_records = (manifest, runtime or {})
     validate_web_whitespace_records(review_records)
@@ -372,6 +381,10 @@ async def _evaluate(args, *, browser_reader=None):
     navigation = web_navigation_configuration(navigation_ledger)
     if navigation_ledger and not (structured_final and structured_actions and backend == "vllm"):
         raise ValueError("--web-navigation-ledger requires --web-structured-final, --web-structured-actions and vLLM")
+    discovery_guidance = getattr(args, "web_data_discovery_guidance", False)
+    discovery = web_data_discovery_configuration(discovery_guidance)
+    if discovery_guidance and not (structured_final and structured_actions and backend == "vllm"):
+        raise ValueError("--web-data-discovery-guidance requires --web-structured-final, --web-structured-actions and vLLM")
     research_checkpoints = getattr(args, "web_research_checkpoints", False)
     research = web_research_configuration(research_checkpoints)
     if research_checkpoints and not (structured_final and structured_actions and backend == "vllm"):
@@ -489,6 +502,8 @@ async def _evaluate(args, *, browser_reader=None):
         manifest["web_navigation_ledger"] = navigation
     if research_checkpoints:
         manifest["web_research_checkpoints"] = research
+    if discovery_guidance:
+        manifest["web_data_discovery_guidance"] = discovery
     if cached_rows_enabled:
         manifest["web_cached_rows"] = cached_rows
     manifest["episode_prompt_version"] = EPISODE_PROMPT_VERSION
@@ -575,6 +590,7 @@ async def _evaluate(args, *, browser_reader=None):
         previous_runtime = _saved_runtime(output)
         if previous_runtime is not None:
             validate_web_research_records((manifest, previous_runtime))
+            validate_web_data_discovery_records((manifest, previous_runtime))
             validate_web_cached_rows_records((manifest, previous_runtime))
         _check_saved_adapter(args.adapter, previous_runtime)
         if previous_runtime is not None and previous_runtime.get("web_browser_reader") != browser_runtime:
@@ -596,6 +612,8 @@ async def _evaluate(args, *, browser_reader=None):
                     async_options["web_navigation_ledger"] = True
                 if research_checkpoints:
                     async_options["web_research_checkpoints"] = True
+                if discovery_guidance:
+                    async_options["web_data_discovery_guidance"] = True
                 if cached_rows_enabled:
                     async_options["web_cached_rows"] = True
                 if bounded_whitespace:
@@ -643,6 +661,7 @@ async def _evaluate(args, *, browser_reader=None):
                         raise ValueError("Adapter checkpoint changed while loading the policy")
                 provenance["adapter"] = identity
                 validate_web_research_records((manifest, provenance))
+                validate_web_data_discovery_records((manifest, provenance))
                 validate_web_cached_rows_records((manifest, provenance))
                 if previous_runtime is not None and provenance != previous_runtime:
                     raise ValueError("Inference runtime or adapter changed; use a new output directory")
@@ -679,6 +698,7 @@ async def _evaluate(args, *, browser_reader=None):
                 **({"web_explicit_review": True} if explicit_review else {}),
                 **({"web_navigation_ledger": True} if navigation_ledger else {}),
                 **({"web_research_checkpoints": True} if research_checkpoints else {}),
+                **({"web_data_discovery_guidance": True} if discovery_guidance else {}),
                 **({"web_cached_rows": True} if cached_rows_enabled else {}),
                 **({"web_tools_factory": lambda: WebTools(browser_reader=browser_reader)}
                    if browser_reader is not None else {}),
@@ -1056,6 +1076,8 @@ def main():
                         help="Add bounded navigation/read-window advice from observed Web metadata (requires structured actions/final and vLLM)")
     parser.add_argument("--web-research-checkpoints", action="store_true",
                         help="Add request-only public-column and remaining-turn research guidance (requires structured actions/final and vLLM)")
+    parser.add_argument("--web-data-discovery-guidance", action="store_true",
+                        help="Add generic source-discovery/API navigation instructions once (requires structured Web actions/final and vLLM)")
     parser.add_argument("--web-cached-rows", action="store_true",
                         help="Enable bounded literal-record selection over already downloaded sources (requires structured actions/final and vLLM)")
     parser.add_argument("--web-explicit-review", action="store_true",

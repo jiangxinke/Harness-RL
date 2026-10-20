@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from slime_plugins.dcc import PolicyCompletion, Task
+from slime_plugins.dcc import EpisodeRunner, PolicyCompletion, Task
 from slime_plugins.dcc.widesearch_metrics import ALIGNMENT_PROTOCOL, TABLE_INPUT_PROTOCOL
 
 
@@ -964,6 +964,9 @@ def test_episode_failure_waits_for_siblings_before_closing_and_preserves_error(m
     class Policy:
         provenance = {}
 
+        async def __call__(self, messages, **kwargs):
+            return PolicyCompletion('{"answer": []}', prompt_ids=[11], completion_ids=[12])
+
         async def close(self):
             assert not streams[0].closed
             events.append("policy_closed")
@@ -986,10 +989,12 @@ def test_episode_failure_waits_for_siblings_before_closing_and_preserves_error(m
                 await asyncio.sleep(0)
                 # An episode can finish while handling cancellation. Its
                 # prediction must be persisted before the stream is closed.
+                # Use the real result contract, including diagnostics fields.
+                result = await EpisodeRunner(max_steps=1, initial_chunks=0).run(
+                    task, policy, evaluation=True)
+                assert result.status == "completed"
                 events.append("sibling_finished")
-                return SimpleNamespace(status="completed", steps=[], to_dict=lambda **kwargs: {
-                    "task_id": task.id, "status": "completed", "answer": [],
-                })
+                return result
 
     original_open = Path.open
 
@@ -1013,7 +1018,10 @@ def test_episode_failure_waits_for_siblings_before_closing_and_preserves_error(m
     assert caught.value is failure
     assert events == ["sibling_cancelled", "sibling_finished", "policy_closed", "stream_closed"]
     assert streams[0].closed
-    assert json.loads((tmp_path / "predictions_rank0.jsonl").read_text())["task_id"] == "sibling"
+    saved = json.loads((tmp_path / "predictions_rank0.jsonl").read_text())
+    assert saved["task_id"] == "sibling" and saved["status"] == "completed"
+    assert saved["terminal_summary"]["reason"] == "completed"
+    assert saved["token_accounting"]["logical"] == {"prompt": 1, "completion": 1}
     assert not (tmp_path / "rank0.done").exists()
     if close_fails:
         assert any("policy cleanup failure" in note for note in failure.__notes__)

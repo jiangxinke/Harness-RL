@@ -33,6 +33,7 @@ from .web_review import web_explicit_review_configuration
 from .web_navigation import web_navigation_configuration
 from .web_rows import web_cached_rows_configuration
 from .web_research import web_research_configuration
+from .web_data_discovery import web_data_discovery_configuration
 from .web_review_decoder import (
     is_web_review_schema,
     preflight_web_review_decoder,
@@ -327,7 +328,7 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
                      seed=42, revision=None, tokenizer_revision=None, enforce_eager=False,
                      asynchronous=False, evaluation_sampling=None, web_structured_final=False,
                      web_structured_actions=False, web_explicit_review=False,
-                     web_bounded_whitespace=False, web_navigation_ledger=False, web_research_checkpoints=False, web_cached_rows=False,
+                     web_bounded_whitespace=False, web_navigation_ledger=False, web_research_checkpoints=False, web_data_discovery_guidance=False, web_cached_rows=False,
                      quantization="none", fp8_validation_dir=None):
     """Load BF16 or explicit FP8 vLLM inference without changing the HF trainer.
 
@@ -348,6 +349,9 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
     navigation = web_navigation_configuration(web_navigation_ledger)
     if web_navigation_ledger and not (web_structured_actions and web_structured_final):
         raise ValueError("web_navigation_ledger requires structured Web actions and final")
+    discovery = web_data_discovery_configuration(web_data_discovery_guidance)
+    if web_data_discovery_guidance and not (web_structured_actions and web_structured_final):
+        raise ValueError("web_data_discovery_guidance requires structured Web actions and final")
     research = web_research_configuration(web_research_checkpoints)
     if web_research_checkpoints and not (web_structured_actions and web_structured_final):
         raise ValueError("web_research_checkpoints requires structured Web actions and final")
@@ -481,6 +485,8 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
         provenance["web_navigation_ledger"] = navigation
     if web_research_checkpoints:
         provenance["web_research_checkpoints"] = research
+    if web_data_discovery_guidance:
+        provenance["web_data_discovery_guidance"] = discovery
     if web_cached_rows:
         provenance["web_cached_rows"] = cached_rows
     if asynchronous:
