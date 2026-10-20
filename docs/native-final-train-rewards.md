@@ -64,6 +64,21 @@ Empty predictions have grounding factor1: a negative empty/empty answer scores1,
 a positive empty answer scores0, and a negative false positive scores0.
 Confidence does not change the existing F1 calculation.
 
+A separate experiment can explicitly select
+`cuad-native-final-f1-verbatim-brier25-v2` in the CUAD collection manifest.
+It uses `F1 * grounding * (1 - 0.25 * mean((confidence - target)^2))`.
+Each predicted span's target is 1 exactly when the existing official CUAD
+span matcher matches a gold span, including its Parties substring rule.
+Empty predictions have zero Brier penalty. The factor remains in [0.75, 1],
+so zero-reward answers stay zero and negative empty answers keep reward1.
+The audit records the original reward, Brier value and applied factor.
+This provides confidence-sensitive TRAIN preferences; it is not the global
+benchmark AUPR and does not establish a quality improvement. The default
+version and both benchmark evaluators are unchanged. Freeze a new reward
+manifest and declare the actual scorer source when comparing versions;
+never replace an ongoing experiment's reward receipts. Pass the same explicit
+version to DPO, whose loader rejects receipts from a different reward version.
+
 Web replays actual historical search/fetch observations into the existing
 `_WebEvidence` guard. A guard rejection scores0 without repairing the answer.
 Otherwise the reward is `0.75 * f1_by_row + 0.25 * f1_by_item` from the existing

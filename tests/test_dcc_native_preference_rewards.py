@@ -15,6 +15,7 @@ import dcc_score_native_preferences as S
 import dcc_native_dpo_train as TRAIN
 from slime_plugins.dcc.data import Task
 from slime_plugins.dcc.episode import _WebEvidence
+from slime_plugins.dcc.metrics import evaluate_cuad
 
 _SPEC = importlib.util.spec_from_file_location("reward_g4_fixture", Path(__file__).with_name("test_dcc_final_preferences.py"))
 F = importlib.util.module_from_spec(_SPEC); _SPEC.loader.exec_module(F)
@@ -209,6 +210,79 @@ def test_cuad_original_f1_grounding_and_negative_empty_rules(gold, answer, expec
     before = deepcopy(answer)
     reward, _ = S.cuad_reward(task, {"gold": gold}, answer)
     assert reward == expected and answer == before
+
+
+def test_cuad_confidence_reward_distinguishes_official_aupr_counterexample():
+    correct, wrong = "Alpha keeps secrets.", "Beta pays rent."
+    task = Task("synthetic-confidence", "cuad", "train", "Extract confidentiality.",
+        document=correct + " " + wrong)
+    label = {"gold": [correct]}
+    good = [{"text": correct, "confidence": .9}, {"text": wrong, "confidence": .1}]
+    bad = [{"text": correct, "confidence": .1}, {"text": wrong, "confidence": .9}]
+    assert S.cuad_reward(task, label, good)[0] == S.cuad_reward(task, label, bad)[0]
+    auprs = [evaluate_cuad({task.id: label["gold"]}, {task.id: answer})["aupr"]
+        for answer in (good, bad)]
+    assert auprs == [1., .5]
+    scored = [S.cuad_reward(task, label, answer, reward_version=S.CUAD_CONFIDENCE_REWARD)
+        for answer in (good, bad)]
+    assert scored[0][0] - scored[1][0] == pytest.approx(2 / 15)
+    assert [components["confidence_brier"] for _, components in scored] == pytest.approx([.01, .81])
+    assert [scored[i][0] for i in range(2)] == pytest.approx([.665, .5316666666666666])
+
+
+@pytest.mark.parametrize("gold,answer,expected", [
+    ([], [], 1.), (["Alpha keeps secrets."], [], 0.),
+    ([], [{"text": "Alpha keeps secrets.", "confidence": 0.}], 0.),
+    (["unrelated obligation"], [{"text": "Alpha keeps secrets.", "confidence": 0.}], 0.),
+    (["Alpha keeps secrets."], [{"text": "Alpha keeps secret.", "confidence": 1.}], 0.),
+    (["Alpha keeps secrets."], [{"text": "Alpha keeps secrets.", "confidence": 0.}], .75),
+    (["Alpha keeps secrets."], [{"text": "Alpha keeps secrets.", "confidence": 1.}], 1.),
+])
+def test_cuad_confidence_reward_keeps_zero_grounding_empty_and_bounds(gold, answer, expected):
+    task = Task("synthetic-confidence", "cuad", "train", "Extract a clause.", document="Alpha keeps secrets.")
+    before = deepcopy(answer)
+    reward, components = S.cuad_reward(task, {"gold": gold}, answer,
+        reward_version=S.CUAD_CONFIDENCE_REWARD)
+    assert reward == expected and 0 <= reward <= 1 and answer == before
+    assert .75 <= components["confidence_reward_factor"] <= 1
+
+
+def test_cuad_confidence_target_preserves_official_parties_substring_rule():
+    span = "The contract is signed by Alpha Corporation and many other contracting entities."
+    task = Task("synthetic-Parties", "cuad", "train", "Who are the parties?", document=span)
+    reward, components = S.cuad_reward(task, {"gold": ["Alpha Corporation"]},
+        [{"text": span, "confidence": 1.}], reward_version=S.CUAD_CONFIDENCE_REWARD)
+    assert reward == 1 and components["confidence_brier"] == 0
+
+
+def test_cuad_confidence_version_roundtrips_to_unchanged_pair_loader(closed_domains, tmp_path):
+    tokenizer, manifest = closed_domains
+    manifest["collections"][0]["reward_version"] = S.CUAD_CONFIDENCE_REWARD
+    result = S.score_prepared_collections(S.prepare_collections(manifest, tokenizer))
+    assert [row["value"] for row in result[0][1]] == [.9375, 0., 0., 1.]
+    profiles = S.publish_rewards(result, tmp_path / "confidence-rewards")
+    row = manifest["collections"][0]
+    args = SimpleNamespace(**{key: row[key] for key in (
+        "approved_freeze", "generation_dir", "generation_world_size", "expected_source", "reward_version")},
+        train_rewards=str(tmp_path / "confidence-rewards" / profiles[0]["receipt_file"]),
+        base_derivative_id="synthetic-derivative")
+    pairs, metadata = TRAIN.load_dpo_pairs(args, tokenizer)
+    assert len(pairs) == 1 and pairs[0].chosen.reward == 1. and pairs[0].rejected.reward == 0.
+    assert metadata["reward_version"] == S.CUAD_CONFIDENCE_REWARD
+    args.reward_version = S.REWARD_VERSIONS["cuad"]
+    with pytest.raises(ValueError, match="reward"):
+        TRAIN.load_dpo_pairs(args, tokenizer)
+
+
+@pytest.mark.parametrize("version", [S.CUAD_CONFIDENCE_REWARD, "unknown-reward"])
+def test_web_rejects_cuad_or_unknown_version_before_labels(closed_domains, monkeypatch, version):
+    tokenizer, manifest = closed_domains
+    manifest["collections"][1]["reward_version"] = version
+    def forbidden(*args, **kwargs):
+        pytest.fail("labels accessed before reward version admission")
+    monkeypatch.setattr(S, "load_train_labels", forbidden)
+    with pytest.raises(ValueError, match="reward version"):
+        S.prepare_collections(manifest, tokenizer)
 
 
 def test_web_original_entity_profile_mixture_and_guard_do_not_rewrite_answer():

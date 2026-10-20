@@ -31,7 +31,7 @@ from dcc_native_dpo_train import public_id, validate_prepared_collection_ownersh
 from dcc_native_sft import _strict_json
 from slime_plugins.dcc.data import Task
 from slime_plugins.dcc.episode import _WebEvidence
-from slime_plugins.dcc.metrics import cuad_predictions, cuad_task_metrics
+from slime_plugins.dcc.metrics import cuad_counts, cuad_predictions, cuad_task_metrics
 from slime_plugins.dcc.widesearch_metrics import evaluate_widesearch
 
 VERSION = "native-final-train-reward-inputs-v1"
@@ -39,6 +39,11 @@ RECEIPT = "native-final-train-reward-receipt-v1"
 REWARD_VERSIONS = {
     "cuad": "cuad-native-final-existing-f1-verbatim-v1",
     "widesearch": "web-native-final-row75-item25-original-profile-evidence-v1",
+}
+CUAD_CONFIDENCE_REWARD = "cuad-native-final-f1-verbatim-brier25-v2"
+ACCEPTED_REWARD_VERSIONS = {
+    "cuad": {REWARD_VERSIONS["cuad"], CUAD_CONFIDENCE_REWARD},
+    "widesearch": {REWARD_VERSIONS["widesearch"]},
 }
 ROW_KEYS = {"collection_id", "approved_freeze", "generation_dir", "generation_world_size",
             "expected_source", "original_source_dir", "public_train", "train_labels", "reward_version"}
@@ -150,7 +155,8 @@ def prepare_collections(manifest, tokenizer):
         freeze, prefixes, identity = load_frozen(row["approved_freeze"], tokenizer)
         require(identity.derivative_id == manifest["base_derivative_id"], "Approved reward base differs from collection")
         domains = {prefix.benchmark for prefix in prefixes}
-        require(len(domains) == 1 and row["reward_version"] == REWARD_VERSIONS[next(iter(domains))],
+        require(len(domains) == 1 and isinstance(row["reward_version"], str)
+            and row["reward_version"] in ACCEPTED_REWARD_VERSIONS.get(next(iter(domains)), set()),
             "Each separately frozen domain requires its explicit fixed reward version")
         closed = read_closed_g4(row["generation_dir"], freeze=freeze, prefixes=prefixes, tokenizer=tokenizer,
             world_size=row["generation_world_size"], expected_source=row["expected_source"])
@@ -162,15 +168,31 @@ def prepare_collections(manifest, tokenizer):
     return prepared
 
 
-def cuad_reward(task, label, answer):
+def cuad_reward(task, label, answer, *, reward_version=REWARD_VERSIONS["cuad"]):
+    require(isinstance(reward_version, str) and reward_version in ACCEPTED_REWARD_VERSIONS["cuad"],
+        "Unknown CUAD TRAIN reward version")
     metrics = cuad_task_metrics(task.id, label["gold"], answer)
     spans = cuad_predictions(answer)
     normalized_document = " ".join(task.document.split())
     grounded = [" ".join(item["text"].split()) in normalized_document for item in spans]
     grounding = sum(grounded) / len(grounded) if grounded else 1.0
-    return float(metrics["f1"]) * grounding, {"cuad_f1": float(metrics["f1"]),
+    reward = float(metrics["f1"]) * grounding
+    components = {"cuad_f1": float(metrics["f1"]),
         "verbatim_span_fraction": grounding, "prediction_spans": len(spans),
         "negative_gold": not bool(label["gold"])}
+    if reward_version == CUAD_CONFIDENCE_REWARD:
+        # Reuse the official per-span match, including its Parties exception.
+        # A fixed, bounded penalty cannot turn a wrong/ungrounded answer into
+        # a positive reward. Empty answers keep the existing reward exactly.
+        targets = [float(cuad_counts(task.id, label["gold"], [item["text"]])[1] == 0)
+            for item in spans]
+        brier = sum((item["probability"] - target) ** 2
+            for item, target in zip(spans, targets, strict=True)) / len(spans) if spans else 0.0
+        factor = 1.0 - .25 * brier
+        components.update(confidence_brier=brier, confidence_reward_factor=factor,
+            confidence_match_rule="official-cuad-span-match", base_f1_grounding_reward=reward)
+        reward *= factor
+    return reward, components
 
 
 def web_reward(task, label, answer, guard):
@@ -205,7 +227,8 @@ def score_prepared_collections(prepared):
             answer = _strict_json(bundle["native_trace"]["final_text"])["answer"]
             task, label = item.tasks[prefix.task_id], indexed[prefix.task_id]
             if prefix.benchmark == "cuad":
-                reward, components = cuad_reward(task, label, answer)
+                reward, components = cuad_reward(task, label, answer,
+                    reward_version=item.specification["reward_version"])
             else:
                 reward, components = web_reward(task, label, answer, item.evidence[prefix.prefix_id])
             require(type(reward) in (float, int) and math.isfinite(reward) and 0 <= reward <= 1,
