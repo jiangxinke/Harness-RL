@@ -11,7 +11,7 @@ import pytest
 
 from slime_plugins.dcc import EpisodeRunner, PolicyCompletion, Task
 from slime_plugins.dcc import tools
-from slime_plugins.dcc.episode import WIDESEARCH_EVIDENCE_GUARD_VERSION, parse_action
+from slime_plugins.dcc.episode import WIDESEARCH_EVIDENCE_GUARD_VERSION, _WebEvidence, final_turn_message, parse_action
 from slime_plugins.dcc.evaluation import evaluate_results
 
 SOURCE = "https://example.org/source"
@@ -156,12 +156,123 @@ def test_citation_rejection_can_be_corrected_without_fake_tool_events(public_tra
     assert result.status == "completed"
     assert len(result.tool_events) == 2
     assert len(result.metrics["evidence_guard"]["rejections"]) == 1
-    assert "Every cited URL" in prompts[-1][-1]["content"]
+    assert "Every cited URL" in prompts[-1][-2]["content"]
+    assert prompts[-1][-1]["content"].startswith("Final answer now; tools are unavailable.")
 
 
-def test_supported_empty_final_is_accepted_after_search_and_read(public_transport):
+def test_empty_final_remains_an_abstention_after_search_and_read(public_transport):
     result, _ = run([SEARCH, FETCH, {"answer": []}])
-    assert result.status == "completed" and result.answer == []
+    assert result.status == "evidence_failure" and result.answer == []
+    assert not result.metrics["evidence_guard"]["accepted"]
+    assert result.metrics["evidence_guard"]["rejections"][-1]["reasons"] == ["empty_answer"]
+
+
+def test_empty_final_recovers_to_a_grounded_partial_table(public_transport):
+    result, prompts = run([SEARCH, FETCH, {"answer": []}, FINAL])
+    assert result.status == "completed" and result.answer == FINAL["answer"]
+    feedback = prompts[-1][-2]["content"]
+    assert "Keep verified rows" in feedback
+    assert "Successfully read source URLs" in feedback and SOURCE in feedback
+    assert '"name"' in feedback and '"citations"' in feedback
+    assert len(result.tool_events) == 2  # Repair never fabricates tool activity.
+
+
+def test_search_only_citation_requires_reading_that_actual_source(public_transport, monkeypatch):
+    other = "https://example.org/other"
+    monkeypatch.setattr(tools, "_request", lambda *args, **kwargs: f'<a class="result-link" href="{SOURCE}">Alpha</a><a class="result-link" href="{other}">Beta</a>')
+    final = {"answer": [{"name": "Beta", "citations": [other]}]}
+    result, prompts = run([SEARCH, FETCH, final, {"tool": "fetch_url", "arguments": {"url": other}}, final])
+    assert result.status == "completed"
+    assert result.metrics["evidence_guard"]["rejections"][0]["reasons"] == ["unread_citation_url"]
+    assert "Read every cited source" in prompts[3][-1]["content"]
+    assert [kind for kind, _ in public_transport] == ["fetch", "fetch"]
+
+
+def test_missing_required_columns_can_be_repaired_without_dropping_evidence(public_transport):
+    result, prompts = run([SEARCH, FETCH, {"answer": [{"item": "Alpha", "citations": [SOURCE]}]}, FINAL])
+    assert result.status == "completed"
+    assert result.metrics["evidence_guard"]["rejections"][0]["reasons"] == ["missing_required_columns", "unexpected_answer_columns"]
+    assert '"name": "<verified name>"' in prompts[-1][-2]["content"]
+
+
+def test_extra_answer_columns_are_rejected_before_scoring_and_can_be_repaired(public_transport):
+    extra = {"answer": [{**FINAL["answer"][0], "notes": "Additional source detail"}]}
+    result, prompts = run([SEARCH, FETCH, extra, FINAL])
+    assert result.status == "completed" and result.answer == FINAL["answer"]
+    assert result.metrics["evidence_guard"]["rejections"][0]["reasons"] == ["unexpected_answer_columns"]
+    assert "Remove extra fields" in prompts[-1][-2]["content"]
+    assert '"name": "<verified name>"' in prompts[-1][-2]["content"]
+    assert len(result.tool_events) == 2
+
+
+def test_final_control_has_its_own_message_and_preserves_source_observation(public_transport):
+    item = dataclasses.replace(wide(), prompt="Find Alpha from records numbered 1 through 2; exclude inactive records.")
+    result, prompts = run([SEARCH, FETCH, FINAL], item=item)
+    assert result.status == "completed"
+    source, control = prompts[-1][-2:]
+    expected = (
+        "Tool observation (source material):\n"
+        + json.dumps(result.tool_events[-1]["observation"], ensure_ascii=False)
+        + "\nRemaining turns: 1."
+    )
+    assert source == {"role": "user", "content": expected}
+    assert "Final turn" not in source["content"] and item.prompt not in source["content"]
+    assert control["role"] == "user"
+    assert control["content"].startswith("Final answer now; tools are unavailable.")
+    assert "Original task: " + item.prompt in control["content"]
+    assert 'Exact answer column keys: ["name"]' in control["content"]
+    assert 'Successfully read source URLs: ["' + SOURCE + '"]' in control["content"]
+    assert "Alpha source evidence" not in control["content"]
+
+
+def test_web_final_control_uses_public_task_schema_and_actual_read_sources_only():
+    task = wide()
+    evidence = _WebEvidence()
+    urls = [f"https://example.org/read/{index:02}" for index in range(10)]
+    evidence.observe("web_search", {"results": [{"url": url} for url in [*urls, "https://example.org/unread"]]})
+    for url in reversed(urls):
+        evidence.observe("fetch_url", {"url": url, "text": "Observed source text."})
+    control = final_turn_message(task, evidence)
+    changed = dataclasses.replace(task, gold=[{"name": "private answer marker"}],
+                                  metadata={**task.metadata, "private": "private metadata marker"})
+    assert final_turn_message(changed, evidence) == control
+    assert "private" not in control["content"] and "Observed source text." not in control["content"]
+    marker = ". Add citations to each row. Successfully read source URLs: "
+    source_list, _ = json.JSONDecoder().raw_decode(control["content"].split(marker, 1)[1])
+    assert source_list == sorted(urls)[:8]
+    assert "https://example.org/unread" not in control["content"]
+
+
+def test_fragment_citation_refers_to_the_same_successfully_read_page(public_transport):
+    final = {"answer": [{"name": "Alpha", "citations": [SOURCE + "#table"]}]}
+    result, _ = run([SEARCH, FETCH, final])
+    assert result.status == "completed" and result.metrics["citation_validity"] == 1
+
+
+def test_malformed_citation_is_rejected_instead_of_crashing(public_transport):
+    final = {"answer": [{"name": "Alpha", "citations": ["https://[invalid"]}]}
+    result, _ = run([SEARCH, FETCH, final])
+    assert result.status == "evidence_failure"
+    assert "unobserved_citation_url" in result.detail
+
+
+@pytest.mark.parametrize("columns,language", [
+    (["code", "name", "capital"], "en"),
+    (["年份", "国家", "电影名", "导演", "本国累计票房收益", "电影类型"], "zh"),
+    (["product", "abv%", "packsize(bottle)"], "en"),
+    ([f"field_{index:02}" for index in range(42)], "en"),
+])
+def test_json_schema_and_language_survive_markdown_query_and_wide_columns(public_transport, columns, language):
+    task = dataclasses.replace(wide(), prompt="Return one Markdown table; preserve the requested field values.",
+                               metadata={"evaluation": {"required": columns}, "language": language})
+    row = {column: "已核实" if language == "zh" else "Verified" for column in columns}
+    final = {"answer": [{**row, "citations": [SOURCE]}]}
+    result, prompts = run([SEARCH, FETCH, final], item=task)
+    assert result.status == "completed" and result.answer == final["answer"]
+    instruction = prompts[0][0]["content"]
+    assert "even when the question asks for Markdown" in instruction
+    assert "Preserve the question's requested language" in instruction
+    assert f"Required answer columns: {json.dumps(columns, ensure_ascii=False)}" in instruction
     assert result.metrics["evidence_guard"]["accepted"]
 
 
@@ -235,8 +346,8 @@ def test_private_manifest_versions_only_widesearch_without_loading_gpu_model(mon
 
 def ndjson_rows():
     return '\n'.join(json.dumps(row) for row in [
-        {"item": "Alpha", "value": "one", "citations": [SOURCE]},
-        {"item": "Beta", "value": "two", "citations": [SOURCE]},
+        {"name": "Alpha", "value": "one", "citations": [SOURCE]},
+        {"name": "Beta", "value": "two", "citations": [SOURCE]},
     ])
 
 
@@ -247,7 +358,7 @@ def test_terminal_widesearch_ndjson_rows_require_explicit_parser_opt_in(fenced):
         payload = "```json\n" + payload + "\n```"
     assert parse_action(payload) is None
     action = parse_action(payload, widesearch_rows=True)
-    assert [row["item"] for row in action["answer"]] == ["Alpha", "Beta"]
+    assert [row["name"] for row in action["answer"]] == ["Alpha", "Beta"]
 
 
 @pytest.mark.parametrize("payload", [
@@ -267,9 +378,17 @@ def test_widesearch_ndjson_rejects_reasoning_fragments_and_partial_payloads(payl
 def test_widesearch_ndjson_never_turns_mixed_tool_actions_into_final(tool_first):
     pieces = [json.dumps(SEARCH), ndjson_rows()]
     payload = '\n'.join(pieces if tool_first else reversed(pieces))
-    action = parse_action(payload, widesearch_rows=True)
-    assert action == SEARCH
-    assert "answer" not in action
+    assert parse_action(payload, widesearch_rows=True) is None
+
+
+def test_widesearch_accepts_a_single_terminal_fenced_final_after_prose():
+    payload = 'I found these verified rows.\n```json\n' + ndjson_rows() + '\n```'
+    assert len(parse_action(payload, widesearch_rows=True)["answer"]) == 2
+
+
+def test_widesearch_does_not_execute_an_action_quoted_inside_reasoning():
+    assert parse_action('For example {"answer":[]} but I still need to research.', widesearch_rows=True) is None
+    assert parse_action('For example {"tool":"web_search","arguments":{"query":"A"}} but do not call it yet.', widesearch_rows=True) is None
 
 
 @pytest.mark.parametrize("fenced", [False, True])
@@ -277,7 +396,8 @@ def test_real_widesearch_episode_accepts_ndjson_only_after_evidence(public_trans
     payload = ndjson_rows()
     if fenced:
         payload = "```json\n" + payload + "\n```"
-    result, _ = run([SEARCH, FETCH, payload])
+    task = dataclasses.replace(wide(), metadata={"evaluation": {"required": ["name", "value"]}})
+    result, _ = run([SEARCH, FETCH, payload], item=task)
     assert result.status == "completed"
     assert len(result.answer) == 2
     assert result.metrics["evidence_guard"]["accepted"]

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import dataclasses
+import asyncio
 import importlib.util
 import json
 from collections import Counter
 from pathlib import Path
 
 import pytest
-from slime_plugins.dcc import Task
+from slime_plugins.dcc import EpisodeRunner, PolicyCompletion, Task
 from slime_plugins.dcc.retrieval import RetrievalProfile, fit_retrieval_profile
 from slime_plugins.dcc.tools import DocumentTools
 
@@ -37,9 +38,9 @@ def tasks(count=3):
     return [Task(f"contract_{i}__Governing Law", "cuad", "train", QUESTION, document=source, gold=[SPAN], metadata={"category": "ignored"}) for i in range(count)]
 
 
-def prepare(rows=None, **kwargs):
+def prepare(rows=None, *, profile=None, **kwargs):
     options = {"tokenizer": CharacterTokenizer(), "episodes": 2, "max_prompt_tokens": 100000, "max_response_tokens": 4096, "batch_tokens": 105000, **kwargs}
-    return PREPARE.prepare_records(tasks() if rows is None else rows, None, **options)
+    return PREPARE.prepare_records(tasks() if rows is None else rows, profile, **options)
 
 
 def observation(message):
@@ -84,10 +85,16 @@ def test_hidden_positive_teachers_replay_real_tools_and_show_final_evidence():
             assert target["tool"] == "read_document"
             assert target["arguments"] in [args for hit in hits for args in PREPARE.read_actions(hit)]
         else:
-            assert target["answer"][0]["text"] == SPAN
+            assert target["answer"] == [{"text": SPAN, "confidence": 0.9}]
+            assert list(target) == ["plan", "checks", "answer"]
+            assert "Governing Law" in target["plan"]
+            assert all(isinstance(target[key], str) and 0 < len(target[key].split()) <= 40 for key in ("plan", "checks"))
+            assert all(SPAN not in target[key] and "ignored" not in target[key] for key in ("plan", "checks"))
             assert PREPARE.FINAL_TURN in record["messages"][-1]["content"]
             assert any(SPAN in observation(m).get("text", "") for m in record["messages"] if m["content"].startswith(PREPARE.OBSERVATION))
-            assert SPAN in record["messages"][-1]["content"]
+            assert SPAN in record["messages"][-2]["content"]
+            assert SPAN not in record["messages"][-1]["content"]
+            assert PREPARE.FINAL_TURN not in record["messages"][-2]["content"]
     assert summary["encoding_verified"] is True
 
 
@@ -99,6 +106,57 @@ def test_query_whitelist_uses_question_and_profile_and_is_deterministic():
     assert "tribunals jurisdiction construed" in queries
     assert not any("Omega" in query for query in queries)
     assert "tribunals" not in " ".join(PREPARE.candidate_queries("Unknown category question", profile))
+
+
+@pytest.mark.parametrize("context_chars", [0, 400])
+@pytest.mark.parametrize("negative", [False, True])
+@pytest.mark.parametrize("episode_max_steps", [3, 4, 6])
+@pytest.mark.parametrize("with_profile", [False, True])
+def test_teacher_history_matches_live_runner_with_context_on_every_search(context_chars, negative, episode_max_steps, with_profile):
+    rows = tasks(1)
+    if negative:
+        rows = [dataclasses.replace(rows[0], gold=[])]
+    profile = RetrievalProfile({QUESTION: ("reviewed",)}, 60) if with_profile else None
+    records, summary = prepare(rows, profile=profile, episodes=int(not negative), negative_episodes=int(negative),
+                               episode_max_steps=episode_max_steps, retrieval_context_chars=context_chars,
+                               retrieval_max_context_chars=16000)
+    assert len(records) == 3
+    assert summary["retrieval_context_chars"] == context_chars
+    assert summary["episode_max_steps"] == episode_max_steps
+    assert f"at most {episode_max_steps} model turns" in records[0]["messages"][0]["content"]
+    assert records[1]["messages"][-1]["content"].endswith(f"Remaining turns: {episode_max_steps - 1}.")
+    final_messages = records[2]["messages"]
+    if episode_max_steps == 3:
+        assert final_messages[-1] == PREPARE.final_turn_message(rows[0])
+        assert final_messages[-2]["content"].endswith("Remaining turns: 1.")
+    else:
+        assert final_messages[-1]["content"].endswith(f"Remaining turns: {episode_max_steps - 2}.")
+        assert not any(PREPARE.FINAL_TURN in message["content"] for message in final_messages)
+    assert all(record["metadata"]["retrieval_context_chars"] == context_chars for record in records)
+
+    async def replay():
+        calls = 0
+
+        async def policy(messages, **_):
+            nonlocal calls
+            expected = records[calls]
+            assert messages == expected["messages"]
+            calls += 1
+            return PolicyCompletion(expected["completion"])
+
+        result = await EpisodeRunner(max_steps=episode_max_steps, initial_chunks=4, retrieval_profile=profile,
+                                     retrieval_context_chars=context_chars,
+                                     retrieval_max_context_chars=16000).run(rows[0], policy, evaluation=True)
+        assert calls == 3 and result.status == "completed"
+        assert len(result.tool_events) == 2
+        assert [event["tool"] for event in result.tool_events] == ["search_document", "read_document"]
+        assert len(result.steps) == 3
+        if negative:
+            assert result.answer == []
+        else:
+            assert result.answer[0]["text"] == SPAN
+
+    asyncio.run(replay())
 
 
 @pytest.mark.parametrize("split,benchmark", [("validation", "cuad"), ("test", "cuad"), ("train", "widesearch")])
@@ -157,7 +215,10 @@ def test_negative_teachers_replay_real_search_and_hit_anchored_read_before_absta
         assert record["split"] == "train"
         if record["stage"] != "final":
             continue
-        assert json.loads(record["completion"]) == {"answer": []}
+        target = json.loads(record["completion"])
+        assert target["answer"] == [] and list(target) == ["plan", "checks", "answer"]
+        assert record["metadata"]["category"] in target["plan"]
+        assert all(isinstance(target[key], str) and 0 < len(target[key].split()) <= 40 for key in ("plan", "checks"))
         tools = DocumentTools(by_id[record["task_id"]].document)
         search = json.loads(record["messages"][3]["content"])
         searched = observation(record["messages"][4])
@@ -166,9 +227,25 @@ def test_negative_teachers_replay_real_search_and_hit_anchored_read_before_absta
         assert read["arguments"] in [arguments for hit in searched["hits"] for arguments in PREPARE.read_actions(hit)]
         observed_read = observation(record["messages"][6])
         assert observed_read == tools.read_document(**read["arguments"]) and observed_read["text"].strip()
-        assert PREPARE.FINAL_TURN in record["messages"][6]["content"]
+        assert PREPARE.FINAL_TURN not in record["messages"][6]["content"]
+        assert record["messages"][7] == PREPARE.final_turn_message(by_id[record["task_id"]])
     repeat, repeated_summary = prepare(list(reversed(rows)), episodes=0, negative_episodes=6)
     assert repeat == records and repeated_summary == summary
+
+
+def test_review_supervision_uses_public_question_and_keeps_labels_out_of_history():
+    positive = tasks(1)[0]
+    negative = dataclasses.replace(positive, gold=[])
+    records, _ = prepare([positive], episodes=1)
+    negatives, _ = prepare([negative], episodes=0, negative_episodes=1)
+    positive_final = json.loads(records[-1]["completion"])
+    negative_final = json.loads(negatives[-1]["completion"])
+    assert positive_final["plan"] == negative_final["plan"]
+    assert positive_final["checks"] != negative_final["checks"]
+    assert records[-1]["messages"][-1] == negatives[-1]["messages"][-1]
+    assert SPAN not in records[-1]["messages"][-1]["content"]
+    assert all(set(json.loads(row["completion"])) == {"tool", "arguments"}
+               for row in records + negatives if row["stage"] != "final")
 
 
 def test_optional_negatives_preserve_positive_records_and_enforce_all_budgets():
@@ -220,3 +297,44 @@ def test_cli_can_generate_negative_only_teachers(tmp_path):
     manifest = json.loads(output.with_suffix(".jsonl.manifest.json").read_text())
     assert manifest["positive_episodes"] == 0 and manifest["negative_episodes"] == 2
     assert len(output.read_text().splitlines()) == 6
+
+
+@pytest.mark.parametrize("episode_max_steps", [0, 1, 2, -1, True, 3.5, "4"])
+def test_teacher_turn_budget_rejects_values_that_cannot_hold_the_real_trace(episode_max_steps):
+    with pytest.raises(ValueError, match="episode_max_steps"):
+        prepare(episode_max_steps=episode_max_steps)
+
+
+def test_default_three_turn_records_and_longer_episode_targets_stay_compatible():
+    default, default_summary = prepare()
+    explicit, explicit_summary = prepare(episode_max_steps=3)
+    assert default == explicit and default_summary == explicit_summary
+    longer, _ = prepare(episode_max_steps=4)
+    assert [{key: value for key, value in record.items() if key != "messages"} for record in longer] == [
+        {key: value for key, value in record.items() if key != "messages"} for record in default
+    ]
+    for old, new in zip(default, longer):
+        assert [observation(message) for message in old["messages"] if message["content"].startswith(PREPARE.OBSERVATION)] == [
+            observation(message) for message in new["messages"] if message["content"].startswith(PREPARE.OBSERVATION)
+        ]
+
+
+def test_cli_persists_requested_four_turn_budget_without_forcing_early_final(tmp_path):
+    rows = [dataclasses.replace(tasks(1)[0], gold=[])]
+    data = tmp_path / "train.jsonl"
+    data.write_text("\n".join(json.dumps(row.to_dict()) for row in rows) + "\n")
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps(fit_retrieval_profile(tasks(), min_examples=1)))
+    output = tmp_path / "teachers.jsonl"
+    assert PREPARE.main([
+        "--data", str(data), "--retrieval-profile", str(profile), "--tokenizer", "unused-local-fixture",
+        "--output", str(output), "--episodes", "0", "--negative-episodes", "1",
+        "--episode-max-steps", "4", "--max-prompt-tokens", "100000",
+        "--max-response-tokens", "4096", "--batch-tokens", "105000",
+    ], tokenizer=CharacterTokenizer()) == 0
+    manifest = json.loads(output.with_suffix(".jsonl.manifest.json").read_text())
+    assert manifest["episode_max_steps"] == 4 and manifest["episodes"] == 1
+    records = [json.loads(line) for line in output.read_text().splitlines()]
+    assert len(records) == 3 and json.loads(records[-1]["completion"])["answer"] == []
+    assert records[-1]["messages"][-1]["content"].endswith("Remaining turns: 2.")
+    assert not any(PREPARE.FINAL_TURN in message["content"] for message in records[-1]["messages"])

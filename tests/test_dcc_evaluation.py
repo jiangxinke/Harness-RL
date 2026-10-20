@@ -5,7 +5,7 @@ import json
 import pytest
 from slime_plugins.dcc import Task
 from slime_plugins.dcc.evaluation import evaluate_results
-from slime_plugins.dcc.widesearch_metrics import ALIGNMENT_PROTOCOL
+from slime_plugins.dcc.widesearch_metrics import ALIGNMENT_PROTOCOL, TABLE_INPUT_PROTOCOL
 
 
 def wide(task_id):
@@ -38,6 +38,8 @@ def test_missing_predictions_stay_in_benchmark_denominator():
     assert not report["complete"]
     assert report["widesearch"]["alignment_protocol"] is None
     assert all(value["alignment_protocol"] is None for value in report["widesearch"]["per_task"])
+    assert report["widesearch"]["table_input_protocol"] == TABLE_INPUT_PROTOCOL
+    assert all(value["table_input_protocol"] == TABLE_INPUT_PROTOCOL for value in report["widesearch"]["per_task"])
 
 
 def test_judge_failures_make_report_incomplete_and_have_no_fabricated_score():
@@ -55,6 +57,8 @@ def test_judge_failures_make_report_incomplete_and_have_no_fabricated_score():
     assert not report["complete"]
     assert report["widesearch"]["alignment_protocol"] == ALIGNMENT_PROTOCOL
     assert report["widesearch"]["per_task"][0]["alignment_protocol"] == ALIGNMENT_PROTOCOL
+    assert report["widesearch"]["table_input_protocol"] == TABLE_INPUT_PROTOCOL
+    assert report["widesearch"]["per_task"][0]["table_input_protocol"] == TABLE_INPUT_PROTOCOL
 
 
 @pytest.mark.parametrize("custom_judge", [False, True])
@@ -70,6 +74,8 @@ def test_rejected_evidence_keeps_zero_score_and_explicit_alignment_provenance(cu
     expected = ALIGNMENT_PROTOCOL if custom_judge else None
     assert report["widesearch"]["alignment_protocol"] == expected
     assert report["widesearch"]["per_task"][0]["alignment_protocol"] == expected
+    assert report["widesearch"]["table_input_protocol"] == TABLE_INPUT_PROTOCOL
+    assert report["widesearch"]["per_task"][0]["table_input_protocol"] == TABLE_INPUT_PROTOCOL
     assert report["widesearch"]["metric_denominator"] == 1
     assert report["widesearch"]["score"] == 0
     assert report["complete"]

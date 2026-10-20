@@ -59,7 +59,8 @@ def run(actions, *, auto=1, item=None, default=False):
 
 
 def observation(prompt):
-    return json.loads(prompt[-1]["content"].split("\n", 1)[1].split("\nRemaining turns:", 1)[0])
+    message = next(message for message in reversed(prompt) if message["content"].startswith("Tool observation (source material):"))
+    return json.loads(message["content"].split("\n", 1)[1].split("\nRemaining turns:", 1)[0])
 
 
 @pytest.mark.parametrize("value", [-1, 3, 1.0, True, None])
@@ -133,10 +134,12 @@ def test_failed_auto_fetch_is_recorded_then_next_returned_url_is_read(transport)
     result, prompts = run([SEARCH, final(URLS[1])], auto=2)
     assert result.status == "completed"
     assert result.tool_events[1]["observation"] == {"url": URLS[0], "error": "source retrieval failed"}
-    assert result.metrics["evidence_guard"]["successful_fetches"] == 1
+    assert result.metrics["evidence_guard"]["successful_fetches"] == 2
     seen = observation(prompts[1])
     assert "error" in seen["auto_read_sources"][0] and "text" in seen["auto_read_sources"][1]
-    assert seen["auto_read_attempts_remaining"] == 2
+    assert len(seen["auto_read_sources"]) == 3
+    assert seen["auto_read_successful_sources"] == 2
+    assert seen["auto_read_attempts_remaining"] == 1
 
 
 def test_blocked_source_is_a_real_reader_error_and_never_evidence(transport, monkeypatch):
@@ -192,3 +195,16 @@ def test_cuad_results_and_prompts_do_not_change_when_auto_read_is_enabled(transp
     enabled, right = run(actions, auto=2, item=item)
     assert baseline.to_dict() == enabled.to_dict() and left == right
     assert enabled.reward == 1 and transport["calls"] == []
+
+
+@pytest.mark.parametrize("failure", ["errors", "empty"])
+def test_unreadable_results_do_not_exhaust_success_target_or_exceed_total_attempts(transport, failure):
+    transport["results"] = URLS
+    transport[failure] = set(URLS[:3])
+    result, prompts = run([SEARCH, final(URLS[3])], auto=2)
+    seen = observation(prompts[1])
+    assert [event["arguments"]["url"] for event in result.tool_events if event.get("automatic")] == URLS[:4]
+    assert seen["auto_read_successful_sources"] == 1
+    assert seen["auto_read_attempts_remaining"] == 0
+    assert result.status == "completed"
+    assert result.metrics["evidence_guard"]["successful_fetches"] == 1

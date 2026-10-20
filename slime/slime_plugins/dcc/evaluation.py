@@ -9,7 +9,7 @@ from typing import Any
 
 from .data import Task
 from .metrics import evaluate_cuad
-from .widesearch_metrics import ALIGNMENT_PROTOCOL, Judge, JudgeError, evaluate_widesearch
+from .widesearch_metrics import ALIGNMENT_PROTOCOL, TABLE_INPUT_PROTOCOL, Judge, JudgeError, evaluate_widesearch
 
 
 def _search_coverage(tasks: list[Task], saved: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -100,12 +100,12 @@ def evaluate_results(tasks: Iterable[Task], predictions: Iterable[dict[str, Any]
             if saved.get(task.id, {}).get("status") == "evidence_failure":
                 # Rejected finals are model failures. Keep them in every
                 # denominator without judging unsupported or empty answers.
-                return {"task_id": task.id, "alignment_protocol": ALIGNMENT_PROTOCOL if judge else None, **dict.fromkeys(("score", "precision_by_row", "recall_by_row", "f1_by_row", "precision_by_item", "recall_by_item", "f1_by_item"), 0.0)}
+                return {"task_id": task.id, "alignment_protocol": ALIGNMENT_PROTOCOL if judge else None, "table_input_protocol": TABLE_INPUT_PROTOCOL, **dict.fromkeys(("score", "precision_by_row", "recall_by_row", "f1_by_row", "precision_by_item", "recall_by_item", "f1_by_item"), 0.0)}
             try:
                 metrics = evaluate_widesearch(saved.get(task.id, {}).get("answer", []), task.gold or [], task.metadata["evaluation"], judge=judge)
                 return {"task_id": task.id, **metrics}
             except JudgeError as exc:
-                return {"task_id": task.id, "alignment_protocol": ALIGNMENT_PROTOCOL if judge else None, "judge_error": str(exc)}
+                return {"task_id": task.id, "alignment_protocol": ALIGNMENT_PROTOCOL if judge else None, "table_input_protocol": TABLE_INPUT_PROTOCOL, "judge_error": str(exc)}
 
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
             per_task = list(executor.map(score, wide))
@@ -117,6 +117,7 @@ def evaluate_results(tasks: Iterable[Task], predictions: Iterable[dict[str, Any]
             "judge_failures": len(per_task) - len(successful),
             "evaluation_protocol": "official_protocol_custom_judge" if judge else "strict_exact_proxy",
             "alignment_protocol": ALIGNMENT_PROTOCOL if judge else None,
+            "table_input_protocol": TABLE_INPUT_PROTOCOL,
             "judge_model": getattr(judge, "model", None),
             "search_coverage": _search_coverage(wide, saved),
             **{key: sum(value[key] for value in successful) / len(successful) if successful else None for key in keys},

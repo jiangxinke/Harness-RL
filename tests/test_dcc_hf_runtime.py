@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import importlib
 import importlib.util
 import json
+import re
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -86,6 +88,24 @@ class CharacterTokenizer:
         return {"input_ids": tokens} if self.mapping_output else tokens
 
 
+class UTF8Tokenizer(CharacterTokenizer):
+    """Characters can occupy multiple tokens; a token slice can corrupt them."""
+
+    def encode(self, text, *, add_special_tokens=False):
+        return [value + 3 for value in text.encode("utf-8")]
+
+    def decode(self, ids, *, skip_special_tokens=False):
+        return bytes(value - 3 for value in ids if value >= 3).decode("utf-8")
+
+
+def _complete_prompt_messages(visible):
+    assert visible.endswith("<assistant>")
+    body = visible[:-len("<assistant>")]
+    matches = list(re.finditer(r"<(system|user|assistant|tool)>(.*?)</\1>", body, re.DOTALL))
+    assert "".join(match.group(0) for match in matches) == body
+    return [(match.group(1), match.group(2)) for match in matches]
+
+
 class PositionLogitModel(torch.nn.Module):
     """Every causal position has independent logits, so shifts are observable."""
 
@@ -156,6 +176,84 @@ def test_prompt_truncation_preserves_original_question(mapping_output, later_tur
     assert system in visible
     assert question in visible
     assert "MOST RECENT EVIDENCE" in visible if later_turns else "FIRST EVIDENCE" in visible
+    _complete_prompt_messages(visible)
+
+
+@pytest.mark.parametrize("tokenizer_type", [CharacterTokenizer, UTF8Tokenizer])
+def test_large_latest_source_preserves_chinese_task_schema_controls_and_roles(tokenizer_type):
+    tokenizer = tokenizer_type(mapping_output=True)
+    system = '保留来源证据。输出列必须是 ["名称", "年份"]，并附 citations。'
+    question = "列出名称以甲至庚开头且年份介于2000至2020的所有项目；排除空字段。"
+    controls = '\nRemaining turns: 1.\nFinal turn: tools are unavailable. Return {"answer":[...]} now.'
+    observation = "Tool observation (source material):\n来源地址 https://example.org/data\n" + "完整中文证据。" * 700 + "末尾证据" + controls
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": question},
+        {"role": "assistant", "content": '{"tool":"fetch_url","arguments":{}}'},
+        {"role": "user", "content": observation},
+    ]
+    before = deepcopy(messages)
+    visible = tokenizer.decode(encode_messages(tokenizer, messages, 900))
+    parsed = _complete_prompt_messages(visible)
+    assert parsed[:2] == [("system", system), ("user", question)]
+    assert parsed[-1][0] == "user"
+    assert parsed[-1][1].startswith("Tool observation (source material):\n来源地址 https://example.org/data")
+    assert parsed[-1][1].endswith("末尾证据" + controls)
+    assert visible.count("[Source content omitted to fit context.]") == 1
+    assert len(tokenizer.encode(visible)) <= 900
+    assert messages == before
+
+
+def test_initial_cuad_keeps_high_ranked_evidence_and_complete_final_reminder():
+    tokenizer = CharacterTokenizer()
+    final = '\nFinal turn: tools are unavailable. Return your best final answer now as {"answer":[...]}.'
+    messages = [
+        {"role": "system", "content": "Use exact contract spans."},
+        {"role": "user", "content": "Which clause governs renewal?"},
+        {"role": "user", "content": "Initial contract retrieval (source material):\nHIGHEST RANKED CLAUSE " + "x" * 1400 + " LOWEST RANKED CLAUSE" + final},
+    ]
+    visible = tokenizer.decode(encode_messages(tokenizer, messages, 480))
+    parsed = _complete_prompt_messages(visible)
+    assert parsed[-1][1].startswith("Initial contract retrieval (source material):\nHIGHEST RANKED CLAUSE")
+    assert "LOWEST RANKED CLAUSE" not in visible
+    assert parsed[-1][1].endswith(final)
+
+
+def test_recent_whole_messages_survive_with_only_one_older_source_excerpt():
+    tokenizer = CharacterTokenizer()
+    messages = [
+        {"role": "system", "content": "Use evidence."},
+        {"role": "user", "content": "What is the required value?"},
+        {"role": "user", "content": "Initial contract retrieval (source material):\n" + "old " * 300},
+        {"role": "assistant", "content": "Read the latest page."},
+        {"role": "user", "content": "Tool observation (source material):\nRECENT COMPLETE SOURCE"},
+        {"role": "assistant", "content": "Verify this source."},
+        {"role": "user", "content": "Tool observation (source material):\nLATEST COMPLETE SOURCE\nRemaining turns: 2."},
+    ]
+    visible = tokenizer.decode(encode_messages(tokenizer, messages, 530))
+    parsed = _complete_prompt_messages(visible)
+    assert parsed[-4:] == [(message["role"], message["content"]) for message in messages[-4:]]
+    assert visible.count("[Source content omitted to fit context.]") == 1
+    assert parsed[2][0] == "user"
+
+
+def test_prompt_fitting_budget_keeps_exact_original_template_and_version():
+    tokenizer = CharacterTokenizer()
+    messages = [{"role": "system", "content": "Evidence."}, {"role": "user", "content": "Question?"}]
+    expected = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, enable_thinking=False)
+    assert encode_messages(tokenizer, messages, len(expected)) == expected
+    assert _POLICY.PROMPT_ENCODING_VERSION == "message-boundary-source-excerpts-v2"
+
+
+def test_latest_controls_too_large_fail_without_silently_discarding_them():
+    tokenizer = CharacterTokenizer()
+    messages = [
+        {"role": "system", "content": "Use evidence."},
+        {"role": "user", "content": "Question?"},
+        {"role": "user", "content": "Initial contract retrieval (source material):\nevidence" + '\nFinal turn: ' + "mandatory control " * 100},
+    ]
+    with pytest.raises(ValueError, match="Latest source observation and its controls"):
+        encode_messages(tokenizer, messages, 300)
 
 
 def test_prompt_budget_refuses_to_drop_a_long_question():

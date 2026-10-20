@@ -17,7 +17,21 @@ from .metrics import cuad_predictions, cuad_task_metrics
 from .retrieval import RetrievalProfile, search_document
 from .tools import DocumentTools, InfrastructureError, WebTools
 
-WIDESEARCH_EVIDENCE_GUARD_VERSION = "search-fetch-citations-ndjson-v2"
+WIDESEARCH_EVIDENCE_GUARD_VERSION = "read-grounded-nonempty-exact-schema-v5"
+EPISODE_PROMPT_VERSION = "legal-review-web-autoread-v8"
+FINAL_TURN = (
+    '\nFinal turn: tools are unavailable. Return your best final '
+    'answer now as {"answer":[...]}, using the evidence already available.'
+)
+
+CUAD_FINAL_REVIEW = (
+    '\nFinal answer now; tools are unavailable. Match the exact legal category and every condition in the original question. A related topic, reversed direction, or weaker obligation does not qualify. Include only verbatim spans from the observed contract text that directly establish a qualifying clause. If no observed evidence establishes such a clause, return {"answer":[]}. Otherwise return {"answer":[{"text":"verbatim span","confidence":0.0}]} with confidence between 0 and 1. Do not invent missing evidence. Return one complete JSON object and no text outside it.'
+    '\nBefore answer, include top-level "plan" and "checks" as brief JSON strings, each at most 40 words. In plan, state the exact category and conditions from the original question. In checks, state whether the observed text establishes those conditions or requires an empty answer. Return top-level keys in this order: "plan", "checks", "answer"; answer keeps the same span schema. Write no text outside the JSON object.'
+)
+
+WEB_FINAL_REVIEW = (
+    'Final answer now; tools are unavailable. Return exactly one complete JSON object {"answer":[...]}, with no Markdown or explanation before or after it. Include each source-verified entity exactly once only if it satisfies every original-task condition. Work from a finite set; stop and close the JSON after its last entity. Use the exact required row keys and a citations list. Use exactly one successfully read URL per row, choosing a URL whose text supports that row. Do not copy a list of URLs into every row. Never invent rows or cells. Follow the original task rules for unknown or missing fields. If no row is supported, return {"answer":[]}.'
+)
 
 
 @dataclasses.dataclass(slots=True)
@@ -31,6 +45,17 @@ class PolicyCompletion:
     def __post_init__(self) -> None:
         if self.logprobs is not None and len(self.logprobs) != len(self.completion_ids):
             raise ValueError("completion log probabilities must align with completion token IDs")
+
+
+class ModelProtocolFailure(RuntimeError):
+    """Terminal model-output protocol failure, distinct from infrastructure."""
+
+    def __init__(self, reason, *, completion, protocol, trace_id):
+        if not isinstance(completion, PolicyCompletion):
+            raise TypeError("A model protocol failure must retain PolicyCompletion")
+        super().__init__(reason)
+        self.reason, self.completion = reason, completion
+        self.protocol, self.trace_id = protocol, trace_id
 
 
 class Policy(Protocol):
@@ -59,7 +84,7 @@ class EpisodeResult:
         would incorrectly train on retrieved observations and truncate context.
         """
 
-        return [] if self.status == "infrastructure_error" else [step for step in self.steps if step.completion_ids]
+        return [] if self.status in {"infrastructure_error", "model_protocol_failure"} else [step for step in self.steps if step.completion_ids]
 
     def to_dict(self, *, include_tokens: bool = True) -> dict[str, Any]:
         result = dataclasses.asdict(self)
@@ -97,11 +122,18 @@ def parse_action(text: str, *, widesearch_rows: bool = False) -> dict[str, Any] 
 
     text = text.rsplit("</think>", 1)[-1]
     if widesearch_rows:
+        # A base model often introduces its final code block with prose. Only
+        # unwrap a single, terminal block; examples embedded in reasoning are
+        # not actions, and a truncated block is not a complete final answer.
+        fenced = re.search(r"```(?:json|jsonl|ndjson)?[ \t]*\r?\n([\s\S]*?)\r?\n```\s*$", text, re.IGNORECASE)
+        if fenced is not None and "```" not in text[:fenced.start()] and "```" not in fenced[1]:
+            text = fenced[1]
         rows = _terminal_widesearch_rows(text)
         if rows is not None:
             return {"answer": rows}
     decoder = json.JSONDecoder()
     candidates = []
+    row_fragments = False
     position = 0
     while match := re.search(r"[\[{]", text[position:]):
         start = position + match.start()
@@ -111,14 +143,30 @@ def parse_action(text: str, *, widesearch_rows: bool = False) -> dict[str, Any] 
             position = start + 1
             continue
         position = end
-        if isinstance(value, dict) and ("answer" in value or "tool" in value):
+        if isinstance(value, dict) and "citations" in value and "answer" not in value and "tool" not in value:
+            row_fragments = True
+        terminal = text[end:].strip() in ("", "```")
+        if isinstance(value, dict) and ("answer" in value or "tool" in value) and (terminal or not widesearch_rows):
             candidates.append(value)
         elif isinstance(value, list) and text[end:].strip() in ("", "```"):
             # Some policies emit the requested answer array without its outer
             # object. Accept only a terminal JSON payload, never a list quoted
             # inside reasoning; benchmark-specific validation still follows.
             candidates.append({"answer": value})
+    if widesearch_rows and row_fragments:
+        return None  # Mixed row/action payloads are ambiguous, not a tool call.
     return candidates[-1] if candidates else None
+
+
+def _answer_columns(task: Task) -> list[str]:
+    evaluation = task.metadata.get("evaluation", {})
+    columns = evaluation.get("required", task.metadata.get("answer_columns", [])) if isinstance(evaluation, dict) else []
+    return [column for column in columns if isinstance(column, str) and column != "citations"] if isinstance(columns, list) else []
+
+
+def _wide_final_example(task: Task, source: str) -> str:
+    row = {column: f"<verified {column}>" for column in _answer_columns(task)} or {"name": "<verified entity>"}
+    return json.dumps({"answer": [{**row, "citations": [source]}]}, ensure_ascii=False)
 
 
 @lru_cache(maxsize=128)
@@ -164,6 +212,15 @@ class _WebEvidence:
     rejections: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
     @staticmethod
+    def _source_key(url: str) -> str:
+        # Fragments select a place within the same downloaded document. Keep
+        # path and query intact: other URL rewrites can change the evidence.
+        try:
+            return urllib.parse.urldefrag(url.strip())[0]
+        except ValueError:
+            return url.strip()
+
+    @staticmethod
     def _source_url(value: Any) -> bool:
         if not isinstance(value, str) or not value.strip():
             return False
@@ -181,13 +238,14 @@ class _WebEvidence:
             urls = {row["url"] for row in rows if isinstance(row, dict) and self._source_url(row.get("url"))} if isinstance(rows, list) else set()
             if urls:
                 self.searches += 1
-                self.sources.update(urls)
+                self.sources.update(self._source_key(url) for url in urls)
         elif tool == "fetch_url" and self._source_url(observation.get("url")):
             text = observation.get("text")
             if isinstance(text, str) and text.strip():
                 self.fetches += 1
-                self.sources.add(observation["url"])
-                self.fetched_sources.add(observation["url"])
+                source = self._source_key(observation["url"])
+                self.sources.add(source)
+                self.fetched_sources.add(source)
 
     def reject_reasons(self, task: Task, answer: Any) -> list[str]:
         reasons = []
@@ -198,28 +256,48 @@ class _WebEvidence:
         if not _valid_answer(task, answer):
             reasons.append("invalid_answer_format")
             return reasons
+        if not answer:
+            reasons.append("empty_answer")
+        required = _answer_columns(task)
         for row in answer:
+            if any(column not in row for column in required):
+                reasons.append("missing_required_columns")
+            if required and set(row) - {*required, "citations"}:
+                reasons.append("unexpected_answer_columns")
+            if not any(value not in (None, "", [], {}) for key, value in row.items() if key != "citations"):
+                reasons.append("empty_row")
             citations = row.get("citations", [])
             if not citations or any(not url.strip() for url in citations):
                 reasons.append("missing_row_citations")
-            if any(url not in self.sources for url in citations):
+            if any(self._source_key(url) not in self.sources for url in citations):
                 reasons.append("unobserved_citation_url")
+            elif any(self._source_key(url) not in self.fetched_sources for url in citations):
+                reasons.append("unread_citation_url")
         return list(dict.fromkeys(reasons))
 
-    def feedback(self, reasons: list[str], remaining: int) -> str:
+    def feedback(self, reasons: list[str], remaining: int, task: Task) -> str:
         descriptions = {
             "missing_successful_search": "Call web_search and obtain at least one source URL.",
             "missing_successful_fetch": "Call fetch_url and read a nonempty source page successfully.",
             "invalid_answer_format": "The answer must be a list of nonempty row objects with citations lists.",
             "missing_row_citations": "Every answer row needs a nonempty citations list.",
             "unobserved_citation_url": "Every cited URL must exactly match a source returned by a successful web_search or fetch_url.",
+            "unread_citation_url": "Read every cited source with fetch_url before citing it; a search snippet alone is not a read page.",
+            "empty_answer": "An empty table does not complete this research task. Keep verified rows even when you cannot finish the full enumeration; never invent a row just to avoid abstaining.",
+            "empty_row": "Each row must contain an actual entity or value, not only citations or blank cells.",
+            "missing_required_columns": "Use every Required answer column exactly as listed in the system instructions. Follow the original task's missing-field rule: omit an incomplete row when it requires every field; otherwise mark an unverified cell as an empty string rather than inventing a value.",
+            "unexpected_answer_columns": "Remove extra fields. Use only the exact Required answer columns and the citations list as JSON keys.",
         }
-        source = sorted(self.sources)[0] if self.sources else "<URL returned by web_search>"
+        unread = sorted(self.sources - self.fetched_sources)
+        source = unread[0] if unread else sorted(self.fetched_sources)[0] if self.fetched_sources else "<URL returned by web_search>"
+        citation = sorted(self.fetched_sources)[0] if self.fetched_sources else "<URL after a successful fetch_url>"
         return (
             "Evidence check: final answer rejected. " + " ".join(descriptions[reason] for reason in reasons)
             + " Continue researching, then submit a supported final answer. Return exactly one JSON object per turn. "
             + 'Search template: {"tool":"web_search","arguments":{"query":"<entities and constraints from the question>","count":8}}. '
             + "Read template: " + json.dumps({"tool": "fetch_url", "arguments": {"url": source, "start": 0}})
+            + ". Successfully read source URLs: " + json.dumps(sorted(self.fetched_sources)[:8])
+            + ". Final schema example (fill values only from supporting source text): " + _wide_final_example(task, citation)
             + f". Remaining turns: {remaining}."
         )
 
@@ -245,54 +323,139 @@ def _system_prompt(task: Task, max_steps: int) -> str:
             "read_document(start: integer, end: integer) returns up to 12000 characters. "
             "Initial excerpts may be incomplete. Search/read again when needed."
         )
-    evaluation = task.metadata.get("evaluation", {})
-    columns = evaluation.get("required", task.metadata.get("answer_columns", [])) if isinstance(evaluation, dict) else []
+    columns = _answer_columns(task)
     return common + (
         "\nFind all entities satisfying every condition in the user question. Search several complementary queries, "
-        "read authoritative sources, and check each constraint. Return one object per entity, using the requested "
-        "table's exact column names and a citations list of supporting URLs for every row. Do not include rows "
+        "read authoritative sources, and check each constraint. Return one object per entity, using the "
+        "Required answer columns below as exact JSON keys and a citations list of supporting URLs for every row. "
+        "Build a finite set of verified entities: check every requested range, date, region, and other filter "
+        "against the source, include each entity once, and stop when that set is exhausted. "
+        "Do not continue a registry past the requested range or restart an enumeration. "
+        "Each row's keys must be exactly those columns plus citations. "
+        "This JSON schema governs the final response even when the question asks for Markdown or displays "
+        "headers with different capitalization or spacing. Preserve the question's requested language and "
+        "cell formats for the values. Do not include rows "
         "that fail a condition. Tools: web_search(query: string, count: integer=8), fetch_url(url: string, start: integer=0). "
-        "The reader supports HTML, text, and PDFs. Use next_start to continue a truncated page. "
+        "The reader supports HTML, text, CSV, JSON, PDFs, XLSX workbooks, and bounded ZIP text exports. Use next_start to continue a truncated page. "
+        "XLSX worksheets metadata lists source-wide sheet names, bounded first-row previews, and section start/end offsets. "
+        "Fetch the same URL with start set to a worksheet's start to read that section; previews only help navigation. "
+        "ZIP archive_members metadata lists source-wide member names, formats, readability status, bounded literal previews, "
+        "and character offsets. Fetch the same URL at a readable member's start; previews only help navigation. "
+        "A page may include outgoing_links discovered in its HTML. Follow relevant table, CSV, JSON, or API "
+        "links to read complete structured data when useful. A listed link is not read evidence; fetch its URL "
+        "before citing it. Keep track of the source windows already read and avoid repeatedly fetching the same window. "
         "Search observations disclose their actual backend and coverage. Wikipedia fallback covers an encyclopedia; "
         "it is not a general web index. Adjust queries in English or Chinese as needed. "
         f"Required answer columns: {json.dumps(columns, ensure_ascii=False)}. "
         "Before a final answer is accepted, you must complete at least one web_search that returns source URLs "
         "and at least one fetch_url that successfully returns nonempty source text. Start by searching, then read a source. "
         "Every answer row must have a nonempty citations list; every URL must exactly match a source returned by "
-        "a successful web_search or fetch_url. These checks also apply before submitting an empty answer list."
+        "a successful fetch_url with nonempty page text; search snippets alone are not enough. "
+        "Keep verified rows even if the full list of entities is unfinished, provided each row satisfies "
+        "the original task's missing-field rule. If it requires every field, omit incomplete rows. "
+        "Otherwise use an empty string for an unknown cell, never an invented value. "
+        "An empty list is an abstention, not successful task completion. Do not fabricate rows to avoid abstaining. "
+        "Final schema example (replace placeholders with verified values and actual read URLs): "
+        + _wide_final_example(task, "<successfully fetched source URL>")
     )
 
 
+def final_turn_message(task: Task, evidence: _WebEvidence | None = None) -> dict[str, str]:
+    """Keep harness control instructions separate from retrieved source text."""
+    content = FINAL_TURN
+    if task.benchmark == "cuad":
+        content += CUAD_FINAL_REVIEW
+    if evidence is not None:
+        content = (
+            WEB_FINAL_REVIEW + "\nOriginal task: " + task.prompt
+            + "\nExact answer column keys: " + json.dumps(_answer_columns(task), ensure_ascii=False)
+            + ". Add citations to each row. Successfully read source URLs: "
+            + json.dumps(sorted(evidence.fetched_sources)[:8])
+            + ". Use each row's actual supporting read URL in its citations list."
+        )
+    return {"role": "user", "content": content}
+
+
 class EpisodeRunner:
-    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900, retrieval_profile: RetrievalProfile | None = None, auto_read_sources: int = 0) -> None:
+    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900, retrieval_profile: RetrievalProfile | None = None, auto_read_sources: int = 0, retrieval_context_chars: int = 0, retrieval_max_context_chars: int = 16000, evaluation_temperature: float = 0.0, web_structured_final: bool = False, web_structured_actions: bool = False, web_explicit_review: bool = False, web_navigation_ledger: bool = False, web_research_checkpoints: bool = False, web_cached_rows: bool = False, cuad_structured_actions: bool = False) -> None:
+        from .web_structured import web_structured_actions_configuration, web_structured_configuration
+
+        from .cuad_structured import cuad_structured_configuration
+
+        self.cuad_structured_actions = cuad_structured_configuration(cuad_structured_actions)["enabled"]
+        self.web_structured_final = web_structured_configuration(web_structured_final)["enabled"]
+        self.web_structured_actions = web_structured_actions_configuration(web_structured_actions)["enabled"]
+        from .web_review import web_explicit_review_configuration
+
+        self.web_explicit_review = web_explicit_review_configuration(web_explicit_review)["enabled"]
+        if self.web_explicit_review and not (self.web_structured_actions and self.web_structured_final):
+            raise ValueError("web_explicit_review requires structured Web actions and final")
+        from .web_navigation import web_navigation_configuration
+
+        self.web_navigation_ledger = web_navigation_configuration(web_navigation_ledger)["enabled"]
+        if self.web_navigation_ledger and not (self.web_structured_actions and self.web_structured_final):
+            raise ValueError("web_navigation_ledger requires structured Web actions and final")
+        from .web_research import web_research_configuration
+
+        self.web_research_checkpoints = web_research_configuration(web_research_checkpoints)["enabled"]
+        if self.web_research_checkpoints and not (self.web_structured_actions and self.web_structured_final):
+            raise ValueError("web_research_checkpoints requires structured Web actions and final")
+        from .web_rows import web_cached_rows_configuration
+
+        self.web_cached_rows = web_cached_rows_configuration(web_cached_rows)["enabled"]
+        if self.web_cached_rows and not (self.web_structured_actions and self.web_structured_final):
+            raise ValueError("web_cached_rows requires structured Web actions and final")
+        if self.web_structured_actions and not self.web_structured_final:
+            raise ValueError("web_structured_actions requires web_structured_final=True")
         if max_steps < 1 or max_new_tokens < 1:
             raise ValueError("episode limits must be positive")
+        if (isinstance(evaluation_temperature, bool) or not isinstance(evaluation_temperature, (int, float))
+                or not math.isfinite(evaluation_temperature) or not 0 <= evaluation_temperature <= 2):
+            raise ValueError("evaluation_temperature must be finite and between 0 and 2")
         if type(auto_read_sources) is not int or not 0 <= auto_read_sources <= 2:
             raise ValueError("auto_read_sources must be an integer between 0 and 2")
+        if type(retrieval_context_chars) is not int or retrieval_context_chars < 0:
+            raise ValueError("retrieval_context_chars must be a nonnegative integer")
+        if type(retrieval_max_context_chars) is not int or retrieval_max_context_chars < 1:
+            raise ValueError("retrieval_max_context_chars must be a positive integer")
         self.max_steps = max_steps
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
+        self.evaluation_temperature = evaluation_temperature
         self.initial_chunks = initial_chunks
         self.web_tools_factory = web_tools_factory
         self.timeout_seconds = timeout_seconds
         self.retrieval_profile = retrieval_profile
         self.auto_read_sources = auto_read_sources
+        self.retrieval_context_chars = retrieval_context_chars
+        self.retrieval_max_context_chars = retrieval_max_context_chars
+
+    def _search_document(self, document_tools: DocumentTools, query: str, top_k: int = 4):
+        return search_document(
+            document_tools, query, top_k=top_k, profile=self.retrieval_profile,
+            context_chars=self.retrieval_context_chars,
+            max_context_chars=self.retrieval_max_context_chars,
+        )
 
     async def _read_search_sources(self, observation, web_tools, evidence, events, attempted, turn):
-        """Read only newly returned URLs; failed attempts consume the budget."""
+        """Seek successful new reads while every attempt consumes the fixed cap."""
         if not isinstance(observation, dict) or observation.get("error"):
             return observation
         rows = observation.get("results")
         if not isinstance(rows, list) or not any(isinstance(row, dict) and evidence._source_url(row.get("url")) for row in rows):
             return observation
         sources = []
+        successful = 0
         for row in rows:
-            if len(sources) >= self.auto_read_sources or len(attempted) >= 4:
+            if successful >= self.auto_read_sources or len(attempted) >= 4:
                 break
             url = row.get("url") if isinstance(row, dict) else None
-            if not evidence._source_url(url) or url in evidence.fetched_sources or url in attempted:
+            if not evidence._source_url(url):
                 continue
-            attempted.add(url)
+            source_key = evidence._source_key(url)
+            if source_key in evidence.fetched_sources or source_key in attempted:
+                continue
+            attempted.add(source_key)
             arguments = {"url": url, "start": 0}
             try:
                 page = await web_tools.fetch_url(**arguments)
@@ -300,14 +463,18 @@ class EpisodeRunner:
                 page = {"url": url, "error": str(exc)}
             events.append({"turn": turn, "tool": "fetch_url", "arguments": arguments,
                            "observation": page, "automatic": True, "trigger": "web_search"})
+            before = evidence.fetches
             evidence.observe("fetch_url", page)
+            successful += evidence.fetches - before
             sources.append(page)
         return {
             **observation,
             "auto_read_sources": sources,
             "auto_read_attempts_remaining": 4 - len(attempted),
+            "auto_read_successful_sources": successful,
             "auto_read_note": (
                 "Automatically fetched source material follows in auto_read_sources; errors are not evidence. "
+                "The reader seeks the configured number of successful new pages per search, within four total attempts. "
                 "Use the actual page text for your answer. You may still call fetch_url yourself, "
                 "including start=next_start to continue a truncated page."
             ),
@@ -316,29 +483,102 @@ class EpisodeRunner:
     def initial_messages(self, task: Task) -> list[dict[str, str]]:
         messages = [{"role": "system", "content": _system_prompt(task, self.max_steps)}, {"role": "user", "content": task.prompt}]
         if task.benchmark == "cuad" and self.initial_chunks:
-            observation = search_document(_document_tools(task.document), task.prompt, top_k=self.initial_chunks, profile=self.retrieval_profile)
+            observation = self._search_document(_document_tools(task.document), task.prompt, top_k=self.initial_chunks)
             messages.append({"role": "user", "content": "Initial contract retrieval (source material):\n" + json.dumps(observation, ensure_ascii=False)})
         return messages
 
-    async def run(self, task: Task, policy: Policy, *, evaluation: bool = False) -> EpisodeResult:
+    async def run(self, task: Task, policy: Policy, *, evaluation: bool = False, score_train: bool = True) -> EpisodeResult:
+        if type(score_train) is not bool:
+            raise ValueError("score_train must be a boolean")
         messages = self.initial_messages(task)
+        cached_rows_enabled = self.web_cached_rows and evaluation and task.benchmark == "widesearch"
+        if cached_rows_enabled:
+            from .web_rows import WEB_CACHED_ROWS_INSTRUCTIONS
+
+            messages[0]["content"] += WEB_CACHED_ROWS_INSTRUCTIONS
+        review_enabled = self.web_explicit_review and evaluation and task.benchmark == "widesearch"
+        if review_enabled:
+            from .web_review import WEB_EXPLICIT_REVIEW_INSTRUCTIONS
+
+            messages[0]["content"] += WEB_EXPLICIT_REVIEW_INSTRUCTIONS
+        navigation = None
+        navigation_snapshots = []
+        research_enabled = self.web_research_checkpoints and evaluation and task.benchmark == "widesearch"
+        research_snapshots = []
+        if self.web_navigation_ledger and evaluation and task.benchmark == "widesearch":
+            from .web_navigation import WEB_NAVIGATION_INSTRUCTIONS, WebNavigationLedger
+
+            navigation = WebNavigationLedger()
+            messages[0]["content"] += WEB_NAVIGATION_INSTRUCTIONS
         steps: list[PolicyCompletion] = []
         events: list[dict[str, Any]] = []
         document_tools = _document_tools(task.document) if task.benchmark == "cuad" else None
         web_tools = self.web_tools_factory() if task.benchmark == "widesearch" else None
+        if cached_rows_enabled:
+            web_tools.web_cached_rows = True
         evidence = _WebEvidence() if task.benchmark == "widesearch" else None
         auto_attempted: set[str] = set()
         answer: Any = []
         status, detail = "max_steps", ""
+        model_protocol_failure = None
         try:
             async with asyncio.timeout(self.timeout_seconds):
                 for index in range(self.max_steps):
                     if index == self.max_steps - 1:
-                        messages[-1]["content"] += (
-                            '\nFinal turn: tools are unavailable. Return your best final '
-                            'answer now as {"answer":[...]}, using the evidence already available.'
-                        )
-                    completion = await policy([message.copy() for message in messages], max_new_tokens=self.max_new_tokens, temperature=0.0 if evaluation else self.temperature)
+                        final_control = final_turn_message(task, evidence)
+                        if review_enabled:
+                            from .web_review import web_review_final_control
+
+                            final_control = web_review_final_control(final_control)
+                        messages.append(final_control)
+                    call = policy
+                    options = {}
+                    if (self.web_structured_final and evaluation and evidence is not None
+                            and (index == self.max_steps - 1 or self.web_structured_actions)):
+                        from .web_structured import web_action_schema, web_final_schema
+
+                        call = getattr(policy, "generate_structured", None)
+                        if not callable(call):
+                            raise ValueError("Structured Web generation requires a policy with generate_structured capability")
+                        if index == self.max_steps - 1:
+                            options["json_schema"] = web_final_schema(_answer_columns(task), evidence.fetched_sources)
+                        else:
+                            options["json_schema"] = web_action_schema(
+                                _answer_columns(task), evidence.fetched_sources,
+                                successful_search=bool(evidence.searches),
+                                **({"cached_rows": True} if cached_rows_enabled else {}),
+                            )
+                        if review_enabled:
+                            from .web_review import web_review_schema
+
+                            options["json_schema"] = web_review_schema(options["json_schema"])
+                    if self.cuad_structured_actions and task.benchmark == "cuad":
+                        from .cuad_structured import cuad_action_schema, cuad_final_schema
+
+                        call = getattr(policy, "generate_structured", None)
+                        if not callable(call):
+                            raise ValueError("Structured CUAD generation requires generate_structured capability")
+                        options["json_schema"] = (cuad_final_schema() if index == self.max_steps - 1
+                                                  else cuad_action_schema())
+                    request_messages = [message.copy() for message in messages]
+                    if navigation is not None:
+                        navigation.observe_events(events)
+                        snapshot = navigation.render()
+                        navigation_snapshots.append({"turn": index, "content": snapshot})
+                        request_messages.insert(len(request_messages) - (index == self.max_steps - 1),
+                                                {"role": "user", "content": snapshot})
+                    if research_enabled:
+                        from .web_research import web_research_checkpoint
+
+                        checkpoint = web_research_checkpoint(_answer_columns(task), turn=index, max_steps=self.max_steps)
+                        research_snapshots.append({"turn": index, "content": checkpoint})
+                        request_messages.insert(len(request_messages) - (index == self.max_steps - 1),
+                                                {"role": "user", "content": checkpoint})
+                    completion = await call(
+                        request_messages, max_new_tokens=self.max_new_tokens,
+                        temperature=self.evaluation_temperature if evaluation else self.temperature,
+                        **options,
+                    )
                     if not isinstance(completion, PolicyCompletion):
                         raise TypeError("policy must return PolicyCompletion")
                     steps.append(completion)
@@ -350,7 +590,7 @@ class EpisodeRunner:
                             if reasons:
                                 remaining = self.max_steps - index - 1
                                 evidence.rejections.append({"turn": index, "reasons": reasons})
-                                messages.append({"role": "user", "content": evidence.feedback(reasons, remaining)})
+                                messages.append({"role": "user", "content": evidence.feedback(reasons, remaining, task)})
                                 if not remaining:
                                     status, detail = "evidence_failure", "WideSearch final rejected: " + ", ".join(reasons)
                                     break
@@ -369,7 +609,7 @@ class EpisodeRunner:
                                 if index == self.max_steps - 1:
                                     observation = {"error": "Tools are unavailable on the final turn; no tool was executed."}
                                 elif tool == "search_document" and document_tools:
-                                    observation = document_tools.search_document(**arguments)
+                                    observation = self._search_document(document_tools, **arguments)
                                 elif tool == "read_document" and document_tools:
                                     observation = document_tools.read_document(**arguments)
                                 elif tool == "web_search" and web_tools:
@@ -389,15 +629,25 @@ class EpisodeRunner:
                     messages.append({"role": "user", "content": "Tool observation (source material):\n" + json.dumps(observation, ensure_ascii=False) + f"\nRemaining turns: {remaining}."})
         except asyncio.CancelledError:
             raise
+        except ModelProtocolFailure as exc:
+            steps.append(exc.completion)
+            status, detail = "model_protocol_failure", exc.reason
+            model_protocol_failure = {"protocol": exc.protocol, "trace_id": exc.trace_id, "reason": exc.reason}
         except (InfrastructureError, TimeoutError, ConnectionError) as exc:
             status, detail = "infrastructure_error", str(exc)
         metrics: dict[str, Any] = {"valid_format": float(status == "completed"), "model_calls": len(steps), "tool_calls": len(events)}
+        if model_protocol_failure is not None:
+            metrics["model_protocol_failure"] = model_protocol_failure
         if evidence is not None:
             if status == "max_steps":
                 status, detail = "evidence_failure", "WideSearch did not submit an evidence-supported final within the model turn budget"
             metrics["evidence_guard"] = evidence.diagnostics(status == "completed")
+        if navigation is not None:
+            metrics["web_navigation_ledger"] = navigation_snapshots
+        if research_enabled:
+            metrics["web_research_checkpoints"] = research_snapshots
         reward = 0.0
-        if status == "completed" and task.benchmark == "cuad":
+        if status == "completed" and task.benchmark == "cuad" and (task.split != "train" or score_train):
             metrics.update(cuad_task_metrics(task.id, list(task.gold or []), answer))
             spans = cuad_predictions(answer)
             normalized_document = " ".join(task.document.split())
@@ -409,7 +659,7 @@ class EpisodeRunner:
             metrics["citation_validity"] = web_tools.citation_validity(answer) if web_tools else 0.0
             # Never consult held-out WideSearch answers during rollout. Final
             # scoring is a separate operation, after predictions are saved.
-            if task.split == "train":
+            if task.split == "train" and score_train:
                 from .widesearch_metrics import evaluate_widesearch
 
                 score = evaluate_widesearch(answer, task.gold or [], task.metadata.get("evaluation", {}))

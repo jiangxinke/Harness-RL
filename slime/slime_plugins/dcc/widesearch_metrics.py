@@ -23,6 +23,7 @@ from urllib.request import Request, urlopen
 import pandas as pd
 
 ALIGNMENT_PROTOCOL = "same_entity_v9"
+TABLE_INPUT_PROTOCOL = "csv-inference-v2"
 
 HEADER_ALIGN_PROMPT = """Your task is to align two vocabularies of table column headers: response-table labels and the required reference schema. Column headers describe fields, not the identity of named entities.
 
@@ -416,16 +417,28 @@ def _judge_cells(predicted: list[str], targets: list[str], criterion: str, judge
     return values
 
 
+def _infer_table(frame: pd.DataFrame) -> pd.DataFrame:
+    """Apply the reference CSV loader's inference to every response format.
+
+    The upstream evaluator reads Markdown tables with ``pd.read_csv``. Native
+    JSON rows are a harness extension, so they must receive the same numeric,
+    boolean and missing-cell inference before the unchanged metric pipeline.
+    """
+    if frame.empty:
+        return frame
+    return pd.read_csv(StringIO(frame.to_csv(index=False)))
+
+
 def extract_table(prediction: str | list[dict]) -> pd.DataFrame | None:
     """Accept native JSON rows or the benchmark's fenced Markdown table."""
     if isinstance(prediction, list):
-        return pd.DataFrame(prediction)
+        return _infer_table(pd.DataFrame(prediction))
     if not isinstance(prediction, str):
         return None
     try:
         parsed = json.loads(prediction)
         if isinstance(parsed, list):
-            return pd.DataFrame(parsed)
+            return _infer_table(pd.DataFrame(parsed))
     except (ValueError, TypeError):
         pass
     fenced = re.findall(r"```markdown(.*?)```", prediction, re.DOTALL)
@@ -442,13 +455,7 @@ def extract_table(prediction: str | list[dict]) -> pd.DataFrame | None:
         rows.append(cells)
     if len(rows) < 2 or any(len(row) != len(rows[0]) for row in rows):
         return None
-    # Use CSV inference to match the reference loader's numeric handling.
-    import csv
-
-    stream = StringIO()
-    csv.writer(stream).writerows(rows)
-    stream.seek(0)
-    return pd.read_csv(stream)
+    return _infer_table(pd.DataFrame(rows[1:], columns=rows[0]))
 
 
 def _preprocess(value: str, name: str) -> str:
@@ -530,6 +537,7 @@ def evaluate_widesearch(
         "f1_by_item": 0.0,
         "evaluation_protocol": "official_protocol_custom_judge" if judge else "strict_exact_proxy",
         "alignment_protocol": ALIGNMENT_PROTOCOL if judge else None,
+        "table_input_protocol": TABLE_INPUT_PROTOCOL,
         "judge_model": getattr(judge, "model", None),
         "judge_batch_size": judge_batch_size if judge else None,
         "judge_max_batch_chars": judge_max_batch_chars if judge else None,

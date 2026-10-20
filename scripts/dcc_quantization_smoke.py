@@ -28,8 +28,9 @@ def main():
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--train-step", action="store_true")
     parser.add_argument("--training-prompt-tokens", type=int, default=256)
+    parser.add_argument("--lora-rank", type=int, default=8)
     args = parser.parse_args()
-    if min(args.prompt_tokens, args.max_new_tokens, args.training_prompt_tokens) < 1:
+    if min(args.prompt_tokens, args.max_new_tokens, args.training_prompt_tokens, args.lora_rank) < 1:
         parser.error("token budgets must be positive")
     destination = Path(args.output_dir)
     destination.mkdir(parents=True, exist_ok=True)
@@ -37,7 +38,8 @@ def main():
     torch.cuda.set_device(0)
     torch.cuda.reset_peak_memory_stats()
     start = time.monotonic()
-    model, tokenizer = load_policy_model(args.model, quantization="nf4", trainable=args.train_step)
+    model, tokenizer = load_policy_model(args.model, quantization="nf4", trainable=args.train_step,
+                                        lora_rank=args.lora_rank)
 
     def memory():
         torch.cuda.synchronize()
@@ -50,6 +52,7 @@ def main():
 
     report = {
         "quantization": model.dcc_quantization_report,
+        "lora_rank": args.lora_rank if args.train_step else None,
         "load_seconds": time.monotonic() - start,
         "load_memory": memory(),
     }

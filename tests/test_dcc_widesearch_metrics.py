@@ -1,11 +1,15 @@
 import ast
 import json
+from io import StringIO
 
+import pandas as pd
 import pytest
 from slime_plugins.dcc.widesearch_metrics import (
     ALIGNMENT_PROTOCOL,
+    TABLE_INPUT_PROTOCOL,
     JudgeError,
     evaluate_widesearch,
+    extract_table,
 )
 
 
@@ -65,6 +69,59 @@ def test_markdown_and_json_rows_score_equally():
     result = evaluate_widesearch(text, gold, configuration())
     assert result["score"] == 1
     assert result["f1_by_item"] == 1
+
+
+@pytest.mark.parametrize("code", ["1", 1, "1.0", 1.0])
+def test_native_json_numeric_keys_match_reference_csv_inference(code):
+    evaluation = {"required": ["code", "name"], "unique_columns": ["code"], "eval_pipeline": {
+        "code": {"metric": ["exact_match"], "preprocess": ["norm_str"]},
+        "name": {"metric": ["exact_match"], "preprocess": ["norm_str"]},
+    }}
+    # Gold's float dtype is what the reference CSV loader returns for a column
+    # containing decimal-valued numbers. JSON quoting must not change a match.
+    gold = [{"code": 1.0, "name": "Alpha"}]
+    native = [{"code": code, "name": "Alpha"}]
+    markdown = "| code | name |\n| --- | --- |\n| 1 | Alpha |"
+    for payload in (native, json.dumps(native), markdown):
+        result = evaluate_widesearch(payload, gold, evaluation)
+        assert result["f1_by_row"] == result["f1_by_item"] == 1
+        assert result["num_pred_rows"] == result["num_gold_rows"] == 1
+        assert result["table_input_protocol"] == TABLE_INPUT_PROTOCOL
+
+
+def test_all_wire_formats_preserve_reference_csv_cells_rows_and_columns():
+    # A fixed CSV fixture exercises the upstream pd.read_csv semantics directly:
+    # numeric strings/leading zeros, quoted commas/quotes, booleans and NA cells.
+    expected = pd.read_csv(StringIO(
+        'code,label,number,flag,empty,missing\n'
+        '001,"Alpha, ""quoted"" name",1.0,True,,NaN\n'
+        '002,Beta,2,False,,NA\n'
+    ))
+    native = [
+        {"code": "001", "label": 'Alpha, "quoted" name', "number": "1.0", "flag": "True", "empty": "", "missing": "NaN"},
+        {"code": "002", "label": "Beta", "number": "2", "flag": "False", "empty": "", "missing": "NA"},
+    ]
+    markdown = (
+        '| code | label | number | flag | empty | missing |\n'
+        '| --- | --- | --- | --- | --- | --- |\n'
+        '| 001 | Alpha, "quoted" name | 1.0 | True | | NaN |\n'
+        '| 002 | Beta | 2 | False | | NA |'
+    )
+    for payload in (native, json.dumps(native), markdown):
+        actual = extract_table(payload)
+        pd.testing.assert_frame_equal(actual, expected)
+        assert actual.shape == (2, 6)
+
+
+@pytest.mark.parametrize("native,markdown", [
+    ([{"value": ""}, {"value": ""}], '| value |\n| --- |\n| |\n| |'),
+    ([{"left": "", "right": ""}], '| left | right |\n| --- | --- |\n| | |'),
+])
+def test_empty_cells_do_not_drop_rows_or_columns(native, markdown):
+    expected = extract_table(markdown)
+    assert expected.shape == (len(native), len(native[0]))
+    for payload in (native, json.dumps(native)):
+        pd.testing.assert_frame_equal(extract_table(payload), expected)
 
 
 def test_custom_judge_aligns_entities_and_scores_cells_separately():

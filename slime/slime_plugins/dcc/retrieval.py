@@ -174,9 +174,25 @@ def _rank(document_tools: DocumentTools, query: str) -> list[int]:
     return [index for _, index in sorted(scores, key=lambda item: (-item[0], item[1]))]
 
 
+def document_read_windows(hit: dict[str, Any]) -> list[dict[str, int]]:
+    """Fixed public read plans derived only from an observed search hit."""
+    start, end = hit["start"], hit["end"]
+    if type(start) is not int or type(end) is not int or not 0 <= start < end:
+        raise ValueError("read window requires valid observed hit offsets")
+    windows = [
+        {"start": start, "end": end}, {"start": start},
+        {"start": start, "end": start + 12000},
+        {"start": max(0, start - 800), "end": end + 800},
+        {"start": max(0, start - 1600), "end": end + 1600},
+        {"start": max(0, start - 4000), "end": start + 8000},
+    ]
+    return list({tuple(window.items()): window for window in windows}.values())
+
+
 def search_document(
     document_tools: DocumentTools, query: str, *, top_k: int = 4,
     profile: RetrievalProfile | None = None,
+    context_chars: int = 0, max_context_chars: int = 16000,
 ) -> dict[str, Any]:
     """Retrieve the same bounded number of original source chunks.
 
@@ -185,7 +201,9 @@ def search_document(
     """
     words = profile.questions.get(_question(query), ()) if profile is not None else ()
     if not words:
-        return document_tools.search_document(query, top_k=top_k)
+        observation = document_tools.search_document(query, top_k=top_k)
+        return expand_document_context(document_tools, observation, context_chars=context_chars,
+                                       max_chars=max_context_chars)
     fused: Counter = Counter()
     for order in (_rank(document_tools, query), _rank(document_tools, " ".join(words))):
         for position, index in enumerate(order):
@@ -200,4 +218,50 @@ def search_document(
         }
         for index in order[:max(1, min(int(top_k), 8))]
     ]
-    return {"document_length": len(document_tools.document), "hits": hits}
+    return expand_document_context(document_tools, {"document_length": len(document_tools.document), "hits": hits},
+                                   context_chars=context_chars, max_chars=max_context_chars)
+
+
+def expand_document_context(
+    document_tools: DocumentTools, observation: dict[str, Any], *,
+    context_chars: int = 800, max_chars: int = 16000,
+) -> dict[str, Any]:
+    """Expand ranked hits on both sides, merge overlap, and cap source characters.
+
+    This opt-in repair for clauses crossing chunk boundaries uses source offsets
+    only. It never looks at answers or task metadata. The character cap counts
+    the returned source text, not JSON/chat formatting or tokenizer overhead;
+    callers must still enforce their actual token budget. Zero context preserves
+    the historical observation byte-for-byte in value.
+    """
+    if type(context_chars) is not int or context_chars < 0:
+        raise ValueError("context_chars must be a nonnegative integer")
+    if type(max_chars) is not int or max_chars < 1:
+        raise ValueError("max_chars must be a positive integer")
+    if context_chars == 0:
+        return observation
+    source = document_tools.document
+    windows: list[dict[str, Any]] = []
+    for hit in observation["hits"]:
+        start, end = hit["start"], hit["end"]
+        if type(start) is not int or type(end) is not int or not 0 <= start < end <= len(source) or hit["text"] != source[start:end]:
+            raise ValueError("retrieval hit must identify an exact source interval")
+        lower, upper = max(0, start - context_chars), min(len(source), end + context_chars)
+        touching = [i for i, window in enumerate(windows) if lower <= window["end"] and upper >= window["start"]]
+        merged_lower = min([lower] + [windows[i]["start"] for i in touching])
+        merged_upper = max([upper] + [windows[i]["end"] for i in touching])
+        used = sum(window["end"] - window["start"] for i, window in enumerate(windows) if i not in touching)
+        if used + merged_upper - merged_lower > max_chars:
+            # Prefer the higher-ranked windows already returned. A later hit
+            # may still fit through overlap, so continue rather than stopping.
+            continue
+        merged = {"start": merged_lower, "end": merged_upper,
+                  "text": source[merged_lower:merged_upper], "score": hit["score"]}
+        if touching:
+            first = touching[0]
+            merged["score"] = windows[first]["score"]
+            windows[first] = merged
+            windows = [window for i, window in enumerate(windows) if i not in touching[1:]]
+        else:
+            windows.append(merged)
+    return {**observation, "hits": windows}

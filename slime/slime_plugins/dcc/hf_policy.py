@@ -14,28 +14,100 @@ import torch
 from .episode import PolicyCompletion
 
 
+PROMPT_ENCODING_VERSION = "message-boundary-source-excerpts-v2"
+_SOURCE_PREFIXES = (
+    "Initial contract retrieval (source material):\n",
+    "Tool observation (source material):\n",
+)
+_SOURCE_OMISSION = "\n[Source content omitted to fit context.]\n"
+
+
+def _chat_tokens(tokenizer, messages, *, generation_prompt=True):
+    tokens = tokenizer.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=generation_prompt,
+        enable_thinking=False,
+    )
+    return list(tokens["input_ids"] if hasattr(tokens, "keys") else tokens)
+
+
+def _source_excerpt(content, characters, *, initial):
+    # Runner-added controls follow the source body. They must survive even when
+    # one observation is too large; never obtain them from a sliced token tail.
+    control_start = len(content)
+    for marker in ("\nRemaining turns:", "\nFinal turn:"):
+        position = content.rfind(marker)
+        if position >= 0:
+            control_start = min(control_start, position)
+    source, controls = content[:control_start], content[control_start:]
+    prefix = next((value for value in _SOURCE_PREFIXES if source.startswith(value)), "")
+    body = source[len(prefix):]
+    characters = min(characters, len(body))
+    if initial:
+        # Initial CUAD hits are ranked: keep the highest-ranked source first.
+        excerpt = body[:characters]
+    else:
+        head = (characters + 1) // 2
+        tail = characters // 2
+        excerpt = body[:head] + _SOURCE_OMISSION + (body[-tail:] if tail else "")
+    if initial:
+        excerpt += _SOURCE_OMISSION
+    return prefix + excerpt + controls
+
+
 def encode_messages(tokenizer, messages: list[dict[str, str]], max_prompt_tokens: int, *, allow_truncation: bool = True) -> list[int]:
-    tokens = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, enable_thinking=False)
-    if hasattr(tokens, "keys"):
-        tokens = tokens["input_ids"]
-    if len(tokens) > max_prompt_tokens:
-        if not allow_truncation:
-            raise ValueError("Judge input exceeds its context budget; refusing to truncate evidence")
-        # Preserve the full system contract and original question. Keep the
-        # highest-ranked initial excerpts, then recent observations on later
-        # calls. Source text can be trimmed; the question must not disappear.
-        header = tokenizer.apply_chat_template(messages[:2], tokenize=True, add_generation_prompt=False, enable_thinking=False)
-        if hasattr(header, "keys"):
-            header = header["input_ids"]
-        prefix = len(header)
-        if prefix + 128 > max_prompt_tokens:
-            raise ValueError("System prompt and question exceed the configured prompt budget")
-        remaining = max_prompt_tokens - prefix
-        if len(messages) <= 3:
-            tokens = tokens[: max_prompt_tokens - 32] + tokens[-32:]
-        else:
-            tokens = tokens[:prefix] + tokens[-remaining:]
-    return tokens
+    """Keep the task and recent messages, re-templating any source excerpt.
+
+    At most one boundary source message is shortened. No assistant completion,
+    system instruction, task, role delimiter, or final-turn control is sliced.
+    Excerpts use observed source text only and do not inspect task labels.
+    """
+    if type(max_prompt_tokens) is not int or max_prompt_tokens < 1:
+        raise ValueError("A positive integer prompt budget is required")
+    tokens = _chat_tokens(tokenizer, messages)
+    if len(tokens) <= max_prompt_tokens:
+        return tokens
+    if not allow_truncation:
+        raise ValueError("Judge input exceeds its context budget; refusing to truncate evidence")
+    anchors = messages[:2]
+    retained = _chat_tokens(tokenizer, anchors)
+    if len(retained) > max_prompt_tokens or len(messages) <= 2:
+        raise ValueError("System prompt and question exceed the configured prompt budget")
+
+    recent = []
+    for index in range(len(messages) - 1, 1, -1):
+        message = messages[index]
+        candidate = _chat_tokens(tokenizer, anchors + [message] + recent)
+        if len(candidate) <= max_prompt_tokens:
+            recent.insert(0, message)
+            retained = candidate
+            continue
+        source_message = message["role"] == "tool" or (
+            message["role"] == "user" and (
+                index == 2 or message["content"].startswith(_SOURCE_PREFIXES)
+            )
+        )
+        if source_message:
+            # Search character boundaries, then render the complete message.
+            # Unicode and chat special tokens are never cut through raw IDs.
+            initial = index == 2 and (
+                len(messages) == 3 or message["content"].startswith(_SOURCE_PREFIXES[0])
+            )
+            low, high, fitted = 0, len(message["content"]), None
+            while low <= high:
+                size = (low + high) // 2
+                excerpt = {**message, "content": _source_excerpt(message["content"], size, initial=initial)}
+                candidate = _chat_tokens(tokenizer, anchors + [excerpt] + recent)
+                if len(candidate) <= max_prompt_tokens:
+                    fitted = candidate
+                    low = size + 1
+                else:
+                    high = size - 1
+            if fitted is not None:
+                return fitted
+        if recent:
+            return retained
+        raise ValueError("Latest source observation and its controls cannot fit the prompt budget")
+    return retained
 
 
 class HFPolicy:
@@ -158,15 +230,19 @@ class HFPolicy:
 
 def load_policy_model(model_name: str, *, adapter: str | None = None, trainable: bool = False, rank: int = 0, lora_rank: int = 8, quantization: str = "none"):
     from peft import LoraConfig, PeftModel, get_peft_model
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
     if quantization not in {"none", "nf4"}:
         raise ValueError("quantization must be 'none' or 'nf4'")
-    load_kwargs = {"experts_implementation": "grouped_mm"}
+    load_kwargs = {}
     if quantization == "nf4":
         from .hf_quantization import nf4_load_kwargs
 
         load_kwargs = nf4_load_kwargs()
+    else:
+        config = AutoConfig.from_pretrained(model_name)
+        if getattr(config, "num_experts", 0) > 0:
+            load_kwargs["experts_implementation"] = "grouped_mm"
     torch.cuda.set_device(rank)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.padding_side = "left"

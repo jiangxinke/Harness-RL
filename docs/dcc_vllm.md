@@ -1,9 +1,133 @@
 # Optional vLLM evaluation
 
-The vLLM backend accelerates greedy benchmark generation with fused MoE
+The vLLM backend accelerates benchmark generation with fused MoE
 inference and continuous batching. HF remains the default for generation and
 the training runtime. This backend does not compute trainable log probabilities
-and rejects nonzero sampling temperatures.
+and uses greedy decoding by default. Explicit evaluation sampling is optional;
+it never changes the HF trainer's rollout probability calculation.
+
+The evaluation CLI accepts `--eval-temperature`, `--eval-top-p`, `--eval-top-k`,
+`--eval-min-p`, `--eval-presence-penalty`, `--eval-frequency-penalty` and
+`--eval-repetition-penalty`. Nondefault values require the vLLM backend. For
+example, the Qwen3-30B-A3B-Instruct-2507 model card recommends
+`--eval-temperature 0.7 --eval-top-p 0.8 --eval-top-k 20 --eval-min-p 0`.
+Presence penalties are an additional choice to validate on development data.
+These settings alone do not establish a quality improvement.
+
+Generation manifests and inference runtimes retain the full evaluation
+sampling configuration. Use a fresh output directory when changing it. A paired
+base/adapter comparison must declare the same full `generation.sampling`
+dictionary and matching `generation.temperature` in both protocol files.
+Legacy runs without sampling metadata remain greedy-only. Direct Python users
+pass an `EvaluationSampling` from `slime_plugins.dcc.eval_sampling` as
+`evaluation_sampling` to `load_vllm_policy`, and pass its temperature to each
+policy call; mismatches are rejected.
+
+`--web-structured-final` optionally constrains only the final-budget Web
+evaluation call using vLLM's xgrammar backend, with fallback disabled. The JSON
+schema contains the public required column names, scalar string/number/boolean/
+null cells, and exactly one citation per row drawn from actually read source URLs,
+matching the final review prompt.
+Every row must contain at least one nonempty string, number or boolean cell;
+other cells may remain unknown. This enforces the existing empty-row rejection
+during generation and does not remove or repair rows after generation.
+It supplies no answer values or target row count. Empty answers remain possible
+and still fail the evidence guard. Earlier turns, early answers, CUAD and
+training generation retain their existing behavior. Format constraints do not
+establish factual correctness or a quality improvement.
+
+The flag defaults off and requires vLLM. Startup preflights the installed
+structured-output API and JSON-schema grammar on CPU. Enabled generation
+requests also validate their actual schemas; unsupported escaped public column
+keys fail clearly instead of being renamed or weakening the schema.
+Enabled generation manifests and runtimes record `web_structured_final` as
+`{"enabled": true, "schema_version": "web-final-nonempty-row-read-citations-v2", "backend": "xgrammar"}`.
+Use a fresh output directory and declare the identical dictionary under
+`common.generation.web_structured_final` in both paired protocol files. Missing
+legacy metadata attests only disabled constraints. Direct Python callers must
+enable `web_structured_final=True` on both `load_vllm_policy` and `EpisodeRunner`;
+the runner calls the policy's explicit `generate_structured(..., json_schema=...)`
+capability only for the eligible final call.
+
+`--web-structured-actions` additionally constrains every earlier Web evaluation
+turn to one JSON action. It defaults off and requires `--web-structured-final`.
+Before an actual successful search, only `web_search` is permitted. Afterward,
+the schema allows a search, a fetch, or the existing final answer. The final
+budget turn still uses the final-only schema. This prevents consecutive tool
+objects from being parsed as just the last action. The evidence guard and
+scoring rules still apply, including rejection of unsupported or empty answers.
+Enabled manifests and runtimes record `web_structured_actions` as
+`{"enabled": true, "schema_version": "web-single-action-search-first-v1", "backend": "xgrammar"}`;
+paired protocols must declare the same dictionary under `common.generation`.
+Direct Python callers enable the switch on both the policy loader and runner.
+CUAD and training generation retain their existing behavior.
+
+`--web-explicit-review` optionally adds brief `plan` and `checks` JSON strings
+before every structured Web action. It defaults off and requires both structured
+switches and vLLM. Each string is limited to 240 Unicode characters. The model
+reviews the original filters, unique keys, missing-field rules, evidence still
+needed and finite stopping. This uses public task instructions and observed
+sources. Review text grants no search, read or citation evidence; the existing
+answer guard and scorer still apply. CUAD and training prompts are unchanged.
+Direct Python callers pass `web_explicit_review=True` to the loader and runner.
+
+Enabled manifests and inference runtimes record `web_explicit_review` with
+`enabled=true`, schema and prompt version `web-explicit-plan-checks-v1`,
+`max_chars=240`, scope `every-structured-web-action` and backend `xgrammar`.
+Paired protocols require that same dictionary in `common.generation`.
+Scoring and resume reject mismatched configurations; missing legacy metadata
+means off. The reviewed schema preserves the existing tool and row restrictions.
+Compare fresh full task sets with the same sampling, tools and token budgets.
+The additional text consumes those budgets, and fluent checks do not establish
+correctness or an improvement in benchmark scores.
+
+The Web reader also reports when a returned text window exactly repeats an
+earlier read in the same episode. It preserves the full text, navigation and
+citation URL; the progress note helps the model choose an unseen section or a
+different search. Equal windows do not establish that complete sources are
+identical or that the source lacks useful information.
+
+`--web-browser-reader` optionally renders successful public HTML on CPU. It
+defaults off and currently requires the vLLM evaluation backend. Install the
+separate optional dependency and its Chromium binary in the evaluation
+environment before enabling it:
+
+```bash
+"$VLLM_ENV/bin/python" -m pip install -r configs/dcc/requirements-browser.txt
+"$VLLM_ENV/bin/python" -m playwright install chromium
+```
+
+The evaluator preflights Playwright 1.56.0 and Chromium before writing the
+generation manifest or loading the GPU model. One reader is shared across the
+process with at most two concurrent pages. Requests, responses, bytes, visible
+text and links have bounded budgets; each read has a 45-second total timeout.
+Browser cleanup runs after all episodes and the policy have stopped, including
+on setup or generation failures.
+
+The browser is used only after an ordinary successful HTML read. HTTP errors,
+access challenges, PDF, spreadsheets and JSON retain their existing paths.
+Browser failures retain the successful HTTP observation. Reads expose rendered
+visible text and public links. Observed public GET JSON collection URLs are
+navigation metadata: their contents have not been read or cited until an
+explicit fetch succeeds. Redirects, private destinations, downloads and
+non-GET/HEAD requests are blocked by the optional reader.
+
+Enabled manifests and inference runtimes include `web_browser_reader` with
+the complete configuration, reader version, Playwright version, Chromium
+version and CPU execution setting. Copy that exact object into
+`common.generation.web_browser_reader` in both paired protocols. Scoring and
+paired comparison reject missing, unsupported or mismatched enabled metadata.
+Default-off runs add no browser metadata and do not import Playwright. Use a
+fresh output directory and a fresh matched base when enabling this option;
+neither the reader nor format constraints establish factual correctness.
+
+Add `--vllm-async` to the evaluation CLI to use native V1 per-request
+scheduling. Short requests can finish while a longer request remains active;
+episode cancellation invokes `AsyncLLM.abort` on the engine's owning event
+loop. This mode avoids the synchronous batch-delivery barrier and never calls
+a synchronous engine's abort method from another thread. The generation
+manifest and runtime record this mode, so use a new output directory when
+switching it. The synchronous backend remains available by omitting the flag.
 
 Use a separate environment with a CUDA-compatible driver:
 
@@ -62,7 +186,7 @@ For data parallel evaluation, launch independent engines with
 shared `--output-dir`. Each process keeps launcher `RANK=0`, `LOCAL_RANK=0` and
 `WORLD_SIZE=1`; select its own GPU with `CUDA_VISIBLE_DEVICES`. The logical
 shard only controls task assignment, per-rank output names and the PyTorch seed.
-Model settings, greedy sampling and token budgets remain the same.
+Model settings, sampling configuration and token budgets remain the same.
 
 For example, invoke this once per assigned GPU, setting `SHARD_INDEX` from zero
 through `SHARD_COUNT - 1`:
@@ -231,10 +355,12 @@ Save `policy.provenance` beside the prediction manifest in a new external output
 directory. It records model/tokenizer revisions, resolved model revision when
 available, runtime versions, adapter configuration/path/size/modification time,
 precision, seed, context/token budgets, memory fraction and cache settings.
-Adapter metadata identifies the supplied local checkpoint without expensive
-weight hashing. New evaluation runtime records also retain weight ctime,
-inode and device, so replacing a stable adapter symlink target is detected
-even when size and mtime are preserved. Resume checks the saved identity
+The evaluation CLI identifies the small LoRA checkpoint by path, configuration,
+filename, byte size and a content digest. Local ctime, inode, device and mtime
+invalidate the digest cache when a checkpoint changes; they are not the
+semantic identity, so an identical checkpoint copy can be evaluated on another
+worker. The unchanged local checkpoint is not repeatedly hashed, and base model
+weights are not hashed. Resume checks the saved identity
 before reusing completed predictions, and refuses inconsistent runtimes rather
 than overwriting them. Logical generation records identity in its manifest
 before loading and verifies it again afterward. Keep checkpoints immutable
@@ -259,3 +385,11 @@ The executor rank/rendezvous and shutdown behavior are defined in
 [UniProcExecutor](https://github.com/vllm-project/vllm/blob/v0.11.2/vllm/v1/executor/uniproc_executor.py),
 [MultiprocExecutor](https://github.com/vllm-project/vllm/blob/v0.11.2/vllm/v1/executor/multiproc_executor.py),
 and [EngineCoreClient](https://github.com/vllm-project/vllm/blob/v0.11.2/vllm/v1/engine/core_client.py).
+
+
+The HTTP reader also accepts bounded ZIP text exports (CSV, TSV, XML, JSON and TXT). `archive_members` lists literal previews and source-wide character offsets; fetch the source URL at a readable member’s `start` before citing its contents. Downloads are limited to 5 MB, 128 members and one million decoded text characters. Archives are read in memory; encrypted, nested, unsafe, malformed or oversized archives fail without publishing evidence. XLSX keeps its existing reader. Legacy binary XLS is unsupported.
+
+Automatic reading seeks up to `--auto-read-sources` successful new pages after each search, while all successful, empty and failed reads count toward the unchanged four-attempt episode limit. Errors remain visible in the observation and grant no evidence. Sources exceeding the 5 MB download limit are rejected explicitly instead of returning an incomplete byte prefix.
+
+
+Structured Web evaluation can opt into `--web-bounded-whitespace`. It bounds insignificant JSON space, LF and TAB runs to eight characters using the pinned xgrammar 0.1.25 EBNF converter, with fallback disabled. It supports both ordinary structured actions and finite explicit review. The flag defaults off; JSON string values, public schema and evidence/scoring guards stay unchanged. Generation, resume, scoring and paired comparison require matching opt-in provenance. This formatting change needs fresh GPU validation and does not by itself establish better answers.

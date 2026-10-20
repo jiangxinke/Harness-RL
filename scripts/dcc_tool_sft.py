@@ -25,14 +25,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import torch
 import torch.distributed as dist
 from dcc_train import supervised_example
-from slime_plugins.dcc import EpisodeRunner, load_tasks
-from slime_plugins.dcc.episode import _WebEvidence
+from slime_plugins.dcc import EpisodeRunner, Task, load_tasks
+from slime_plugins.dcc.episode import CUAD_FINAL_REVIEW, EPISODE_PROMPT_VERSION, FINAL_TURN, _WebEvidence, final_turn_message
 from slime_plugins.dcc.hf_policy import (
+    PROMPT_ENCODING_VERSION,
     completion_logprobs,
     encode_messages,
     load_policy_model,
 )
 from slime_plugins.dcc.retrieval import load_retrieval_profile
+from slime_plugins.dcc.tools import WEB_READER_VERSION
 
 STAGES = ("search", "fetch", "final")
 CUAD_STAGES = ("search", "read", "final")
@@ -52,6 +54,48 @@ class Example:
         return len(self.prompt) + len(self.completion)
 
 
+def _is_final_control(value, messages, message, evidence=None):
+    """Recognize the exact runner suffix without consuming a tool observation."""
+    if value.get("stage") != "final":
+        return False
+    if evidence is None:
+        return message in (
+            {"role": "user", "content": FINAL_TURN},
+            {"role": "user", "content": FINAL_TURN + CUAD_FINAL_REVIEW},
+        )
+    metadata = {}
+    if evidence is not None:
+        marker = "Required answer columns: "
+        system = messages[0]["content"]
+        if marker not in system:
+            return False
+        try:
+            columns, _ = json.JSONDecoder().raw_decode(system.split(marker, 1)[1])
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(columns, list) or any(not isinstance(column, str) for column in columns):
+            return False
+        metadata = {"evaluation": {"required": columns}}
+    task = Task(value["task_id"], "widesearch", "train", messages[1]["content"], metadata=metadata)
+    if message == final_turn_message(task, evidence):
+        return True
+    # Keep exact compatibility with previously prepared full Web controls.
+    # Columns and read URLs are reconstructed from the validated history;
+    # arbitrary suffixes and tool observations are never controls.
+    legacy = (
+        FINAL_TURN
+        + " Recheck the original task below before writing rows. Exclude entities outside any "
+        "requested filter, remove duplicate entities, and finish the JSON when the verified "
+        "set is exhausted. Keep supported partial rows rather than discarding them. "
+        "Original task: " + task.prompt
+        + "\nExact answer column keys: " + json.dumps(columns, ensure_ascii=False)
+        + ". Add citations to each row. Successfully read source URLs: "
+        + json.dumps(sorted(evidence.fetched_sources)[:8])
+        + ". Use each row's actual supporting read URL in its citations list."
+    )
+    return message == {"role": "user", "content": legacy}
+
+
 def validate_record(value: dict) -> dict:
     """Reject split leakage and replay real tool observations for finals."""
     if not isinstance(value, dict) or value.get("source") != "independent_curriculum" or value.get("split") != "train":
@@ -69,6 +113,9 @@ def validate_record(value: dict) -> dict:
     evidence, fetched = _WebEvidence(), []
     pending = None
     for index, message in enumerate(messages[2:], 2):
+        if (index == len(messages) - 1 and pending is None
+                and _is_final_control(value, messages, message, evidence)):
+            continue
         if message["role"] == "assistant":
             try:
                 pending = json.loads(message["content"])
@@ -187,22 +234,27 @@ def validate_cuad_record(value):
         return valid
 
     def check_read(arguments):
+        from slime_plugins.dcc.retrieval import document_read_windows
+
         if not isinstance(arguments, dict):
             raise ValueError("CUAD read arguments must be an object")
-        start, end = arguments.get("start"), arguments.get("end")
-        matching = [(left, right) for left, right in ranges if left == start]
-        if type(start) is not int or start < 0 or not matching:
-            raise ValueError("CUAD read start was not exposed by previous source hits")
-        if end is None:
-            return
-        if type(end) is not int or end <= start or (end != start + 12000 and all(end != right for _, right in matching)):
-            raise ValueError("CUAD read must use a hit boundary or a public reader window")
+        if any(type(value) is not int for value in arguments.values()) or not any(
+            arguments in document_read_windows({"start": left, "end": right}) for left, right in ranges
+        ):
+            raise ValueError("CUAD read must use a hit boundary or a public reader window exposed by previous source hits")
 
     pending = None
-    for message in messages[2:]:
+    for index, message in enumerate(messages[2:], 2):
         content = message["content"]
+        if (index == len(messages) - 1 and pending is None
+                and _is_final_control(value, messages, message)):
+            continue
         if message["role"] == "user" and pending is None and content.startswith("Initial contract retrieval (source material):\n"):
-            observe(json.loads(content.split("\n", 1)[1]))
+            # The runner exposes real source text before its first policy call.
+            # Count that evidence without inventing a historical model tool.
+            if index != 2:
+                raise ValueError("CUAD initial retrieval must precede all historical actions")
+            successes += int(observe(json.loads(content.split("\n", 1)[1])))
         elif message["role"] == "assistant" and pending is None:
             pending = json.loads(content)
             if not isinstance(pending, dict) or "answer" in pending or pending.get("tool") not in {"search_document", "read_document"}:
@@ -305,17 +357,20 @@ def encode_record(record, tokenizer, *, max_prompt, max_response, batch_tokens, 
 
 class MixedSampler:
     def __init__(self, records, cuad_tasks, tokenizer, runner, *, rank, world, seed, web_fraction,
-                 negative_fraction, max_prompt, max_response, batch_tokens, cuad_records=(), cuad_tool_fraction=0.75):
+                 negative_fraction, max_prompt, max_response, batch_tokens, cuad_records=(), cuad_tool_fraction=0.75,
+                 cuad_tool_partial_stages=False, record_encoder=None, recorded_cuad_stages=False):
+        encoder = encode_record if record_encoder is None else record_encoder
         self.rng = random.Random(seed + rank)
         self.tokenizer, self.runner = tokenizer, runner
         self.max_prompt, self.max_response, self.batch_tokens = max_prompt, max_response, batch_tokens
         self.skips, self.web, self.cuad = Counter(), defaultdict(list), defaultdict(lambda: defaultdict(list))
         self.cuad_tools = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+        self.cuad_missing_stages = []
         ids = sorted({record["task_id"] for record in records})
         assigned = set(ids[rank::world])
         for record in records:
             if record["task_id"] in assigned:
-                example = encode_record(record, tokenizer, max_prompt=max_prompt, max_response=max_response,
+                example = encoder(record, tokenizer, max_prompt=max_prompt, max_response=max_response,
                                         batch_tokens=batch_tokens, skips=self.skips)
                 if example is not None:
                     self.web[example.stage].append(example)
@@ -331,14 +386,19 @@ class MixedSampler:
                 self.cuad[bool(task.gold)][str(task.metadata.get("category", task.prompt))].append(task)
         for record in cuad_records:
             if record["task_id"] in assigned_cuad:
-                example = encode_record(record, tokenizer, max_prompt=max_prompt, max_response=max_response,
+                example = encoder(record, tokenizer, max_prompt=max_prompt, max_response=max_response,
                                         batch_tokens=batch_tokens, skips=self.skips)
                 if example is not None:
                     self.cuad_tools[record["metadata"]["positive"]][example.category][record["stage"]].append(example)
-        for categories in self.cuad_tools.values():
+        for positive, categories in self.cuad_tools.items():
             for category, stages in categories.items():
                 if set(stages) != set(CUAD_STAGES):
-                    raise ValueError(f"CUAD tool category {category!r} lost a full stage; raise budgets; skipped={dict(self.skips)}")
+                    if not (recorded_cuad_stages and set(stages) <= set(CUAD_STAGES)
+                            or cuad_tool_partial_stages and positive and set(stages) == {"search", "read"}):
+                        raise ValueError(f"CUAD tool category {category!r} lost a full stage; raise budgets; skipped={dict(self.skips)}")
+                    self.cuad_missing_stages.append({"positive": positive, "category": category,
+                        "available_stages": [stage for stage in CUAD_STAGES if stage in stages],
+                        "missing_stages": [stage for stage in CUAD_STAGES if stage not in stages]})
         if not self.web and not self.cuad and not self.cuad_tools:
             raise ValueError(f"No eligible local training examples fit the token budget; skipped={dict(self.skips)}")
         self.web_fraction = web_fraction if self.cuad or self.cuad_tools else 1.0
@@ -370,7 +430,8 @@ class MixedSampler:
             tool_categories = self.cuad_tools.get(positive, {})
             category = self.rng.choice(sorted(set(categories) | set(tool_categories)))
             if category in tool_categories and (category not in categories or self.rng.random() < self.cuad_tool_fraction):
-                stage = CUAD_STAGES[self.cuad_stage_index % len(CUAD_STAGES)]
+                available_stages = [stage for stage in CUAD_STAGES if stage in tool_categories[category]]
+                stage = available_stages[self.cuad_stage_index % len(available_stages)]
                 self.cuad_stage_index += 1
                 return self.rng.choice(tool_categories[category][stage])
             task = self.rng.choice(categories[category])
@@ -437,21 +498,35 @@ def average_example_gradients(parameters, local_examples, world):
 
 
 def train(args):
+    native_data = None
+    if getattr(args, "native_thinking", False):
+        from dcc_native_sft import prepare_native_training
+
+        native_data = prepare_native_training(args, source_root=Path(__file__).resolve().parents[1])
     rank, local, world = (int(os.environ.get(key, default)) for key, default in (("RANK", "0"), ("LOCAL_RANK", "0"), ("WORLD_SIZE", "1")))
     torch.cuda.set_device(local)
     if world > 1:
         dist.init_process_group("nccl", timeout=timedelta(hours=2))
     torch.manual_seed(args.seed)
-    records = load_records(args.records)
-    cuad_records = load_cuad_records(args.cuad_tool_records) if args.cuad_tool_records else []
-    tasks = load_tasks(args.cuad_train_data) if args.cuad_train_data else []
+    records = native_data.records if native_data is not None else load_records(args.records)
+    cuad_records = (native_data.cuad_records if native_data is not None else
+                    load_cuad_records(args.cuad_tool_records) if args.cuad_tool_records else [])
+    tasks = [] if native_data is not None else load_tasks(args.cuad_train_data) if args.cuad_train_data else []
     runner = EpisodeRunner(max_steps=3, initial_chunks=args.initial_chunks,
-                           retrieval_profile=load_retrieval_profile(args.retrieval_profile))
+                           retrieval_profile=load_retrieval_profile(args.retrieval_profile),
+                           retrieval_context_chars=getattr(args, "retrieval_context_chars", 0),
+                           retrieval_max_context_chars=getattr(args, "retrieval_max_context_chars", 16000))
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     config = {key: value for key, value in vars(args).items()
-              if key not in {"model", "adapter", "records", "cuad_train_data", "cuad_tool_records", "output_dir", "retrieval_profile"}}
-    config.update(warm_start=bool(args.adapter), retrieval_profile_enabled=bool(args.retrieval_profile))
+              if key not in {"model", "adapter", "records", "cuad_train_data", "cuad_tool_records", "output_dir", "retrieval_profile",
+                             "native_thinking", "native_train_profile", "native_expected_source"}}
+    if native_data is not None:
+        config["native_thinking"] = native_data.configuration
+    config.update(warm_start=bool(args.adapter), retrieval_profile_enabled=bool(args.retrieval_profile),
+                  episode_prompt_version=EPISODE_PROMPT_VERSION,
+                  prompt_encoding_version=PROMPT_ENCODING_VERSION,
+                  web_reader_version=WEB_READER_VERSION)
     started, counts, ids = time.monotonic(), Counter(), set()
     with (output / f"train_rank{rank}.jsonl").open("a", buffering=1) as log:
         def record(**value):
@@ -473,9 +548,13 @@ def train(args):
         sampler = MixedSampler(records, tasks, tokenizer, runner, rank=rank, world=world, seed=args.seed,
                                web_fraction=args.web_fraction, negative_fraction=args.negative_fraction,
                                max_prompt=args.max_prompt_tokens, max_response=args.max_new_tokens, batch_tokens=args.batch_tokens,
-                               cuad_records=cuad_records, cuad_tool_fraction=args.cuad_tool_fraction)
+                               cuad_records=cuad_records, cuad_tool_fraction=args.cuad_tool_fraction,
+                               cuad_tool_partial_stages=getattr(args, "cuad_tool_partial_stages", False),
+                               record_encoder=native_data.encode_record if native_data is not None else None,
+                               recorded_cuad_stages=native_data is not None)
         record(event="eligible", web_stages=sampler.available, cuad_tasks=sum(len(rows) for categories in sampler.cuad.values() for rows in categories.values()),
                cuad_tool_stages=dict(Counter({stage: sum(len(stages.get(stage, [])) for categories in sampler.cuad_tools.values() for stages in categories.values()) for stage in CUAD_STAGES})),
+               cuad_missing_stages=sampler.cuad_missing_stages,
                effective_web_fraction=sampler.web_fraction, skipped=dict(sampler.skips), trainable_parameters=sum(p.numel() for p in parameters))
         optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, weight_decay=0.0)
 
@@ -492,6 +571,9 @@ def train(args):
                 (destination / "training_config.json").write_text(json.dumps(config, indent=2) + "\n")
             if world > 1:
                 dist.barrier()
+
+        if getattr(args, "save_initial", False):
+            save("initial", 0)
 
         for step in range(1, args.steps + 1):
             begin = time.monotonic()
@@ -522,14 +604,24 @@ def train(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--native-thinking", action="store_true",
+                        help="Train fresh LoRA on fully validated recorded native Thinking Web/CUAD rollouts")
+    parser.add_argument("--native-train-profile",
+                        help="Separately approved native identity and public collection schema profile")
+    parser.add_argument("--native-expected-source",
+                        help="Caller-approved actual frozen integration commit; must match source receipt")
     parser.add_argument("--model", required=True)
     parser.add_argument("--records", required=True)
     parser.add_argument("--cuad-train-data")
     parser.add_argument("--cuad-tool-records")
     parser.add_argument("--cuad-tool-fraction", type=float, default=0.75)
+    parser.add_argument("--cuad-tool-partial-stages", action="store_true",
+                        help="Allow positive search/read-only category buckets; negatives still require final")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--adapter")
     parser.add_argument("--retrieval-profile")
+    parser.add_argument("--retrieval-context-chars", type=int, default=0)
+    parser.add_argument("--retrieval-max-context-chars", type=int, default=16000)
     parser.add_argument("--quantization", choices=("none", "nf4"), default="none")
     parser.add_argument("--steps", type=int, default=24)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
@@ -543,6 +635,7 @@ def main():
     parser.add_argument("--initial-chunks", type=int, default=4)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--save-every", type=int, default=12)
+    parser.add_argument("--save-initial", action="store_true", help="Save the initial adapter before any optimizer update")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     if min(args.steps, args.lora_rank, args.max_prompt_tokens, args.max_new_tokens, args.batch_tokens,

@@ -5,6 +5,14 @@ The DCC harness supports CUAD clause extraction and the
 It provides bounded document retrieval, HTTP web search and reading, structured
 answers, per-call token trajectories, and evaluation separate from rollout.
 
+The optional [Web research checkpoints](dcc_web_research.md) add public-column
+and remaining-turn guidance to structured Web evaluation. They are disabled by
+default and preserve the existing evidence rules and generation budgets.
+
+For native Thinking evaluation, [the native base harness candidates](dcc_native_base_harness.md)
+record the portable CUAD configuration and unselected WideSearch presets. This
+draft does not yet bind a selected Web harness.
+
 ## Data boundaries
 
 Task JSONL records contain `id`, `benchmark` (`cuad` or `widesearch`), `split`,
@@ -69,8 +77,9 @@ and returns `next_start` to page through long documents without redownloading.
 
 WideSearch accepts a final answer only after an executed `web_search` returns
 source URLs and an executed `fetch_url` returns nonempty source text. Each row
-must have a nonempty `citations` list containing only URLs returned by these
-successful tools. Empty answer lists also require the search and read steps.
+must have a nonempty `citations` list containing only source URLs actually read
+with nonempty text. Empty answer lists are rejected; successful search and read
+steps alone do not establish a completed table.
 This checks observed provenance; semantic support still needs source review.
 An unsupported final receives explicit correction with tool JSON templates and
 uses the remaining model turns. Corrections are recorded separately in
@@ -96,8 +105,9 @@ multiple English and Chinese topics, actual source-page retrieval, and eight
 simultaneous queries. Provider availability and ranking can change.
 
 Public providers serialize and limit requests, cache query results in the
-process, and start a 300-second process-local cooldown on a challenge or
-service error. Challenges are detected and skipped. The compatibility setting
+process, and start a process-local cooldown of 300 seconds for challenge or
+CAPTCHA errors and 10 seconds for other errors. Challenges are detected and
+skipped. The compatibility setting
 `duckduckgo_wikipedia` (also `auto`) retains the earlier DuckDuckGo-to-Wikipedia
 chain. Every observation records the configured and actual `backend`,
 `search_scope`, and `fallback_reason`. Wikipedia covers encyclopedia articles and does not provide
@@ -153,3 +163,6 @@ Use the local Hugging Face policy for training so exact token IDs are retained.
 Store generated data, trajectories, logs, checkpoints, and reports in the run's
 externally configured artifact directory. Runtime paths, credentials, hostnames,
 and hardware identifiers must stay out of committed configuration and reports.
+
+Optional downloaded-source row filtering is documented in
+[dcc_web_cached_rows.md](dcc_web_cached_rows.md).

@@ -11,6 +11,8 @@ from types import SimpleNamespace
 import pytest
 from slime_plugins.dcc.data import Task
 from slime_plugins.dcc.retrieval import (
+    document_read_windows,
+    expand_document_context,
     fit_retrieval_profile,
     load_retrieval_profile,
     search_document,
@@ -88,6 +90,55 @@ def test_expansion_improves_reach_without_adding_chunks_or_changing_source_offse
     assert search_document(tools, QUESTION, profile=loaded) == enhanced
     assert search_document(tools, "  " + QUESTION + "  ", profile=loaded) == enhanced
     assert len(search_document(tools, QUESTION, top_k=100, profile=loaded)["hits"]) <= 8
+
+
+def test_context_expansion_repairs_a_clause_crossing_a_chunk_boundary():
+    source = "x" * 150 + "The governing law is Delaware." + "x" * 170
+    tools = DocumentTools(source, chunk_chars=160, overlap_chars=0)
+    observation = {"document_length": len(source), "hits": [
+        {"start": 160, "end": 320, "text": source[160:320], "score": 2.0},
+        {"start": 0, "end": 160, "text": source[:160], "score": 1.0},
+    ]}
+    before = json.loads(json.dumps(observation))
+    expanded = expand_document_context(tools, observation, context_chars=30, max_chars=400)
+    assert "The governing law is Delaware." not in observation["hits"][0]["text"]
+    assert len(expanded["hits"]) == 1
+    assert "The governing law is Delaware." in expanded["hits"][0]["text"]
+    assert expanded["hits"][0]["score"] == 2.0
+    assert all(hit["text"] == source[hit["start"]:hit["end"]] for hit in expanded["hits"])
+    assert observation == before
+
+
+def test_context_expansion_is_opt_in_and_bounded_without_reading_labels():
+    tools = DocumentTools("word " * 2000)
+    baseline = tools.search_document("word", top_k=8)
+    assert search_document(tools, "word") == tools.search_document("word")
+    assert expand_document_context(tools, baseline, context_chars=0, max_chars=1) is baseline
+    expanded = search_document(tools, "word", top_k=8, context_chars=800, max_context_chars=5000)
+    assert 0 < sum(len(hit["text"]) for hit in expanded["hits"]) <= 5000
+    assert expanded["document_length"] == len(tools.document)
+    assert len({(hit["start"], hit["end"]) for hit in expanded["hits"]}) == len(expanded["hits"])
+
+
+@pytest.mark.parametrize("kwargs", [{"context_chars": -1}, {"context_chars": True}, {"max_chars": 0}, {"max_chars": 1.5}])
+def test_context_expansion_rejects_invalid_budgets(kwargs):
+    tools = DocumentTools("source")
+    with pytest.raises(ValueError):
+        expand_document_context(tools, tools.search_document("source"), **kwargs)
+
+
+def test_context_expansion_rejects_fabricated_source_offsets():
+    tools = DocumentTools("source")
+    with pytest.raises(ValueError, match="exact source"):
+        expand_document_context(tools, {"hits": [{"start": 0, "end": 6, "text": "invent", "score": 1}]})
+
+
+def test_public_read_windows_are_derived_from_hits_and_reach_backwards():
+    windows = document_read_windows({"start": 5000, "end": 6500})
+    assert {"start": 4200, "end": 7300} in windows
+    assert {"start": 1000, "end": 13000} in windows
+    assert len(windows) == len({tuple(window.items()) for window in windows})
+    assert all(window["start"] >= 0 for window in document_read_windows({"start": 20, "end": 100}))
 
 
 def test_explicit_missing_or_malformed_profile_fails_fast(tmp_path):

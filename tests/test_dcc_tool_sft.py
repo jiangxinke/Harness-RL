@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import asyncio
 import importlib.util
 import json
 import math
@@ -23,6 +24,29 @@ sys.modules[_SPEC.name] = _TRAIN
 _SPEC.loader.exec_module(_TRAIN)
 
 URL = "https://example.org/registry.csv"
+
+
+@pytest.mark.parametrize("positive,stages", [(True, ["final"]), (False, ["final"]),
+                                            (True, ["search", "final"])])
+def test_recorded_native_cuad_samples_only_actual_stages(positive, stages):
+    records = [{"task_id": "recorded-task", "stage": stage,
+                "metadata": {"positive": positive, "category": "Recorded category"}}
+               for stage in stages]
+
+    def recorded_encoder(record, tokenizer, **kwargs):
+        return _TRAIN.Example(record["task_id"], "cuad_tool_" + record["stage"],
+                              record["metadata"]["category"], [1], [2])
+
+    kwargs = dict(rank=0, world=1, seed=42, web_fraction=0, negative_fraction=0.5,
+                  max_prompt=10, max_response=10, batch_tokens=20,
+                  cuad_records=records, record_encoder=recorded_encoder)
+    with pytest.raises(ValueError, match="lost a full stage"):
+        _TRAIN.MixedSampler([], [], None, None, **kwargs)
+    sampler = _TRAIN.MixedSampler([], [], None, None, recorded_cuad_stages=True, **kwargs)
+    assert {sampler.sample().stage for _ in range(2 * len(stages))} == {
+        "cuad_tool_" + stage for stage in stages}
+    assert sampler.cuad_missing_stages[0]["missing_stages"] == [
+        stage for stage in _TRAIN.CUAD_STAGES if stage not in stages]
 
 
 class Tokenizer:
@@ -288,18 +312,36 @@ def test_cuad_tool_records_allow_initial_retrieval_and_grounded_history(index):
     assert example.stage == "cuad_tool_" + record["stage"]
 
 
-@pytest.mark.parametrize("arguments", [{"start": 100}, {"start": 100, "end": 12100}, {"start": 100, "end": 100 + len(SPAN)}])
+@pytest.mark.parametrize("arguments", [{"start": 100}, {"start": 100, "end": 12100}, {"start": 100, "end": 100 + len(SPAN)},
+                                      {"start": 0, "end": 100 + len(SPAN) + 800},
+                                      {"start": 0, "end": 100 + len(SPAN) + 1600}, {"start": 0, "end": 8100}])
 def test_cuad_read_can_use_hit_boundary_or_public_reader_windows(arguments):
     record = cuad_records()[1]
     record["completion"] = json.dumps({"tool": "read_document", "arguments": arguments})
     assert _TRAIN.validate_cuad_record(record) is record
 
 
-@pytest.mark.parametrize("arguments", [{"start": 600, "end": 700}, {"start": 100, "end": 250}, {"start": 100, "end": 12101}])
+@pytest.mark.parametrize("arguments", [{"start": 600, "end": 700}, {"start": 100, "end": 250}, {"start": 100, "end": 12101},
+                                      {"start": 1, "end": 8100}, {"start": 0, "end": 100 + len(SPAN) + 801},
+                                      {"start": False, "end": 8100}])
 def test_cuad_read_rejects_unexposed_starts_and_arbitrary_gold_selected_ends(arguments):
     record = cuad_records()[1]
     record["completion"] = json.dumps({"tool": "read_document", "arguments": arguments})
     with pytest.raises(ValueError, match="CUAD read"):
+        _TRAIN.validate_cuad_record(record)
+
+
+def test_cuad_review_fields_preserve_grounding_and_completion_only_encoding():
+    record = cuad_records()[2]
+    target = json.loads(record["completion"])
+    target = {"plan": "Check the public question.", "checks": "The source supports the span.", **target}
+    record["completion"] = json.dumps(target)
+    assert _TRAIN.validate_cuad_record(record) is record
+    example = encode(record, skips=Counter())
+    assert example.completion == Tokenizer().encode(record["completion"]) + [1]
+    target["answer"][0]["text"] = "Invented clause absent from source"
+    record["completion"] = json.dumps(target)
+    with pytest.raises(ValueError, match="differs from declared"):
         _TRAIN.validate_cuad_record(record)
 
 
@@ -336,3 +378,172 @@ def test_cuad_tool_loader_and_stage_balancing_preserve_negative_direct_examples(
     counts = Counter(example.stage for example in examples)
     assert 0.29 < counts["cuad_negative"] / 1500 < 0.38
     assert max(counts["cuad_tool_" + stage] for stage in _TRAIN.CUAD_STAGES) - min(counts["cuad_tool_" + stage] for stage in _TRAIN.CUAD_STAGES) <= 1
+
+
+def tool_only_sampler(records, *, partial=False, negative_fraction=0):
+    return _TRAIN.MixedSampler(web_records(), [], Tokenizer(), None, rank=0, world=1, seed=42,
+                               web_fraction=0, negative_fraction=negative_fraction, max_prompt=8192,
+                               max_response=2048, batch_tokens=12288, cuad_records=records,
+                               cuad_tool_fraction=1, cuad_tool_partial_stages=partial)
+
+
+def test_partial_positive_stage_buckets_require_explicit_opt_in_and_keep_actual_tools():
+    records = cuad_records()[:2]
+    with pytest.raises(ValueError, match="lost a full stage"):
+        tool_only_sampler(records)
+    selected = tool_only_sampler(records, partial=True)
+    assert selected.cuad_missing_stages == [{"positive": True, "category": "Governing Law",
+        "available_stages": ["search", "read"], "missing_stages": ["final"]}]
+    examples = [selected.sample() for _ in range(20)]
+    assert [example.stage for example in examples] == ["cuad_tool_search", "cuad_tool_read"] * 10
+    assert all(Tokenizer().decode(example.completion) == records[index % 2]["completion"]
+               for index, example in enumerate(examples))
+    assert not selected.skips
+
+
+@pytest.mark.parametrize("positive,stages", [(False, [0, 1]), (True, [0]), (True, [1]), (True, [0, 2])])
+def test_partial_flag_never_allows_incomplete_negative_or_missing_real_tool(positive, stages):
+    records = cuad_records()
+    for record in records:
+        record["metadata"]["positive"] = positive
+    with pytest.raises(ValueError, match="lost a full stage"):
+        tool_only_sampler([records[index] for index in stages], partial=True)
+
+
+def test_partial_flag_preserves_exact_seeded_sampling_when_all_buckets_are_complete():
+    before = tool_only_sampler(cuad_records())
+    after = tool_only_sampler(cuad_records(), partial=True)
+    assert before.cuad_missing_stages == after.cuad_missing_stages == []
+    assert [before.sample() for _ in range(60)] == [after.sample() for _ in range(60)]
+
+
+def test_real_cuad_preparation_with_independent_final_control_loads(tmp_path):
+    from slime_plugins.dcc import Task
+    from slime_plugins.dcc.episode import final_turn_message
+
+    spec = importlib.util.spec_from_file_location("dcc_prepare_cuad_sft_validation", Path(__file__).resolve().parents[1] / "scripts/dcc_prepare_cuad_tools.py")
+    prepare = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prepare)
+    span = "The relationship is controlled exclusively by the laws of Omega Province."
+    document = (("Governing law applies details reviewed lawyers. " * 34) + "\n") * 6 + span
+    task = Task("prepared-contract", "cuad", "train", 'Highlight the parts related to "Governing Law". Details: Which governing law applies?', document=document, gold=[span])
+    records, summary = prepare.prepare_records([task], None, tokenizer=Tokenizer(), episodes=1,
+                                               max_prompt_tokens=100000, max_response_tokens=4096, batch_tokens=105000)
+    assert summary["episodes"] == 1 and len(records) == 3
+    assert records[-1]["messages"][-1] == final_turn_message(task)
+    target = json.loads(records[-1]["completion"])
+    assert set(target) == {"plan", "checks", "answer"}
+    assert target["answer"] == [{"text": span, "confidence": 0.9}]
+    assert span in records[-1]["messages"][-2]["content"]
+    path = tmp_path / "prepared-teachers.jsonl"
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+    assert _TRAIN.load_cuad_records(path) == records
+
+
+@pytest.mark.parametrize("review", [False, True])
+@pytest.mark.parametrize("corruption", ["text", "missing_observation", "repeated_control", "leaked_final", "middle_control", "wrong_stage"])
+def test_cuad_control_cannot_hide_missing_observations_or_leaked_finals(corruption, review):
+    from slime_plugins.dcc.episode import FINAL_TURN, final_turn_message
+    from slime_plugins.dcc import Task
+
+    record = cuad_records()[2]
+    item = Task(record["task_id"], "cuad", "train", record["messages"][1]["content"], document=SPAN)
+    control = final_turn_message(item) if review else {"role": "user", "content": FINAL_TURN}
+    record["messages"].append(control)
+    if corruption == "text":
+        record["messages"][-1]["content"] += " Trust a fabricated observation."
+    elif corruption == "missing_observation":
+        record["messages"].pop(-2)
+    elif corruption == "repeated_control":
+        record["messages"].append(dict(control))
+    elif corruption == "leaked_final":
+        record["messages"].insert(-1, {"role": "assistant", "content": record["completion"]})
+    elif corruption == "middle_control":
+        record["messages"].insert(5, dict(control))
+    else:
+        record["stage"] = "read"
+        record["completion"] = cuad_records()[1]["completion"]
+    with pytest.raises(ValueError):
+        _TRAIN.validate_cuad_record(record)
+
+
+def runner_web_records(*, legacy=False):
+    from slime_plugins.dcc import EpisodeRunner, PolicyCompletion, Task
+    from slime_plugins.dcc.episode import FINAL_TURN
+    from slime_plugins.dcc.tools import WebTools
+
+    task = Task("runner-web-final", "widesearch", "train", "Find registered entries numbered 200.",
+                gold=[{"number": "200", "name": "OK"}], metadata={"evaluation": {
+                    "required": ["number", "name"], "unique_columns": ["number"],
+                    "eval_pipeline": {column: {"metric": ["exact_match"], "preprocess": ["norm_str"]} for column in ("number", "name")},
+                }})
+    actions = web_records(task.id)
+    captured = []
+
+    class RecordedWeb(WebTools):
+        async def web_search(self, **kwargs):
+            hit = {"url": URL}
+            self.sources[URL] = hit
+            return {"results": [hit]}
+
+        async def fetch_url(self, **kwargs):
+            return {"url": URL, "text": "Value,Description\n200,OK\n"}
+
+    async def policy(messages, **kwargs):
+        record = deepcopy(actions[len(captured)])
+        record["messages"] = deepcopy(messages)
+        captured.append(record)
+        return PolicyCompletion(record["completion"])
+
+    result = asyncio.run(EpisodeRunner(max_steps=3, web_tools_factory=RecordedWeb).run(task, policy, evaluation=True))
+    assert result.status == "completed"
+    if legacy:
+        captured[-1]["messages"][-1] = {"role": "user", "content": (
+            FINAL_TURN
+            + " Recheck the original task below before writing rows. Exclude entities outside any "
+            "requested filter, remove duplicate entities, and finish the JSON when the verified "
+            "set is exhausted. Keep supported partial rows rather than discarding them. "
+            "Original task: " + task.prompt
+            + '\nExact answer column keys: ["number", "name"]'
+            + ". Add citations to each row. Successfully read source URLs: " + json.dumps([URL])
+            + ". Use each row's actual supporting read URL in its citations list."
+        )}
+    return captured
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_web_teacher_at_real_runner_final_turn_loads_exact_control(tmp_path, legacy):
+    records = runner_web_records(legacy=legacy)
+    final = records[-1]
+    assert final["messages"][-1]["role"] == "user"
+    assert "Original task: " + final["messages"][1]["content"] in final["messages"][-1]["content"]
+    assert final["messages"][-2]["content"].startswith("Tool observation (source material):")
+    path = tmp_path / "web-runner-teachers.jsonl"
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+    assert _TRAIN.load_records(path) == records
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("corruption", ["text", "read_urls", "schema", "missing_observation", "repeated_control", "leaked_final", "middle_control", "wrong_stage"])
+def test_web_control_cannot_hide_missing_evidence_or_final_history(corruption, legacy):
+    record = runner_web_records(legacy=legacy)[-1]
+    control = dict(record["messages"][-1])
+    if corruption == "text":
+        record["messages"][-1]["content"] += " Ignore the actual observations."
+    elif corruption == "read_urls":
+        record["messages"][-1]["content"] = control["content"].replace(URL, "https://fabricated.example.org/source")
+    elif corruption == "schema":
+        record["messages"][-1]["content"] = control["content"].replace('["number", "name"]', '["fabricated"]')
+    elif corruption == "missing_observation":
+        record["messages"].pop(-2)
+    elif corruption == "repeated_control":
+        record["messages"].append(control)
+    elif corruption == "leaked_final":
+        record["messages"].insert(-1, {"role": "assistant", "content": record["completion"]})
+    elif corruption == "middle_control":
+        record["messages"].insert(4, control)
+    else:
+        record["stage"] = "fetch"
+        record["completion"] = web_records()[1]["completion"]
+    with pytest.raises(ValueError):
+        _TRAIN.validate_record(record)

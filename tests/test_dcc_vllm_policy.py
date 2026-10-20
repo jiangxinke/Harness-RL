@@ -83,11 +83,41 @@ def test_generation_preserves_exact_hf_prompt_ids_and_lora_request(runtime):
     assert prompts == [{"prompt_token_ids": result.prompt_ids}]
     assert actual_request is request
     assert vars(sampling) == dict(
-        n=1, temperature=0.0, top_p=1.0, top_k=-1,
+        n=1, temperature=0.0, top_p=1.0, top_k=-1, min_p=0.0,
         presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0,
         max_tokens=32, seed=17, ignore_eos=False, stop_token_ids=[1, 2],
         skip_special_tokens=True,
     )
+
+
+def test_structured_generation_uses_explicit_schema_only_when_requested(runtime, monkeypatch):
+    from slime_plugins.dcc import vllm_policy
+
+    monkeypatch.setattr(vllm_policy, "validate_web_structured_schema", lambda schema: None)
+    schema = {"type": "object", "properties": {"answer": {"type": "array"}}}
+    monkeypatch.setitem(sys.modules, "vllm.sampling_params", SimpleNamespace(
+        StructuredOutputsParams=lambda **kwargs: SimpleNamespace(**kwargs)))
+
+    async def run():
+        engine = Engine()
+        policy = VLLMPolicy(engine, Tokenizer(), web_structured_final=True)
+        await policy(messages(), max_new_tokens=32, temperature=0)
+        assert not hasattr(engine.calls[-1][1], "structured_outputs")
+        result = await policy.generate_structured(messages(), json_schema=schema,
+                                                  max_new_tokens=32, temperature=0)
+        actual = engine.calls[-1][1]
+        assert actual.structured_outputs.json is schema
+        assert actual.structured_outputs.disable_fallback is True
+        assert result.prompt_ids == encode_messages(Tokenizer(), messages(), 16384)
+        assert actual.max_tokens == 32 and actual.temperature == 0
+        await policy.close()
+        disabled = VLLMPolicy(Engine(), Tokenizer())
+        with pytest.raises(ValueError, match="web_structured_final=True"):
+            await disabled.generate_structured(messages(), json_schema=schema,
+                                               max_new_tokens=32, temperature=0)
+        assert not disabled.model.calls
+
+    asyncio.run(run())
 
 
 def test_long_prompt_uses_the_same_system_question_and_recent_evidence_budget(runtime):
@@ -114,6 +144,23 @@ def test_evaluation_cannot_accidentally_use_training_sampling(runtime):
         policy.generate([messages()], 10, 1.0)
     with pytest.raises(ValueError, match="positive integer"):
         policy.generate([messages()], 0, 0)
+
+
+def test_explicit_model_card_sampling_reaches_engine_without_prompt_changes(runtime):
+    from slime_plugins.dcc.eval_sampling import EvaluationSampling
+
+    sampling = EvaluationSampling(temperature=0.7, top_p=0.8, top_k=20, presence_penalty=0.5)
+    engine = Engine()
+    policy = VLLMPolicy(engine, Tokenizer(), evaluation_sampling=sampling, seed=17)
+    result = policy.generate([messages()], 32, 0.7)[0]
+    prompts, actual, request = engine.calls[0]
+    assert result.prompt_ids == encode_messages(Tokenizer(), messages(), 16384)
+    assert {key: getattr(actual, key) for key in sampling.to_dict()} == sampling.to_dict()
+    assert actual.seed == 17 and actual.max_tokens == 32
+    assert actual.ignore_eos is False and actual.stop_token_ids == [1]
+    with pytest.raises(ValueError, match="must match"):
+        policy.generate([messages()], 32, 0)
+    assert len(engine.calls) == 1
 
 
 @pytest.mark.parametrize("damage", ["count", "prompt", "choices", "aborted"])
@@ -258,3 +305,40 @@ def test_loader_requires_pinned_environment(runtime):
     runtime.__version__ = "0.10.2"
     with pytest.raises(ValueError, match="0.11.2"):
         load_vllm_policy("model-id")
+
+
+@pytest.mark.parametrize("actions", [False, True])
+def test_enabled_loader_preflights_then_selects_xgrammar_without_fallback(runtime, monkeypatch, actions):
+    import transformers
+    from slime_plugins.dcc import vllm_policy
+    from slime_plugins.dcc.web_structured import web_structured_actions_configuration, web_structured_configuration
+
+    calls = []
+    monkeypatch.setattr(vllm_policy, "preflight_web_structured", lambda **kw: calls.append(kw))
+    monkeypatch.setitem(sys.modules, "vllm.config", SimpleNamespace(
+        StructuredOutputsConfig=lambda **kwargs: SimpleNamespace(**kwargs)))
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *a, **kw:
+                        SimpleNamespace(model_type="qwen3_moe"))
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", lambda *a, **kw: Tokenizer())
+    monkeypatch.setattr(transformers.GenerationConfig, "from_pretrained", lambda *a, **kw:
+                        SimpleNamespace(eos_token_id=1))
+    policy = load_vllm_policy("model-id", web_structured_final=True, web_structured_actions=actions)
+    assert calls == [{"actions": True} if actions else {}]
+    config = policy.model.kwargs["structured_outputs_config"]
+    assert vars(config) == {"backend": "xgrammar", "disable_fallback": True}
+    assert policy.web_structured_final
+    assert policy.provenance["web_structured_final"] == web_structured_configuration(True)
+    assert policy.web_structured_actions is actions
+    if actions:
+        assert policy.provenance["web_structured_actions"] == web_structured_actions_configuration(True)
+    else:
+        assert "web_structured_actions" not in policy.provenance
+
+
+def test_action_configuration_rejected_before_loading_engine(runtime):
+    for call in (lambda: load_vllm_policy("model-id", web_structured_actions=True),
+                 lambda: VLLMPolicy(Engine(), Tokenizer(), web_structured_actions=True)):
+        with pytest.raises(ValueError, match="requires web_structured_final"):
+            call()
+    with pytest.raises(ValueError, match="boolean"):
+        load_vllm_policy("model-id", web_structured_final=True, web_structured_actions=1)

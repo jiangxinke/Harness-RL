@@ -13,7 +13,7 @@ from slime_plugins.dcc import (
     load_tasks,
     validate_disjoint,
 )
-from slime_plugins.dcc.episode import parse_action
+from slime_plugins.dcc.episode import final_turn_message, parse_action
 from slime_plugins.dcc.metrics import (
     cuad_counts,
     cuad_jaccard,
@@ -89,6 +89,19 @@ def test_cuad_official_curve_and_no_answer_training_reward():
     assert cuad_task_metrics("negative", [], ["wrong"])["f1"] == 0
     with pytest.raises(ValueError, match="IDs"):
         evaluate_cuad({"a": []}, {})
+
+
+@pytest.mark.parametrize("evaluation, expected", [(True, 0.7), (False, 1.0)])
+def test_explicit_evaluation_temperature_does_not_change_training_rollouts(evaluation, expected):
+    seen = []
+
+    async def policy(messages, **kwargs):
+        seen.append(kwargs["temperature"])
+        return PolicyCompletion('{"answer":[]}')
+
+    result = asyncio.run(EpisodeRunner(temperature=1.0, evaluation_temperature=0.7).run(
+        task(), policy, evaluation=evaluation))
+    assert result.status == "completed" and seen == [expected]
 
 
 def test_external_contracts_are_loaded_once_and_split_leaks_rejected(tmp_path):
@@ -170,7 +183,7 @@ def test_last_turn_requests_final_answer_without_executing_tools():
             pytest.fail("A final-turn tool request must not reach the network")
 
     async def policy(messages, **kwargs):
-        assert "Final turn: tools are unavailable" in messages[-1]["content"]
+        assert messages[-1]["content"].startswith("Final answer now; tools are unavailable.")
         return PolicyCompletion('{"tool":"web_search","arguments":{"query":"test"}}')
 
     item = Task("ws", "widesearch", "test", "Find entities")
@@ -197,7 +210,64 @@ def test_policy_segments_preserve_each_prompt_and_tool_observations_are_context_
     assert len(result.trainable_steps) == 2
     assert result.steps[1].prompt_ids == [10, 10]
     assert result.steps[1].completion_ids == [22]
-    assert "Tool observation" in calls[1][-1]["content"]
+    assert "Tool observation" in calls[1][-2]["content"]
+    assert "Final turn" not in calls[1][-2]["content"]
+    assert "Final turn: tools are unavailable" in calls[1][-1]["content"]
+
+
+def test_final_turn_control_preserves_initial_contract_source_message():
+    item = task()
+    runner = EpisodeRunner(max_steps=1)
+    initial = runner.initial_messages(item)
+
+    async def policy(messages, **kwargs):
+        assert messages[:-1] == initial
+        assert messages[-2]["content"].startswith("Initial contract retrieval (source material):")
+        assert "Final turn" not in messages[-2]["content"]
+        assert messages[-1]["role"] == "user"
+        assert "Final turn: tools are unavailable" in messages[-1]["content"]
+        return PolicyCompletion(json.dumps({"answer": [{"text": item.document}]}))
+
+    result = asyncio.run(runner.run(item, policy))
+    assert result.status == "completed"
+    assert runner.initial_messages(item) == initial
+
+
+@pytest.mark.parametrize("early_final", [False, True])
+def test_cuad_review_preserves_early_actions_sources_and_span_scoring(early_final):
+    item = task()
+    runner = EpisodeRunner(max_steps=2)
+    initial = runner.initial_messages(item)
+    answer = [{"text": item.document, "confidence": 0.9}]
+    calls = []
+
+    async def policy(messages, **kwargs):
+        calls.append(messages)
+        if len(calls) == 1:
+            assert messages == initial
+            if not early_final:
+                return PolicyCompletion(json.dumps({"tool": "read_document", "arguments": {"start": 0, "end": len(item.document)}}))
+            return PolicyCompletion(json.dumps({"answer": answer}))
+        assert messages[:len(initial)] == initial
+        assert messages[-2]["content"].startswith("Tool observation (source material):")
+        assert item.document in messages[-2]["content"]
+        assert messages[-1] == final_turn_message(item)
+        return PolicyCompletion(json.dumps({"plan": "Check the requested governing law.",
+                                            "checks": "Observed source supports this verbatim span.", "answer": answer}))
+
+    result = asyncio.run(runner.run(item, policy))
+    assert result.status == "completed" and result.answer == answer and result.reward == 1
+    assert len(calls) == (1 if early_final else 2)
+    assert len(result.tool_events) == (0 if early_final else 1)
+    assert runner.initial_messages(item) == initial
+
+
+def test_cuad_final_review_is_independent_of_labels_and_private_metadata():
+    original = task()
+    changed = dataclasses.replace(original, gold=["private label marker"],
+                                  metadata={"category": "private metadata marker", "is_impossible": True})
+    assert final_turn_message(original) == final_turn_message(changed)
+    assert "private" not in final_turn_message(changed)["content"]
 
 
 def test_correct_but_nonverbatim_span_is_not_rewarded():

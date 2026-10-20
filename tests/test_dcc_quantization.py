@@ -120,7 +120,8 @@ def test_full_expert_nf4_gradients_and_adapter_roundtrip(tmp_path, monkeypatch):
 
 
 def test_default_loader_keeps_grouped_mm_without_importing_nf4(monkeypatch):
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from types import SimpleNamespace
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
     class Tokenizer:
         pad_token_id = 0
@@ -135,6 +136,7 @@ def test_default_loader_keeps_grouped_mm_without_importing_nf4(monkeypatch):
     quantization = importlib.import_module("slime_plugins.dcc.hf_quantization")
     monkeypatch.setattr(quantization, "nf4_load_kwargs", lambda: pytest.fail("default imported NF4 loader"))
     monkeypatch.setattr(torch.cuda, "set_device", lambda rank: None)
+    monkeypatch.setattr(AutoConfig, "from_pretrained", lambda name: SimpleNamespace(num_experts=4))
     monkeypatch.setattr(AutoTokenizer, "from_pretrained", lambda name: Tokenizer())
     monkeypatch.setattr(AutoModelForCausalLM, "from_pretrained", load)
     model, _ = load_policy_model("unused")

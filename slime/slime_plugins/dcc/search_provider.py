@@ -26,6 +26,12 @@ _BROWSER_HEADERS = {
 }
 
 
+def _provider_cooldown(error: Exception) -> float:
+    """Challenges need a pause; one transient request must not disable an index."""
+    message = str(error).lower()
+    return 300.0 if "challeng" in message or "captcha" in message else 10.0
+
+
 def _chinese(query: str) -> bool:
     return any("\u4e00" <= character <= "\u9fff" for character in query)
 
@@ -113,15 +119,15 @@ def _duckduckgo_search(query: str, count: int, search: Callable[[], list[dict[st
             return cached
         now = time.monotonic()
         if now < _DDG_COOLDOWN_UNTIL:
-            raise InfrastructureError("DuckDuckGo is in a 300-second process-local cooldown")
+            raise InfrastructureError("DuckDuckGo is in a process-local cooldown")
         delay = _DDG_NEXT_REQUEST - now
         if delay > 0:
             time.sleep(min(delay, 1.0))
         _DDG_NEXT_REQUEST = time.monotonic() + 1.0
         try:
             hits = search()
-        except InfrastructureError:
-            _DDG_COOLDOWN_UNTIL = time.monotonic() + 300
+        except InfrastructureError as exc:
+            _DDG_COOLDOWN_UNTIL = time.monotonic() + _provider_cooldown(exc)
             raise
         return _remember("duckduckgo_lite", query, count, hits)
 
@@ -222,7 +228,7 @@ def public_html_search(query: str, count: int, backend: str) -> list[dict[str, s
             return cached
         now = time.monotonic()
         if now < _PUBLIC_COOLDOWN_UNTIL.get(backend, 0.0):
-            raise InfrastructureError(f"{backend} is in a 300-second process-local cooldown")
+            raise InfrastructureError(f"{backend} is in a process-local cooldown")
         delay = _PUBLIC_NEXT_REQUEST.get(backend, 0.0) - now
         if delay > 0:
             time.sleep(min(delay, 0.5))
@@ -231,8 +237,8 @@ def public_html_search(query: str, count: int, backend: str) -> list[dict[str, s
         try:
             raw = _request(endpoint + "?" + urllib.parse.urlencode({parameter: query}), headers=_BROWSER_HEADERS)
             hits = _parse_public_results(raw, backend, count)
-        except InfrastructureError:
-            _PUBLIC_COOLDOWN_UNTIL[backend] = time.monotonic() + 300
+        except InfrastructureError as exc:
+            _PUBLIC_COOLDOWN_UNTIL[backend] = time.monotonic() + _provider_cooldown(exc)
             raise
         return _remember(backend, query, count, hits)
 

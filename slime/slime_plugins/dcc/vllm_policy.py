@@ -11,19 +11,43 @@ import importlib.metadata
 import json
 import os
 import threading
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
 from .episode import PolicyCompletion
-from .hf_policy import HFPolicy, encode_messages
+from .eval_sampling import EvaluationSampling
+from .hf_policy import PROMPT_ENCODING_VERSION, HFPolicy, encode_messages
+from .web_structured import (
+    preflight_web_structured,
+    validate_web_structured_schema,
+    web_structured_actions_configuration,
+    web_structured_configuration,
+)
+
+from .web_whitespace import (
+    preflight_web_bounded_whitespace, web_bounded_whitespace_configuration,
+    web_bounded_whitespace_grammar,
+)
+from .web_review import web_explicit_review_configuration
+from .web_navigation import web_navigation_configuration
+from .web_rows import web_cached_rows_configuration
+from .web_research import web_research_configuration
+from .web_review_decoder import (
+    is_web_review_schema,
+    preflight_web_review_decoder,
+    web_review_grammar,
+)
 
 
 class VLLMPolicy(HFPolicy):
-    """Reuse HF's serialized asynchronous batch queue for greedy evaluation."""
+    """Reuse HF's serialized asynchronous batch queue for inference evaluation."""
 
     def __init__(self, engine, tokenizer, *, batch_size=8, max_prompt_tokens=16384,
                  max_model_len=24576, seed=42, lora_request=None, eos_token_ids=None,
-                 allow_truncation=True, provenance=None):
+                 allow_truncation=True, provenance=None, evaluation_sampling=None,
+                 web_structured_final=False, web_structured_actions=False,
+                 web_bounded_whitespace=False):
         if batch_size < 1 or max_prompt_tokens < 1 or max_model_len <= max_prompt_tokens:
             raise ValueError("Positive batch/prompt budgets and room for completion are required")
         super().__init__(engine, tokenizer, batch_size=batch_size,
@@ -32,16 +56,65 @@ class VLLMPolicy(HFPolicy):
         self.lora_request = lora_request
         self.eos_token_ids = sorted(set(eos_token_ids or [tokenizer.eos_token_id]) - {None})
         self.provenance = dict(provenance or {})
+        self.evaluation_sampling = EvaluationSampling() if evaluation_sampling is None else evaluation_sampling
+        if not isinstance(self.evaluation_sampling, EvaluationSampling):
+            raise TypeError("evaluation_sampling must be an EvaluationSampling")
+        self.web_structured_final = web_structured_configuration(web_structured_final)["enabled"]
+        self.web_structured_actions = web_structured_actions_configuration(web_structured_actions)["enabled"]
+        if self.web_structured_actions and not self.web_structured_final:
+            raise ValueError("web_structured_actions requires web_structured_final=True")
+        self.web_bounded_whitespace = web_bounded_whitespace_configuration(web_bounded_whitespace)["enabled"]
+        if self.web_bounded_whitespace and not self.web_structured_final:
+            raise ValueError("web_bounded_whitespace requires web_structured_final=True")
+        if self.web_bounded_whitespace:
+            configuration = web_bounded_whitespace_configuration(True)
+            if self.provenance.get("web_bounded_whitespace", configuration) != configuration:
+                raise ValueError("web_bounded_whitespace provenance does not match its configuration")
+            self.provenance["web_bounded_whitespace"] = configuration
+        elif self.provenance.get("web_bounded_whitespace", {}).get("enabled"):
+            raise ValueError("web_bounded_whitespace provenance requires explicit opt-in")
         self._engine_lock = threading.Lock()
         self._closed = False
 
-    def generate(self, messages_batch, max_new_tokens, temperature):
+    def _sampling_options(self, temperature):
+        if isinstance(temperature, bool) or temperature != self.evaluation_sampling.temperature:
+            raise ValueError("vLLM defaults to greedy evaluation only; nonzero sampling must match "
+                             "an explicit EvaluationSampling configuration; use HFPolicy for training")
+        return self.evaluation_sampling.to_dict()
+
+    def _structured_options(self, json_schema):
+        if json_schema is None:
+            return {}
+        if not self.web_structured_final:
+            raise ValueError("Structured generation requires web_structured_final=True")
+        validate_web_structured_schema(json_schema)
+        from vllm.sampling_params import StructuredOutputsParams
+
+        review = self.provenance.get("web_explicit_review", {})
+        reviewed = review.get("enabled") is True and is_web_review_schema(json_schema)
+        if self.web_bounded_whitespace:
+            return {"structured_outputs": StructuredOutputsParams(
+                grammar=web_bounded_whitespace_grammar(json_schema, explicit_review=reviewed),
+                disable_fallback=True,
+            )}
+        if reviewed:
+            return {"structured_outputs": StructuredOutputsParams(
+                grammar=web_review_grammar(json_schema), disable_fallback=True,
+            )}
+        return {"structured_outputs": StructuredOutputsParams(json=json_schema, disable_fallback=True)}
+
+    async def generate_structured(self, messages, *, json_schema, max_new_tokens, temperature):
+        results = await asyncio.to_thread(
+            self.generate, [messages], max_new_tokens, temperature, json_schema=json_schema,
+        )
+        return results[0]
+
+    def generate(self, messages_batch, max_new_tokens, temperature, *, json_schema=None):
         from vllm import SamplingParams
 
         if self._closed:
             raise RuntimeError("The vLLM engine has been closed")
-        if temperature != 0:
-            raise ValueError("VLLMPolicy supports greedy evaluation only; use HFPolicy for training")
+        sampling_options = self._sampling_options(temperature)
         if type(max_new_tokens) is not int or max_new_tokens < 1:
             raise ValueError("max_new_tokens must be a positive integer")
         if not messages_batch:
@@ -52,10 +125,10 @@ class VLLMPolicy(HFPolicy):
         if any(len(prompt) + max_new_tokens > self.max_model_len for prompt in prompts):
             raise ValueError("Prompt plus completion budget exceeds max_model_len; refusing to shorten it")
         sampling = SamplingParams(
-            n=1, temperature=0.0, top_p=1.0, top_k=-1,
-            presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0,
+            n=1, **sampling_options,
             max_tokens=max_new_tokens, seed=self.seed, ignore_eos=False,
             stop_token_ids=self.eos_token_ids, skip_special_tokens=True,
+            **self._structured_options(json_schema),
         )
         with self._engine_lock:
             responses = self.model.generate(
@@ -94,6 +167,91 @@ class VLLMPolicy(HFPolicy):
                     core.shutdown()
 
         await asyncio.to_thread(shutdown)
+
+
+class AsyncVLLMPolicy(VLLMPolicy):
+    """Native per-request V1 scheduling and cancellation on one event loop."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._active_requests = set()
+        self._owner_loop = None
+
+    async def __call__(self, messages, *, max_new_tokens, temperature):
+        return await self._generate(messages, max_new_tokens=max_new_tokens, temperature=temperature)
+
+    async def generate_structured(self, messages, *, json_schema, max_new_tokens, temperature):
+        return await self._generate(messages, max_new_tokens=max_new_tokens,
+                                    temperature=temperature, json_schema=json_schema)
+
+    async def _generate(self, messages, *, max_new_tokens, temperature, json_schema=None):
+        from vllm import SamplingParams
+        from vllm.sampling_params import RequestOutputKind
+
+        if self._closed:
+            raise RuntimeError("The vLLM engine has been closed")
+        loop = asyncio.get_running_loop()
+        if self._owner_loop is None:
+            self._owner_loop = loop
+        if loop is not self._owner_loop:
+            raise RuntimeError("Async vLLM requests must use their owning event loop")
+        sampling_options = self._sampling_options(temperature)
+        if type(max_new_tokens) is not int or max_new_tokens < 1:
+            raise ValueError("max_new_tokens must be a positive integer")
+        prompt = encode_messages(self.tokenizer, messages, self.max_prompt_tokens,
+                                 allow_truncation=self.allow_truncation)
+        if len(prompt) + max_new_tokens > self.max_model_len:
+            raise ValueError("Prompt plus completion budget exceeds max_model_len; refusing to shorten it")
+        params = SamplingParams(
+            n=1, **sampling_options,
+            max_tokens=max_new_tokens, seed=self.seed, ignore_eos=False,
+            stop_token_ids=self.eos_token_ids, skip_special_tokens=True,
+            output_kind=RequestOutputKind.FINAL_ONLY,
+            **self._structured_options(json_schema),
+        )
+        request_id = uuid.uuid4().hex
+        self._active_requests.add(request_id)
+        completed, response = False, None
+        try:
+            async for item in self.model.generate(
+                {"prompt_token_ids": prompt}, params, request_id,
+                lora_request=self.lora_request,
+            ):
+                response = item
+            if response is None or list(response.prompt_token_ids) != prompt or len(response.outputs) != 1:
+                raise RuntimeError("vLLM response token provenance does not match its request")
+            output = response.outputs[0]
+            if output.finish_reason not in {"stop", "length"}:
+                raise RuntimeError(f"vLLM request did not complete: {output.finish_reason}")
+            tokens = list(output.token_ids)
+            completed = True
+            return PolicyCompletion(
+                self.tokenizer.decode(tokens, skip_special_tokens=True), prompt, tokens,
+                finish_reason=output.finish_reason,
+            )
+        finally:
+            try:
+                if not completed:
+                    # AsyncLLM owns both the output processor and async engine
+                    # socket here. Never abort synchronous LLM from a thread.
+                    await self.model.abort(request_id)
+            finally:
+                self._active_requests.discard(request_id)
+
+    def generate(self, *args, **kwargs):
+        raise RuntimeError("Use await policy(...) with the native async vLLM backend")
+
+    async def close(self):
+        if self._closed:
+            return
+        if self._owner_loop is not None and asyncio.get_running_loop() is not self._owner_loop:
+            raise RuntimeError("Async vLLM shutdown must use its owning event loop")
+        self._closed = True
+        try:
+            if self._active_requests:
+                await self.model.abort(list(self._active_requests))
+        finally:
+            self.model.shutdown()
 
 
 def _validate_launch_environment(tensor_parallel_size):
@@ -166,13 +324,48 @@ def _adapter_metadata(adapter):
 def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_tokens=16384,
                      max_model_len=24576, tensor_parallel_size=1,
                      gpu_memory_utilization=0.88, max_num_batched_tokens=8192,
-                     seed=42, revision=None, tokenizer_revision=None, enforce_eager=False):
+                     seed=42, revision=None, tokenizer_revision=None, enforce_eager=False,
+                     asynchronous=False, evaluation_sampling=None, web_structured_final=False,
+                     web_structured_actions=False, web_explicit_review=False,
+                     web_bounded_whitespace=False, web_navigation_ledger=False, web_research_checkpoints=False, web_cached_rows=False):
     """Load a BF16 vLLM engine without changing the default HF runtime.
 
     Save ``policy.provenance`` alongside prediction manifests in a new external
     output directory. A backend change must never resume an existing HF run.
     GPU ownership and CUDA_VISIBLE_DEVICES are managed by the caller.
     """
+    evaluation_sampling = EvaluationSampling() if evaluation_sampling is None else evaluation_sampling
+    if not isinstance(evaluation_sampling, EvaluationSampling):
+        raise TypeError("evaluation_sampling must be an EvaluationSampling")
+    structured = web_structured_configuration(web_structured_final)
+    actions = web_structured_actions_configuration(web_structured_actions)
+    review = web_explicit_review_configuration(web_explicit_review)
+    navigation = web_navigation_configuration(web_navigation_ledger)
+    if web_navigation_ledger and not (web_structured_actions and web_structured_final):
+        raise ValueError("web_navigation_ledger requires structured Web actions and final")
+    research = web_research_configuration(web_research_checkpoints)
+    if web_research_checkpoints and not (web_structured_actions and web_structured_final):
+        raise ValueError("web_research_checkpoints requires structured Web actions and final")
+    cached_rows = web_cached_rows_configuration(web_cached_rows)
+    if web_cached_rows and not (web_structured_actions and web_structured_final):
+        raise ValueError("web_cached_rows requires structured Web actions and final")
+    cached_options = {"cached_rows": True} if web_cached_rows else {}
+    whitespace = web_bounded_whitespace_configuration(web_bounded_whitespace)
+    if web_bounded_whitespace and not web_structured_final:
+        raise ValueError("web_bounded_whitespace requires web_structured_final=True")
+    if web_explicit_review and not (web_structured_actions and web_structured_final):
+        raise ValueError("web_explicit_review requires structured Web actions and final")
+    if web_structured_actions and not web_structured_final:
+        raise ValueError("web_structured_actions requires web_structured_final=True")
+    if web_explicit_review:
+        preflight_web_structured(actions=True, explicit_review=True, **cached_options)
+        review_decoder = preflight_web_review_decoder(**cached_options)
+    elif web_structured_actions:
+        preflight_web_structured(actions=True, **cached_options)
+    elif web_structured_final:
+        preflight_web_structured()
+    if web_bounded_whitespace:
+        preflight_web_bounded_whitespace(explicit_review=web_explicit_review, **cached_options)
     _validate_launch_environment(tensor_parallel_size)
 
     import transformers
@@ -214,8 +407,22 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
         enable_lora=bool(lora), max_lora_rank=max_lora_rank, max_loras=1, lora_dtype="auto",
         swap_space=0, cpu_offload_gb=0,
     )
+    if web_structured_final:
+        from vllm.config import StructuredOutputsConfig
+
+        engine_kwargs["structured_outputs_config"] = StructuredOutputsConfig(
+            backend="xgrammar", disable_fallback=True,
+        )
     with _engine_environment():
-        engine = LLM(**engine_kwargs)
+        if asynchronous:
+            from vllm.engine.arg_utils import AsyncEngineArgs
+            from vllm.v1.engine.async_llm import AsyncLLM
+
+            engine = AsyncLLM.from_engine_args(AsyncEngineArgs(
+                **engine_kwargs, disable_log_stats=True,
+            ))
+        else:
+            engine = LLM(**engine_kwargs)
     provenance = {
         "backend": "vllm", "vllm_version": vllm.__version__,
         "torch_version": importlib.metadata.version("torch"),
@@ -235,8 +442,35 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
         "enable_chunked_prefill": True, "enable_prefix_caching": True,
         "enforce_eager": enforce_eager, "eos_token_ids": eos,
         "sampling": "greedy; neutral penalties; explicit EOS; generation_config=vllm",
+        "evaluation_sampling": evaluation_sampling.to_dict(),
         "prompt_encoding": "HF encode_messages; enable_thinking=False",
+        "prompt_encoding_version": PROMPT_ENCODING_VERSION,
     }
-    return VLLMPolicy(engine, tokenizer, batch_size=batch_size,
+    if evaluation_sampling != EvaluationSampling():
+        provenance["sampling"] = "explicit evaluation sampling; explicit EOS; generation_config=vllm"
+    if web_structured_final:
+        provenance["web_structured_final"] = structured
+    if web_structured_actions:
+        provenance["web_structured_actions"] = actions
+    if web_explicit_review:
+        provenance["web_explicit_review"] = review
+        provenance["web_review_decoder"] = review_decoder
+    if web_bounded_whitespace:
+        provenance["web_bounded_whitespace"] = whitespace
+    if web_navigation_ledger:
+        provenance["web_navigation_ledger"] = navigation
+    if web_research_checkpoints:
+        provenance["web_research_checkpoints"] = research
+    if web_cached_rows:
+        provenance["web_cached_rows"] = cached_rows
+    if asynchronous:
+        provenance.update(async_engine=True, request_completion_delivery="per-request",
+                          timeout_cancellation="native AsyncLLM.abort on owner event loop")
+    policy_class = AsyncVLLMPolicy if asynchronous else VLLMPolicy
+    return policy_class(engine, tokenizer, batch_size=batch_size,
                       max_prompt_tokens=max_prompt_tokens, max_model_len=max_model_len,
-                      seed=seed, lora_request=lora, eos_token_ids=eos, provenance=provenance)
+                      seed=seed, lora_request=lora, eos_token_ids=eos, provenance=provenance,
+                      evaluation_sampling=evaluation_sampling,
+                      web_structured_final=web_structured_final,
+                      web_structured_actions=web_structured_actions,
+                      web_bounded_whitespace=web_bounded_whitespace)

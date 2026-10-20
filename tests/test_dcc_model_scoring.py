@@ -10,11 +10,24 @@ from types import SimpleNamespace
 
 import pytest
 from slime_plugins.dcc import PolicyCompletion, Task
-from slime_plugins.dcc.widesearch_metrics import ALIGNMENT_PROTOCOL
+from slime_plugins.dcc.widesearch_metrics import ALIGNMENT_PROTOCOL, TABLE_INPUT_PROTOCOL
 
 
 def cli():
     return runpy.run_path(str(Path(__file__).parents[1] / "scripts/dcc_model_evaluate.py"))
+
+
+def test_nondefault_evaluation_sampling_requires_vllm_and_is_explicit():
+    from slime_plugins.dcc.eval_sampling import EvaluationSampling
+
+    read = cli()["_evaluation_sampling"]
+    assert read(SimpleNamespace(), "hf") == EvaluationSampling()
+    args = SimpleNamespace(eval_temperature=0.7, eval_top_p=0.8, eval_top_k=20)
+    assert read(args, "vllm") == EvaluationSampling(temperature=0.7, top_p=0.8, top_k=20)
+    with pytest.raises(ValueError, match="requires.*vllm"):
+        read(args, "hf")
+    with pytest.raises(ValueError, match="finite"):
+        read(SimpleNamespace(eval_presence_penalty=float("nan")), "vllm")
 
 
 def test_prediction_precision_comes_from_manifests_and_rejects_mixed_shards(tmp_path):
@@ -68,6 +81,42 @@ def logical_predictions(tmp_path):
         (tmp_path / f"rank{rank}.done").write_text(json.dumps({"tasks": 1, "world_size": 2}))
         (tmp_path / f"inference_runtime_rank{rank}.json").write_text(json.dumps(runtime))
     return tasks
+
+
+@pytest.mark.parametrize("damage", [None, "manifest", "runtime", "version", "package", "limits", "browser", "extra", "backend"])
+def test_scoring_requires_complete_matching_browser_reader_provenance(tmp_path, damage):
+    from slime_plugins.dcc.browser_reader import BROWSER_READER_VERSION, browser_reader_configuration
+
+    tasks = logical_predictions(tmp_path)
+    config = {"version": BROWSER_READER_VERSION, "browser_version": "142.0.7444.23",
+              "playwright_version": "1.56.0", "cpu_only": True,
+              "configuration": browser_reader_configuration(True)}
+    for file in [*tmp_path.glob("manifest_rank*.json"), *tmp_path.glob("inference_runtime*.json")]:
+        data = json.loads(file.read_text())
+        data["web_browser_reader"] = json.loads(json.dumps(config))
+        if damage == "manifest" and file.name.startswith("manifest"):
+            data.pop("web_browser_reader")
+        elif damage == "runtime" and file.name.startswith("inference_runtime"):
+            data.pop("web_browser_reader")
+        elif damage == "version":
+            data["web_browser_reader"]["version"] = "unattested"
+        elif damage == "package":
+            data["web_browser_reader"]["playwright_version"] = "unattested"
+        elif damage == "limits":
+            data["web_browser_reader"]["configuration"]["limits"]["concurrency"] = 3
+        elif damage == "browser" and file.name.startswith("inference_runtime"):
+            data["web_browser_reader"]["browser_version"] = "different"
+        elif damage == "extra":
+            data["web_browser_reader"]["path"] = "unattested"
+        elif damage == "backend":
+            data["inference_backend" if file.name.startswith("manifest") else "backend"] = "hf"
+        file.write_text(json.dumps(data))
+    if damage:
+        with pytest.raises(ValueError, match="[Bb]rowser"):
+            cli()["_score_predictions"](tmp_path, tasks)
+    else:
+        _, manifest, runtime = cli()["_score_predictions"](tmp_path, tasks)
+        assert manifest["web_browser_reader"] == runtime["web_browser_reader"] == config
 
 
 @pytest.mark.parametrize("corruption,match", [
@@ -138,7 +187,7 @@ def test_logical_score_keeps_same_shard_retry_and_legacy_manifests(tmp_path):
     assert cli()["_score_predictions"](tmp_path, tasks)[0] == saved
 
 
-def test_adapter_identity_detects_replaced_symlink_target_without_hashing(tmp_path):
+def test_adapter_identity_accepts_copied_weights_and_rejects_changed_content(tmp_path):
     first, second = tmp_path / "first", tmp_path / "second"
     for path in (first, second):
         path.mkdir()
@@ -154,10 +203,36 @@ def test_adapter_identity_detects_replaced_symlink_target_without_hashing(tmp_pa
     namespace["_check_saved_adapter"](adapter, {"adapter": identity})
     adapter.unlink()
     adapter.symlink_to(second, target_is_directory=True)
-    assert identity["weights_bytes"] == namespace["_adapter_identity"](adapter)["weights_bytes"]
-    assert identity["weights_mtime_ns"] == namespace["_adapter_identity"](adapter)["weights_mtime_ns"]
+    assert namespace["_adapter_identity"](adapter) == identity
+    assert not {"weights_mtime_ns", "weights_ctime_ns", "weights_inode", "weights_device"} & identity.keys()
+    namespace["_check_saved_adapter"](adapter, {"adapter": identity})
+    (tmp_path / "manifest_rank0.json").write_text(json.dumps({"adapter_identity": identity}))
+    namespace["_check_generation_manifests"](tmp_path, {"adapter_identity": namespace["_adapter_identity"](adapter)})
+
+    # Retain size and mtime: content, not copied local metadata, identifies it.
+    weights = second / "adapter_model.safetensors"
+    weights.write_bytes(b"TINY")
+    os.utime(weights, ns=(timestamp, timestamp))
+    changed = namespace["_adapter_identity"](adapter)
+    assert changed["weights_bytes"] == identity["weights_bytes"]
+    assert changed["weights_sha256"] != identity["weights_sha256"]
     with pytest.raises(ValueError, match="checkpoint identity changed"):
         namespace["_check_saved_adapter"](adapter, {"adapter": identity})
+
+
+def test_adapter_identity_caches_unchanged_small_checkpoint(monkeypatch, tmp_path):
+    (tmp_path / "adapter_config.json").write_text('{"r":16}')
+    weights = tmp_path / "adapter_model.safetensors"
+    weights.write_bytes(b"small adapter")
+    namespace = cli()
+    identity = namespace["_adapter_identity"](tmp_path)
+    def unexpected_hash(*args, **kwargs):
+        raise AssertionError("Unchanged adapter should use the cached digest")
+    monkeypatch.setattr(namespace["hashlib"], "sha256", unexpected_hash)
+    assert namespace["_adapter_identity"](tmp_path) == identity
+    assert namespace["_adapter_identity"](None) is None
+    (tmp_path / "adapter_config.json").write_text('{"r":8}')
+    assert namespace["_adapter_identity"](tmp_path)["config"] != identity["config"]
 
 
 def judge_merge_run(monkeypatch, tmp_path):
@@ -173,7 +248,9 @@ def judge_merge_run(monkeypatch, tmp_path):
     }) + "\n" for task in tasks))
     (tmp_path / "scores_strict.json").write_text(json.dumps({
         "complete": True, "tasks": 200, "status_counts": {"evidence_failure": 200},
-        "generation_manifest": manifest, "widesearch": {"search_coverage": {"tasks": 200}},
+        "generation_manifest": manifest, "widesearch": {
+            "search_coverage": {"tasks": 200}, "table_input_protocol": TABLE_INPUT_PROTOCOL,
+        },
     }))
     configuration = {
         "model": "base/model", "model_name": "public/judge", "adapter": None,
@@ -189,8 +266,8 @@ def judge_merge_run(monkeypatch, tmp_path):
             "judge_quantization": "none", "policy_quantization": "none",
             "policy_inference_backend": "hf", "generation_manifest": manifest,
             "judge_configuration": configuration,
-            "widesearch": {"judge_model": "public/judge", "alignment_protocol": ALIGNMENT_PROTOCOL, "per_task": [
-                {"task_id": task.id, "alignment_protocol": ALIGNMENT_PROTOCOL, **dict.fromkeys(keys, 0.0)} for task in tasks[rank::8]
+            "widesearch": {"judge_model": "public/judge", "alignment_protocol": ALIGNMENT_PROTOCOL, "table_input_protocol": TABLE_INPUT_PROTOCOL, "per_task": [
+                {"task_id": task.id, "alignment_protocol": ALIGNMENT_PROTOCOL, "table_input_protocol": TABLE_INPUT_PROTOCOL, **dict.fromkeys(keys, 0.0)} for task in tasks[rank::8]
             ]},
         }))
     args = SimpleNamespace(data=["tasks.jsonl"], limit=None, output_dir=str(tmp_path),
@@ -240,6 +317,10 @@ def test_balanced_judge_merge_validates_plan_and_retains_generation(monkeypatch,
     ("alignment", "Judge alignment protocols differ"),
     ("task_alignment", "Judge alignment protocols differ"),
     ("cfg_alignment", "Judge alignment protocols differ"),
+    ("table_input", "Table input protocols differ across"),
+    ("task_table_input", "Table input protocols differ within"),
+    ("strict_table_input", "Table input protocols differ across"),
+    ("strict_task_table_input", "Table input protocols differ within"),
 ])
 def test_judge_merge_rejects_incomplete_or_mixed_provenance(monkeypatch, tmp_path, corruption, match):
     score, args = judge_merge_run(monkeypatch, tmp_path)
@@ -274,6 +355,21 @@ def test_judge_merge_rejects_incomplete_or_mixed_provenance(monkeypatch, tmp_pat
         report["widesearch"]["per_task"][0]["alignment_protocol"] = "different_v1"
     elif corruption == "cfg_alignment":
         report["judge_configuration"]["alignment_protocol"] = "different_v1"
+    elif corruption == "table_input":
+        report["widesearch"]["table_input_protocol"] = "different_v1"
+        for record in report["widesearch"]["per_task"]:
+            record["table_input_protocol"] = "different_v1"
+    elif corruption == "task_table_input":
+        report["widesearch"]["per_task"][0]["table_input_protocol"] = "different_v1"
+    elif corruption in {"strict_table_input", "strict_task_table_input"}:
+        path = tmp_path / "scores_strict.json"
+        report = json.loads(path.read_text())
+        if corruption == "strict_table_input":
+            report["widesearch"]["table_input_protocol"] = "different_v1"
+        else:
+            report["widesearch"]["per_task"] = [{
+                "task_id": "web0", "table_input_protocol": "different_v1",
+            }]
     path.write_text(json.dumps(report))
     with pytest.raises(ValueError, match=match):
         score(args)
@@ -287,7 +383,7 @@ def test_judge_merge_preserves_all_200_tasks_and_legacy_reports(monkeypatch, tmp
         path = tmp_path / "scores_judge_rank7.json"
         report = json.loads(path.read_text())
         record = report["widesearch"]["per_task"][-1]
-        report["widesearch"]["per_task"][-1] = {"task_id": record["task_id"], "alignment_protocol": ALIGNMENT_PROTOCOL, "judge_error": "explicit failure"}
+        report["widesearch"]["per_task"][-1] = {"task_id": record["task_id"], "alignment_protocol": ALIGNMENT_PROTOCOL, "table_input_protocol": TABLE_INPUT_PROTOCOL, "judge_error": "explicit failure"}
         path.write_text(json.dumps(report))
     elif mode in {"legacy", "mixed_legacy"}:
         paths = list(tmp_path.glob("scores_judge_rank*.json"))
@@ -326,6 +422,11 @@ def test_judge_merge_preserves_all_200_tasks_and_legacy_reports(monkeypatch, tmp
     assert report["complete"] == (not failures)
     assert report["judge_configuration_complete"] == (mode in {"complete", "judge_failure"})
     assert report["widesearch"]["search_coverage"] == {"tasks": 200}
+    assert report["widesearch"]["table_input_protocol"] == TABLE_INPUT_PROTOCOL
+    assert report["widesearch"]["table_input_protocol_complete"]
+    assert report["widesearch"]["table_input_protocols_observed"] == [TABLE_INPUT_PROTOCOL]
+    assert report["widesearch"]["table_input_protocol_legacy_shards"] == 0
+    assert report["widesearch"]["table_input_protocol_strict_complete"]
     assert report["widesearch"]["alignment_protocol_complete"] == (mode in {"complete", "judge_failure"})
     assert report["widesearch"]["alignment_protocol"] == (ALIGNMENT_PROTOCOL if mode in {"complete", "judge_failure"} else None)
     assert report["widesearch"]["alignment_protocol_legacy_shards"] == (8 if mode in {"legacy", "all_protocol_legacy", "null_protocol_legacy"} else 0 if mode in {"complete", "judge_failure"} else 1)
@@ -342,6 +443,55 @@ def test_alignment_provenance_unknown_configuration_is_explicit_legacy():
     }}) == (set(), False)
     with pytest.raises(ValueError, match="configuration must be an object"):
         protocol({"judge_configuration": [], "widesearch": {"per_task": []}})
+
+
+@pytest.mark.parametrize("mode", ["all_legacy", "all_missing", "all_null", "one_missing", "task_missing", "strict_missing", "strict_null", "strict_task_missing"])
+def test_judge_merge_keeps_legacy_table_input_provenance_explicit(monkeypatch, tmp_path, mode):
+    score, args = judge_merge_run(monkeypatch, tmp_path)
+    if mode == "all_legacy":
+        paths = [tmp_path / "scores_strict.json", *sorted(tmp_path.glob("scores_judge_rank*.json"))]
+    elif mode.startswith("strict"):
+        paths = [tmp_path / "scores_strict.json"]
+    else:
+        paths = sorted(tmp_path.glob("scores_judge_rank*.json"))
+        if mode in {"one_missing", "task_missing"}:
+            paths = paths[:1]
+    for path in paths:
+        report = json.loads(path.read_text())
+        wide = report["widesearch"]
+        if mode == "strict_task_missing":
+            wide["per_task"] = [{"task_id": "web0"}]
+        elif mode == "task_missing":
+            wide["per_task"][0].pop("table_input_protocol")
+        else:
+            for source in [wide] + wide.get("per_task", []):
+                if mode in {"all_null", "strict_null"}:
+                    source["table_input_protocol"] = None
+                else:
+                    source.pop("table_input_protocol", None)
+        path.write_text(json.dumps(report))
+    score(args)
+    report = json.loads((tmp_path / "scores_local_judge.json").read_text())
+    wide = report["widesearch"]
+    assert report["complete"] and wide["metric_denominator"] == 200
+    assert wide["table_input_protocol"] is None
+    assert not wide["table_input_protocol_complete"]
+    assert wide["table_input_protocols_observed"] == ([] if mode == "all_legacy" else [TABLE_INPUT_PROTOCOL])
+    assert wide["table_input_protocol_legacy_shards"] == (0 if mode.startswith("strict") else 8 if mode.startswith("all") else 1)
+    assert wide["table_input_protocol_strict_complete"] == (not mode.startswith("strict") and mode != "all_legacy")
+
+
+@pytest.mark.parametrize("value", ["", 1, [], {}])
+def test_table_input_provenance_rejects_malformed_explicit_versions(value):
+    protocol = cli()["_table_input_protocol"]
+    with pytest.raises(ValueError, match="explicit nonempty version"):
+        protocol({"widesearch": {"table_input_protocol": value}})
+
+
+def test_table_input_provenance_does_not_invent_versions_for_historical_reports():
+    protocol = cli()["_table_input_protocol"]
+    assert protocol({"widesearch": {"per_task": [{"task_id": "synthetic"}]}}) == (set(), False)
+    assert protocol({"widesearch": {"table_input_protocol": None, "per_task": [{"table_input_protocol": None}]}}) == (set(), False)
 
 
 @pytest.mark.parametrize("quantization", ["none", "nf4"])
@@ -398,6 +548,8 @@ def test_local_judge_loads_frozen_base_with_full_context_and_records_configurati
     assert report["judge_configuration"]["alignment_protocol"] == ALIGNMENT_PROTOCOL
     assert report["widesearch"]["alignment_protocol"] == ALIGNMENT_PROTOCOL
     assert all(record["alignment_protocol"] == ALIGNMENT_PROTOCOL for record in report["widesearch"]["per_task"])
+    assert report["widesearch"]["table_input_protocol"] == TABLE_INPUT_PROTOCOL
+    assert all(record["table_input_protocol"] == TABLE_INPUT_PROTOCOL for record in report["widesearch"]["per_task"])
     assert report["policy_quantization"] == "none"
     assert report["judge_quantization"] == quantization
     if scheduling == "balanced":
@@ -536,6 +688,123 @@ def stub_evaluation(monkeypatch, tmp_path, policy, tasks):
                            vllm_batched_tokens=8192, vllm_enforce_eager=True,
                            batch_size=1, timeout=30, save_tokens=False)
     return evaluate, args
+
+
+def test_structured_final_requires_vllm_before_loading():
+    with pytest.raises(ValueError, match="--web-structured-final requires --inference-backend vllm"):
+        asyncio.run(cli()["evaluate"](SimpleNamespace(web_structured_final=True)))
+
+
+@pytest.mark.parametrize("args,message", [
+    ({"web_structured_actions": True}, "requires --web-structured-final"),
+    ({"web_structured_actions": True, "web_structured_final": True}, "requires --inference-backend vllm"),
+])
+def test_structured_actions_require_final_and_vllm_before_loading(args, message):
+    with pytest.raises(ValueError, match=message):
+        asyncio.run(cli()["evaluate"](SimpleNamespace(**args)))
+
+
+def test_structured_actions_record_enabled_provenance_and_reject_disabled_resume(monkeypatch, tmp_path):
+    from slime_plugins.dcc.web_structured import web_structured_actions_configuration, web_structured_configuration
+
+    config = web_structured_actions_configuration(True)
+    final = web_structured_configuration(True)
+    calls = []
+
+    class Policy:
+        provenance = {"backend": "vllm", "web_structured_final": final, "web_structured_actions": config}
+
+        async def __call__(self, *args, **kwargs):
+            raise AssertionError("enabled Web evaluation must use the structured capability")
+
+        async def generate_structured(self, messages, **kwargs):
+            calls.append(kwargs)
+            return PolicyCompletion('{"answer":[]}', [1], [2])
+
+        async def close(self):
+            pass
+
+    task = Task("web", "widesearch", "validation", "Find names", gold=[],
+                metadata={"evaluation": {"required": ["name"]}})
+    evaluate, args = stub_evaluation(monkeypatch, tmp_path, Policy(), [task])
+    args.web_structured_final = args.web_structured_actions = True
+    args.max_steps = 1
+    options = []
+
+    def load(*a, **kwargs):
+        options.append(kwargs)
+        return Policy()
+
+    monkeypatch.setattr(sys.modules["slime_plugins.dcc.vllm_policy"], "load_vllm_policy", load)
+    asyncio.run(evaluate(args))
+    assert options[0]["web_structured_actions"] is options[0]["web_structured_final"] is True
+    assert calls[0]["json_schema"]["properties"]["answer"]["maxItems"] == 0
+    for name in ("manifest_rank0.json", "inference_runtime.json"):
+        assert json.loads((tmp_path / name).read_text())["web_structured_actions"] == config
+    args.web_structured_actions = False
+    with pytest.raises(ValueError, match="configuration changed"):
+        asyncio.run(evaluate(args))
+
+
+@pytest.mark.parametrize("damage", [None, "runtime", "manifest", "version", "enabled_type", "final"])
+def test_scoring_rejects_mixed_or_unattested_action_schema_runtime(tmp_path, damage):
+    from slime_plugins.dcc.web_structured import web_structured_actions_configuration, web_structured_configuration
+
+    tasks = logical_predictions(tmp_path)
+    for file in [*tmp_path.glob("manifest_rank*.json"), *tmp_path.glob("inference_runtime*.json")]:
+        data = json.loads(file.read_text())
+        data["web_structured_actions"] = web_structured_actions_configuration(True)
+        data["web_structured_final"] = web_structured_configuration(True)
+        if damage == "runtime" and file.name.startswith("inference_runtime"):
+            data.pop("web_structured_actions")
+        elif damage == "manifest" and file.name.startswith("manifest"):
+            data.pop("web_structured_actions")
+        elif damage == "version":
+            data["web_structured_actions"]["schema_version"] = "unknown"
+        elif damage == "enabled_type":
+            data["web_structured_actions"]["enabled"] = 1
+        elif damage == "final":
+            data.pop("web_structured_final")
+        file.write_text(json.dumps(data))
+    if damage:
+        with pytest.raises(ValueError, match="Structured Web actions"):
+            cli()["_score_predictions"](tmp_path, tasks)
+    else:
+        _, manifest, runtime = cli()["_score_predictions"](tmp_path, tasks)
+        assert manifest["web_structured_actions"] == runtime["web_structured_actions"]
+
+
+def test_enabled_structured_final_records_config_and_rejects_disabled_resume(monkeypatch, tmp_path):
+    from slime_plugins.dcc.web_structured import web_structured_configuration
+
+    config = web_structured_configuration(True)
+    calls = []
+
+    class Policy:
+        provenance = {"backend": "vllm", "web_structured_final": config}
+
+        async def __call__(self, messages, **kwargs):
+            return PolicyCompletion('{"answer":[]}', [1], [2])
+
+        async def close(self):
+            pass
+
+    task = Task("contract", "cuad", "validation", "Find clause", document="source", gold=[])
+    evaluate, args = stub_evaluation(monkeypatch, tmp_path, Policy(), [task])
+
+    def load(*a, **kwargs):
+        calls.append(kwargs)
+        return Policy()
+
+    monkeypatch.setattr(sys.modules["slime_plugins.dcc.vllm_policy"], "load_vllm_policy", load)
+    args.web_structured_final = True
+    asyncio.run(evaluate(args))
+    assert calls[0]["web_structured_final"] is True
+    assert json.loads((tmp_path / "manifest_rank0.json").read_text())["web_structured_final"] == config
+    assert json.loads((tmp_path / "inference_runtime.json").read_text())["web_structured_final"] == config
+    args.web_structured_final = False
+    with pytest.raises(ValueError, match="configuration changed"):
+        asyncio.run(evaluate(args))
 
 
 @pytest.mark.parametrize("index,count,backend,flag,match", [
