@@ -13,7 +13,14 @@ from .vllm_policy import _adapter_metadata
 
 def validate_native_adapter(adapter, *, source_receipt, approved_derivative_id, model_config,
                             approved_training_source_receipt=None, approved_training_protocol=None,
-                            evaluation_protocol=None):
+                            evaluation_protocol=None, approved_dpo=None):
+    if approved_dpo is not None:
+        if approved_training_source_receipt is not None or approved_training_protocol is not None:
+            raise ValueError("DPO approval and accepted-SFT training approval are mutually exclusive")
+        from .native_dpo_adapter import validate_native_dpo_adapter
+        return validate_native_dpo_adapter(adapter, source_receipt=source_receipt,
+            approved_derivative_id=approved_derivative_id, model_config=model_config,
+            evaluation_protocol=evaluation_protocol, approved_dpo=approved_dpo)
     if not isinstance(approved_derivative_id, str) or not approved_derivative_id.strip():
         raise ValueError("Native LoRA requires a separately approved derivative artifact ID")
     metadata = _adapter_metadata(adapter)
@@ -60,6 +67,28 @@ def validate_native_adapter(adapter, *, source_receipt, approved_derivative_id, 
         if (budget.protocol != training_protocol
                 or rollout != native_configuration(training_receipt, budget=budget)):
             raise ValueError("Actual budgeted TRAIN rollout differs from approved training source/protocol")
+    rank, tensor_pairs = validate_native_attention_headers(path, metadata, model_config)
+    # Recheck the existing lightweight identity after reading headers/config.
+    if _adapter_metadata(adapter) != metadata:
+        raise ValueError("Adapter changed during native preflight")
+    binding = {"derivative_id": approved_derivative_id, "training_source_receipt": training_receipt,
+               "protocol": training_protocol, "model_revision": MODEL_REVISION, "lora_rank": rank,
+               "tensor_pairs": tensor_pairs, "checked_actual_attention_shapes": True}
+    if training_protocol == BUDGET_PROTOCOL:
+        # Bind the actual saved TRAIN budget as well as its source/protocol.
+        # Approval of the source/protocol alone is not approval of each budget;
+        # the frozen training plan and update audit establish that separately.
+        binding["training_rollout_native_thinking"] = native["rollout_native_thinking"]
+    if explicit_training:
+        if evaluation_protocol not in {LEGACY_PROTOCOL, BUDGET_PROTOCOL}:
+            raise ValueError("The actual evaluation protocol must be declared")
+        binding.update(evaluation_source_receipt=validate_source_receipt(source_receipt),
+            evaluation_protocol=evaluation_protocol,
+            caller_approved_training={"source_commit": training_receipt["source_commit"], "protocol": training_protocol})
+    return metadata, binding
+
+def validate_native_attention_headers(path, metadata, model_config):
+    """Original standard attention shape/dtype/completeness guards, shared."""
     if not isinstance(model_config, dict):
         raise ValueError("Actual local base model configuration is required")
     hidden, layers = model_config.get("hidden_size"), model_config.get("num_hidden_layers")
@@ -93,21 +122,4 @@ def validate_native_adapter(adapter, *, source_receipt, approved_derivative_id, 
     expected = {(layer,target,side) for layer in range(layers) for target in targets for side in ("A","B")}
     if found != expected:
         raise ValueError("Native LoRA checkpoint is empty or missing configured attention pairs")
-    # Recheck the existing lightweight identity after reading headers/config.
-    if _adapter_metadata(adapter) != metadata:
-        raise ValueError("Adapter changed during native preflight")
-    binding = {"derivative_id": approved_derivative_id, "training_source_receipt": training_receipt,
-               "protocol": training_protocol, "model_revision": MODEL_REVISION, "lora_rank": rank,
-               "tensor_pairs": len(found)//2, "checked_actual_attention_shapes": True}
-    if training_protocol == BUDGET_PROTOCOL:
-        # Bind the actual saved TRAIN budget as well as its source/protocol.
-        # Approval of the source/protocol alone is not approval of each budget;
-        # the frozen training plan and update audit establish that separately.
-        binding["training_rollout_native_thinking"] = native["rollout_native_thinking"]
-    if explicit_training:
-        if evaluation_protocol not in {LEGACY_PROTOCOL, BUDGET_PROTOCOL}:
-            raise ValueError("The actual evaluation protocol must be declared")
-        binding.update(evaluation_source_receipt=validate_source_receipt(source_receipt),
-            evaluation_protocol=evaluation_protocol,
-            caller_approved_training={"source_commit": training_receipt["source_commit"], "protocol": training_protocol})
-    return metadata, binding
+    return rank, len(found) // 2

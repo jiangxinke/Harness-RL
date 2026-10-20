@@ -178,7 +178,7 @@ def _validate_native_pair_run(run, generation, kind):
     manifest, runtime = run["manifest"], run["runtime"] or {}
     records = (manifest, runtime, generation)
     if not any("native_thinking" in record for record in records):
-        if (any(key in manifest for key in ("native_lora_derivative_id", "native_lora_training_approval"))
+        if (any(key in manifest for key in ("native_lora_derivative_id", "native_lora_training_approval", "native_lora_dpo_approval"))
                 or "native_lora_binding" in runtime):
             raise ValueError("Native policy bindings require the native generation protocol")
         return False
@@ -216,7 +216,8 @@ def _validate_native_pair_run(run, generation, kind):
             approved_derivative_id=manifest.get("native_lora_derivative_id"),
             model_config=_read(Path(manifest["model"]) / "config.json"),
             approved_training_source_receipt=receipt,
-            approved_training_protocol=approval.get("protocol"), evaluation_protocol=config["protocol"])
+            approved_training_protocol=approval.get("protocol"), evaluation_protocol=config["protocol"],
+            **({"approved_dpo": manifest["native_lora_dpo_approval"]} if "native_lora_dpo_approval" in manifest else {}))
         from slime_plugins.dcc.adapter_identity import saved_adapter_matches
         if (not saved_adapter_matches(manifest.get("adapter_identity"), metadata)
                 or manifest.get("adapter_identity") != runtime.get("adapter")
@@ -382,7 +383,7 @@ def validate_protocols(baseline, trained, baseline_protocol, trained_protocol):
     exclude = {"adapter", "adapter_identity"}
     runtime_exclude = {"adapter"}
     if all(native_v3):
-        exclude.update({"native_lora_derivative_id", "native_lora_training_approval"})
+        exclude.update({"native_lora_derivative_id", "native_lora_training_approval", "native_lora_dpo_approval"})
         runtime_exclude.add("native_lora_binding")
     manifests = [{key: value for key, value in run["manifest"].items() if key not in exclude}
                  for run in (baseline, trained)]
@@ -611,6 +612,9 @@ def compare(tasks, baseline, trained, baseline_protocol, trained_protocol, *, sc
             "native_lora_training_approval": run["manifest"].get("native_lora_training_approval"),
             "native_lora_binding": (run["runtime"] or {}).get("native_lora_binding"),
         } for name, run in (("baseline", baseline), ("trained", trained))}
+        for name, run in (("baseline", baseline), ("trained", trained)):
+            if "native_lora_dpo_approval" in run["manifest"]:
+                report["native_policy_bindings"][name]["native_lora_dpo_approval"] = run["manifest"]["native_lora_dpo_approval"]
     return report
 
 

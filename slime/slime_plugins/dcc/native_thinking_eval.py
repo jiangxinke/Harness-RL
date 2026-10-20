@@ -92,7 +92,7 @@ class NativeThinkingPolicy:
 
     def __init__(self, base, *, source_receipt, trace_sink, approved_derivative_id=None,
                  budget=None, approved_training_source=None, approved_training_protocol=None,
-                 prompt_history_config=None, phase_timing=False):
+                 prompt_history_config=None, phase_timing=False, approved_dpo=None):
         timing_configuration = phase_timing_configuration(phase_timing)
         self.phase_timing = phase_timing
         self.prompt_history_config = (PromptHistoryConfig() if prompt_history_config is None
@@ -104,11 +104,13 @@ class NativeThinkingPolicy:
         self.budget = NativeBudget() if budget is None else budget
         if not isinstance(self.budget, NativeBudget):
             raise TypeError("An explicit NativeBudget is required")
+        if approved_dpo is not None and (approved_training_source is not None or approved_training_protocol is not None):
+            raise ValueError("DPO approval and accepted-SFT source/protocol approval are mutually exclusive")
         training_receipt = approved_training_receipt(source_receipt,
             approved_training_source, approved_training_protocol)
         if not isinstance(base, AsyncVLLMPolicy):
             raise TypeError("An existing native AsyncVLLMPolicy is required")
-        if base.lora_request is not None and not self.budget.legacy and training_receipt is None:
+        if base.lora_request is not None and not self.budget.legacy and training_receipt is None and approved_dpo is None:
             raise ValueError("v3 native LoRA requires explicit approval of its actual training source/protocol")
         adapter_binding = None
         if base.lora_request is not None:
@@ -122,10 +124,11 @@ class NativeThinkingPolicy:
                 model_config=base.model.vllm_config.model_config.hf_config.to_dict(),
                 approved_training_source_receipt=training_receipt,
                 approved_training_protocol=approved_training_protocol,
-                evaluation_protocol=self.budget.protocol)
+                evaluation_protocol=self.budget.protocol,
+                **({"approved_dpo": approved_dpo} if approved_dpo is not None else {}))
             if metadata != actual or Path(base.lora_request.lora_path).absolute() != Path(metadata["path"]):
                 raise ValueError("Native LoRA request differs from the actual checked adapter")
-        elif approved_derivative_id is not None or training_receipt is not None:
+        elif approved_derivative_id is not None or training_receipt is not None or approved_dpo is not None:
             raise ValueError("Native LoRA derivative flag requires an actual adapter")
         if base.evaluation_sampling != EvaluationSampling():
             raise ValueError("This new protocol requires greedy/neutral EvaluationSampling()")
@@ -463,6 +466,9 @@ def native_options(args, tasks, sampling, source_root):
                           getattr(args, "native_thought_sampling", "greedy"))
     training_source = getattr(args, "native_lora_training_source", None)
     training_protocol = getattr(args, "native_lora_training_protocol", None)
+    dpo_path = getattr(args, "native_lora_dpo_approval", None)
+    if dpo_path is not None and (training_source is not None or training_protocol is not None):
+        raise ValueError("DPO approval and accepted-SFT source/protocol approval are mutually exclusive")
     receipt_path = getattr(args, "native_source_receipt", None)
     if type(enabled) is not bool:
         raise ValueError("native_thinking must be a boolean")
@@ -470,7 +476,7 @@ def native_options(args, tasks, sampling, source_root):
         if receipt_path is not None:
             raise ValueError("--native-source-receipt requires --native-thinking")
         if (getattr(args, "native_lora_derivative_id", None) is not None or not budget.legacy
-                or training_source is not None or training_protocol is not None):
+                or training_source is not None or training_protocol is not None or dpo_path is not None):
             raise ValueError("Native LoRA flags require --native-thinking")
         return None
     if (args.inference_backend != "vllm" or not args.vllm_async
@@ -492,16 +498,19 @@ def native_options(args, tasks, sampling, source_root):
     receipt = validate_source_receipt(_strict_json(path.read_text()))
     approved = getattr(args, "native_lora_derivative_id", None)
     training_receipt = approved_training_receipt(receipt, training_source, training_protocol)
+    from .native_dpo_adapter import approval_from_arguments
+    approved_dpo = approval_from_arguments(args)
     if args.adapter is not None:
-        if not budget.legacy and training_receipt is None:
+        if not budget.legacy and training_receipt is None and approved_dpo is None:
             raise ValueError("v3 native LoRA requires explicit approval of its actual training source/protocol")
         from transformers import AutoConfig
         from .native_lora import validate_native_adapter
         validate_native_adapter(args.adapter, source_receipt=receipt, approved_derivative_id=approved,
             model_config=AutoConfig.from_pretrained(args.model, local_files_only=True, trust_remote_code=False).to_dict(),
             approved_training_source_receipt=training_receipt,
-            approved_training_protocol=training_protocol, evaluation_protocol=budget.protocol)
-    elif approved is not None or training_receipt is not None:
+            approved_training_protocol=training_protocol, evaluation_protocol=budget.protocol,
+            **({"approved_dpo": approved_dpo} if approved_dpo is not None else {}))
+    elif approved is not None or training_receipt is not None or approved_dpo is not None:
         raise ValueError("Native LoRA derivative flag requires an actual adapter")
     return native_configuration(receipt, budget=budget)
 
@@ -579,7 +588,15 @@ def validate_native_sidecars(output, saved, manifest, runtime, owners, tasks, *,
         approval.get("source_commit"), approval.get("protocol")) if isinstance(approval, dict) else None)
     if approval is not None and (not isinstance(approval, dict) or set(approval) != {"source_commit", "protocol"} or training_receipt is None):
         raise ValueError("Invalid caller-approved actual training source/protocol")
-    if manifest.get("adapter") is not None:
+    dpo_approval = manifest.get("native_lora_dpo_approval")
+    if dpo_approval is not None:
+        if approval is not None or manifest.get("adapter") is None or (runtime or {}).get("adapter") is None:
+            raise ValueError("DPO sidecar approval requires an actual adapter and excludes accepted-SFT approval")
+        from .native_dpo_adapter import validate_dpo_sidecar_binding
+        validate_dpo_sidecar_binding(binding, dpo_approval,
+            derivative_id=manifest.get("native_lora_derivative_id"),
+            source_receipt=config["source_receipt"], evaluation_protocol=budget.protocol)
+    elif manifest.get("adapter") is not None:
         if (not isinstance(binding, dict) or not manifest.get("native_lora_derivative_id")
                 or binding.get("derivative_id") != manifest["native_lora_derivative_id"]
                 or binding.get("training_source_receipt") != (training_receipt or config["source_receipt"])

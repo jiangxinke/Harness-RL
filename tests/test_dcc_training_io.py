@@ -300,7 +300,12 @@ def test_cpu_trainer_keeps_exact_optimizer_updates_and_checkpoint_layout(tmp_pat
             self.available, self.cuad, self.cuad_tools = [], {}, {}
             self.cuad_missing_stages, self.skips = [], {}
             self.web_fraction, self.rng = 1.0, random.Random(42)
-    def backward(model, examples):
+    def backward(model, examples, *, native_phase_normalized_loss=False,
+                 native_completion_json_mixture_loss=False,
+                 native_loss_telemetry=None, native_telemetry_metadata=None):
+        assert native_phase_normalized_loss is False
+        assert native_completion_json_mixture_loss is False
+        assert native_loss_telemetry is None and native_telemetry_metadata is None
         loss = model.lora_A.square().mean()
         loss.backward()
         return loss.item()
