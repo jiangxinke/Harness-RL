@@ -42,6 +42,9 @@ from slime_plugins.dcc.web_structured import web_structured_actions_configuratio
 from slime_plugins.dcc.prompt_history import (
     add_prompt_history_arguments, prompt_history_from_arguments, validate_prompt_history_records,
 )
+from slime_plugins.dcc.native_phase_timing import (
+    add_arguments as add_phase_timing_arguments, configuration as phase_timing_configuration,
+)
 
 
 def _evaluation_sampling(args, backend):
@@ -387,6 +390,9 @@ async def _evaluate(args, *, browser_reader=None):
     if args.limit:
         tasks = tasks[: args.limit]
     native = None
+    timing_configuration = phase_timing_configuration(getattr(args, "native_phase_timing", False))
+    if timing_configuration is not None and not getattr(args, "native_thinking", False):
+        raise ValueError("--native-phase-timing requires --native-thinking")
     if (getattr(args, "native_thinking", False) or getattr(args, "native_source_receipt", None) is not None
             or getattr(args, "native_lora_derivative_id", None) is not None
             or getattr(args, "native_thought_tokens", 4096) != 4096
@@ -426,6 +432,8 @@ async def _evaluate(args, *, browser_reader=None):
         manifest["prompt_history"] = history_configuration.to_dict()
     if native is not None:
         manifest["native_thinking"] = native
+        if timing_configuration is not None:
+            manifest["native_phase_timing"] = timing_configuration
         if args.adapter is not None:
             manifest["native_lora_derivative_id"] = args.native_lora_derivative_id
             if getattr(args, "native_lora_training_source", None) is not None:
@@ -592,7 +600,8 @@ async def _evaluate(args, *, browser_reader=None):
                             budget=budget_from_configuration(native),
                             approved_training_source=getattr(args, "native_lora_training_source", None),
                             approved_training_protocol=getattr(args, "native_lora_training_protocol", None),
-                            prompt_history_config=history_configuration)
+                            prompt_history_config=history_configuration,
+                            phase_timing=timing_configuration is not None)
                     except BaseException:
                         journal.close()
                         raise
@@ -979,6 +988,7 @@ def score(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     add_prompt_history_arguments(parser)
+    add_phase_timing_arguments(parser)
     parser.add_argument("--model", required=True)
     parser.add_argument("--model-name", default="Qwen/Qwen3-30B-A3B-Instruct-2507")
     parser.add_argument("--adapter")

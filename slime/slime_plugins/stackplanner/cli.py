@@ -507,6 +507,9 @@ def build_slime_command(config: TrainingConfig) -> tuple[str, ...]:
     if config.data_start or config.data_limit:
         end = config.data_start + config.data_limit if config.data_limit else ""
         prompt_data = f"{prompt_data}@[{config.data_start}:{end}]"
+    # Group-relative estimators apply reference KL in the policy loss;
+    # PPO consumes its KL coefficient when shaping token rewards.
+    uses_kl_loss = config.algorithm in {"grpo", "gspo", "cispo"}
     args = [
         sys.executable,
         str(entry),
@@ -571,7 +574,7 @@ def build_slime_command(config: TrainingConfig) -> tuple[str, ...]:
         "--lr",
         str(config.learning_rate),
         "--kl-coef",
-        str(config.kl_coefficient),
+        str(0.0 if uses_kl_loss else config.kl_coefficient),
         "--eps-clip",
         str(config.clip_epsilon),
         "--optimizer",
@@ -590,6 +593,8 @@ def build_slime_command(config: TrainingConfig) -> tuple[str, ...]:
         str(run_dir / "rollouts/{rollout_id}.pt"),
         "--use-tensorboard",
     ]
+    if uses_kl_loss and config.kl_coefficient != 0:
+        args.extend(("--use-kl-loss", "--kl-loss-coef", str(config.kl_coefficient)))
     if config.eval_interval > 0:
         args.extend(("--eval-interval", str(config.eval_interval)))
     if config.ole_enabled:

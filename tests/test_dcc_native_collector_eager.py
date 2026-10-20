@@ -15,7 +15,7 @@ spec.loader.exec_module(collector)
 
 
 class CollectorEagerCallerTests(unittest.TestCase):
-    def run_actual_main(self, enabled):
+    def run_actual_main(self, enabled, *, phase_timing=False):
         tokenizer = object()
         profile = {"identity": {"eos_token_ids": [11]}}
         budget, schemas = object(), object()
@@ -38,6 +38,8 @@ class CollectorEagerCallerTests(unittest.TestCase):
                     "--concurrency", "4", "--gpu-memory-utilization", ".88", "--timeout-seconds", "1800"]
             if enabled:
                 argv.append("--vllm-enforce-eager")
+            if phase_timing:
+                argv.append("--native-phase-timing")
             with patch.object(sys, "argv", argv), \
                  patch("transformers.AutoTokenizer.from_pretrained", return_value=tokenizer), \
                  patch.object(collector, "load_approved", return_value=(profile, identity, schemas, receipt)), \
@@ -63,7 +65,8 @@ class CollectorEagerCallerTests(unittest.TestCase):
             fixed.assert_called_once_with(tasks, max_tasks_per_benchmark=512, rank=3, world_size=32)
             journal.assert_called_once_with(output / "native_thinking_traces_rank3.jsonl")
             wrapper.assert_called_once_with(base, source_receipt=receipt, budget=budget,
-                                            trace_sink="cpu-fake-journal")
+                                            prompt_history_config=collector.PromptHistoryConfig(),
+                                            phase_timing=phase_timing, trace_sink="cpu-fake-journal")
             generate.assert_awaited_once_with(tasks, native, output,
                 collection_id="cpu-caller-only", profile=profile, schema_profile=schemas,
                 rank=3, world_size=32, concurrency=4, timeout_seconds=1800)
@@ -73,6 +76,9 @@ class CollectorEagerCallerTests(unittest.TestCase):
 
     def test_actual_cli_opt_in_reaches_existing_backend_with_true_only(self):
         self.run_actual_main(True)
+
+    def test_native_phase_timing_opt_in_only_changes_native_wrapper(self):
+        self.run_actual_main(False, phase_timing=True)
 
 
 

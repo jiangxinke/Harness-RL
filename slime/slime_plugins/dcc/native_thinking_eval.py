@@ -24,6 +24,7 @@ from .hf_policy import PROMPT_ENCODING_VERSION, encode_messages
 from .vllm_policy import AsyncVLLMPolicy
 from .prompt_history import (PromptHistoryConfig, PromptHistoryBudgetExceeded,
                             fit_prompt_history, validate_prompt_history_records, prompt_history_json_equal)
+from .native_phase_timing import NativePhaseTimer, configuration as phase_timing_configuration
 
 
 BASE_SOURCE_COMMIT = "5bed6188feaaf6c79fac53eead30cfbad83b0beb"
@@ -91,7 +92,9 @@ class NativeThinkingPolicy:
 
     def __init__(self, base, *, source_receipt, trace_sink, approved_derivative_id=None,
                  budget=None, approved_training_source=None, approved_training_protocol=None,
-                 prompt_history_config=None):
+                 prompt_history_config=None, phase_timing=False):
+        timing_configuration = phase_timing_configuration(phase_timing)
+        self.phase_timing = phase_timing
         self.prompt_history_config = (PromptHistoryConfig() if prompt_history_config is None
                                       else prompt_history_config)
         if not isinstance(self.prompt_history_config, PromptHistoryConfig):
@@ -163,6 +166,8 @@ class NativeThinkingPolicy:
         )
         if self.prompt_history_config.enabled:
             self.provenance["prompt_history"] = self.prompt_history_config.to_dict()
+        if timing_configuration is not None:
+            self.provenance["native_phase_timing"] = timing_configuration
 
         if not self.budget.legacy:
             self.provenance["sampling"] = "Native thought profile=" + self.budget.thought_sampling_profile + "; JSON=greedy-neutral; see native_thinking"
@@ -203,11 +208,14 @@ class NativeThinkingPolicy:
         trace["phases"].append(phase)
         self.base._active_requests.add(request_id)
         completed, response = False, None
+        timing = NativePhaseTimer(phase) if self.phase_timing else None
         try:
             async for item in self.base.model.generate(
                     {"prompt_token_ids": list(prompt)}, params, request_id,
                     lora_request=self.base.lora_request):
                 response = item
+                if timing is not None:
+                    timing.observe(item)
                 # Retain every actually observed response snapshot even when
                 # a later engine/cancellation error prevents normal return.
                 phase["response_prompt_ids"] = list(item.prompt_token_ids)
@@ -236,16 +244,36 @@ class NativeThinkingPolicy:
             if phase["finish_reason"] not in {"stop", "length"}:
                 self._fail(trace, name + "_unknown_finish_reason")
             completed = True
+            if timing is not None:
+                timing.mark("completion")
             return phase
         except BaseException as error:
+            if timing is not None:
+                timing.mark("exception")
             phase["exception_type"] = type(error).__name__
             raise
         finally:
             try:
                 if not completed:
-                    await self.base.model.abort(request_id)
+                    if timing is not None:
+                        timing.mark("abort_start")
+                    try:
+                        await self.base.model.abort(request_id)
+                    except BaseException as error:
+                        if timing is not None:
+                            timing.mark("abort_exception")
+                            timing.record["abort_exception_type"] = type(error).__name__
+                        raise
+                    else:
+                        if timing is not None:
+                            timing.mark("abort_completion")
+                    finally:
+                        if timing is not None:
+                            timing.mark("abort_end")
                     phase["aborted"] = True
             finally:
+                if timing is not None:
+                    timing.end()
                 self.base._active_requests.discard(request_id)
 
     async def generate_structured(self, messages, *, json_schema, max_new_tokens, temperature, trace_metadata):

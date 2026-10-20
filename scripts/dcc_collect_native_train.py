@@ -29,6 +29,7 @@ from slime_plugins.dcc.data import Task
 from slime_plugins.dcc.episode import EpisodeRunner, ModelProtocolFailure, PolicyCompletion
 from slime_plugins.dcc.eval_sampling import EvaluationSampling
 from slime_plugins.dcc.native_thinking_eval import NativeThinkingPolicy, NativeTraceJournal
+from slime_plugins.dcc.native_phase_timing import add_arguments as add_phase_timing_arguments
 from slime_plugins.dcc.prompt_history import (
     PromptHistoryConfig, add_prompt_history_arguments, prompt_history_from_arguments,
 )
@@ -264,7 +265,9 @@ async def generate(tasks, native, output, *, collection_id, profile, schema_prof
             "profile": copy.deepcopy(profile), "source_receipt": copy.deepcopy(native.source_receipt),
             "task_ids": [task.id for task in tasks], "request_events": requests.count,
             "episodes": episodes.count, "native_traces": len(native.traces),
-            "generation_journals_closed": True, "labels_loaded": False})
+            "generation_journals_closed": True, "labels_loaded": False,
+            **({"native_phase_timing": copy.deepcopy(native.provenance["native_phase_timing"])}
+               if "native_phase_timing" in native.provenance else {})})
 
 
 def read_closed(output, *, profile, receipt, world_size):
@@ -500,6 +503,7 @@ def main():
         part.add_argument("--world-size", type=int, default=1)
         if command == "generate":
             add_prompt_history_arguments(part)
+            add_phase_timing_arguments(part)
             part.add_argument("--public-train-data", required=True)
             part.add_argument("--collection-id", required=True)
             part.add_argument("--max-tasks-per-benchmark", type=int, default=2, help="Fixed pilot default, selected by task ID only")
@@ -552,6 +556,7 @@ def main():
     base.allow_truncation = False
     native = NativeThinkingPolicy(base, source_receipt=receipt, budget=identity.budget,
         prompt_history_config=history_configuration,
+        phase_timing=args.native_phase_timing,
         trace_sink=NativeTraceJournal(output / f"native_thinking_traces_rank{args.rank}.jsonl"))
     asyncio.run(generate(tasks, native, output, collection_id=args.collection_id, profile=profile,
         schema_profile=schemas, rank=args.rank, world_size=args.world_size, concurrency=args.concurrency,

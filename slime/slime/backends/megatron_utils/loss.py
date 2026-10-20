@@ -727,11 +727,26 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
         old_rewards = rewards
         rewards = []
         kl_coef = -args.kl_coef
-        cp_rank = mpu.get_context_parallel_rank()
-        for reward, k in zip(old_rewards, kl, strict=False):
+        cp_size = mpu.get_context_parallel_world_size()
+        for reward, k, total_length, response_length in zip(
+            old_rewards, kl, total_lengths, response_lengths, strict=True
+        ):
             k *= kl_coef
-            if cp_rank == 0:
-                k[-1] += reward
+            if response_length > 0:
+                if cp_size == 1:
+                    k[-1] += reward
+                else:
+                    # Padding can put the terminal token on any CP rank.
+                    # Map its logit position through the same local slices as
+                    # log-probs, including ranks with no response tokens.
+                    _, _, logits_offsets, _ = get_logits_and_tokens_offset_with_cp(total_length, response_length)
+                    terminal_logit = total_length - 2
+                    local_offset = 0
+                    for start, end in logits_offsets:
+                        if start <= terminal_logit < end:
+                            k[local_offset + terminal_logit - start] += reward
+                            break
+                        local_offset += end - start
             rewards.append(k)
         advantages, returns = get_advantages_and_returns_batch(
             total_lengths, response_lengths, values, rewards, args.gamma, args.lambd
