@@ -44,6 +44,14 @@ Transformer Engine's transitive ONNX dependencies otherwise can upgrade NumPy to
 2.x. The compatible ONNX family is pinned as well. Use the constraints for every
 later dependency-resolving installation, including native builds.
 
+Ray's placement-group serialization imports PyArrow even when the training job
+does not use Ray Data. An unconstrained resolution selected PyArrow 26.0.0,
+whose native module requires NumPy 2 and failed with the NumPy 1.26.4 runtime.
+`pyarrow==19.0.1` passed actual NumPy/Arrow conversion, Ray
+`SerializationContext.serialize`, Arrow roundtrip, and SGLang server-argument
+imports in this environment. Keep this pin under the same constraints. These
+CPU checks do not establish production GPU training acceptance.
+
 ```bash
 CUDA_VISIBLE_DEVICES='' python -m pip install \
   torch==2.11.0+cu129 torchvision==0.26.0+cu129 torchaudio==2.11.0+cu129 \
@@ -219,7 +227,7 @@ Install the remaining runtime utilities under the constraints:
 ```bash
 CUDA_VISIBLE_DEVICES='' python -m pip install \
   -r "$RUNTIME_DIR/sglang-cu12-base.requirements" \
-  'ray[default]==2.59.0' wandb tensorboard PyYAML httpx \
+  'ray[default]==2.59.0' pyarrow==19.0.1 wandb tensorboard PyYAML httpx \
   blake3 xxhash zstandard omegaconf accelerate
 export PYTHONPATH="$REPO_ROOT/slime:$RUNTIME_DIR/Megatron-LM${PYTHONPATH:+:$PYTHONPATH}"
 ```
@@ -238,6 +246,7 @@ assert sys.prefix != sys.base_prefix
 for name, expected in {
     'torch': '2.11.0+cu129', 'numpy': '1.26.4', 'scipy': '1.17.1',
     'transformer-engine': '2.16.1', 'sglang': '0.5.15.post1',
+    'pyarrow': '19.0.1',
 }.items():
     assert metadata.version(name) == expected, (name, metadata.version(name))
 assert torch.version.cuda == '12.9'
@@ -251,6 +260,16 @@ for name in [
     print(name, module.__file__)
 import sglang_router
 assert 'slime' in sglang_router.__version__
+import numpy as np
+import pyarrow as pa
+import ray
+from ray._private.serialization import SerializationContext
+from ray._private.worker import global_worker
+array = np.array([1, 2, 3], dtype=np.int64)
+table = pa.table({'values': pa.array(array)})
+serialized = SerializationContext(global_worker).serialize({'table': table, 'array': array})
+assert serialized.total_bytes > 0
+assert ray.cloudpickle.loads(ray.cloudpickle.dumps(table)).equals(table)
 print('Native imports passed; production GPU training remains a separate check.')
 PY
 ```
