@@ -142,7 +142,7 @@ def identity_from_manifest(value, expected_source):
 
 
 def validate_native_record(bundle, tokenizer, *, expected_identity: NativeIdentity,
-                           original_schema: dict):
+                           original_schema: dict, web_schema_profile=None):
     """Validate one completed TRAIN record; return the existing Example type.
 
     original_schema must come from trusted runtime/public-state reconstruction,
@@ -294,7 +294,10 @@ def validate_native_record(bundle, tokenizer, *, expected_identity: NativeIdenti
         domain, stage = "cuad_tool", "cuad_tool_" + record["stage"]
         category = record["metadata"]["category"]
     else:
-        legacy.validate_record(record)
+        if web_schema_profile is not None and web_schema_profile.explicit_review:
+            legacy.validate_record(record, _native_web_profile=web_schema_profile)
+        else:
+            legacy.validate_record(record)
         domain, stage, category = "web", record["stage"], "independent_web"
     if record["stage"] == "final":
         visible = " ".join(tokenizer.decode(prompt, skip_special_tokens=False).split()).replace('""', '"')
@@ -354,7 +357,9 @@ def _iter_validated_native(path, tokenizer, *, expected_identity: NativeIdentity
                          "Native bundle and original record required")
                 record = bundle["record"]
                 example = validate_native_record(bundle, tokenizer, expected_identity=expected_identity,
-                                                 original_schema=schema_resolver(record, bundle.get("collector")))
+                                                 original_schema=schema_resolver(record, bundle.get("collector")),
+                                                 web_schema_profile=(getattr(schema_resolver.__self__, "web", None)
+                                                     if isinstance(getattr(schema_resolver, "__self__", None), NativeSchemaProfile) else None))
                 if record.get("source") == "cuad_train":
                     key = ("cuad", record["task_id"], record["metadata"].get("plan_id"),
                            record["stage"], record["completion"])
@@ -405,14 +410,22 @@ class WebSchemaProfile:
     max_steps: int
     explicit_review: bool = False
     cached_rows: bool = False
+    navigation_ledger: bool = False
+    profile_version: str = "dcc-native-train-profile-v1"
 
     def validate(self):
         _require(type(self.max_steps) is int and self.max_steps > 0,
                  "Trusted collection max_steps required")
         _require(type(self.explicit_review) is bool and type(self.cached_rows) is bool,
                  "Trusted Web schema flags must be booleans")
-        _require(not self.explicit_review,
-                 "Reviewed final controls are unsupported by original training validators")
+        from dcc_review_training import LEGACY_PROFILE, REVIEW20_PROFILE
+        _require(type(self.navigation_ledger) is bool, "Trusted navigation flag must be boolean")
+        if self.profile_version == REVIEW20_PROFILE:
+            _require(self.max_steps == 20 and self.explicit_review and self.navigation_ledger
+                     and not self.cached_rows, "Explicit TRAIN20 requires review/navigation on and cached rows off")
+        else:
+            _require(self.profile_version == LEGACY_PROFILE and not self.explicit_review
+                     and not self.navigation_ledger, "Reviewed final controls require the separate explicit TRAIN20 profile")
 
     def original_schema(self, record, collector):
         """Rebuild the actual early/last-turn Web schema from public history."""
@@ -420,6 +433,11 @@ class WebSchemaProfile:
         from slime_plugins.dcc.web_structured import web_action_schema, web_final_schema
 
         self.validate()
+        if self.explicit_review:
+            from dcc_review_training import review_request_state
+            schema, _ = review_request_state(self, record, collector)
+            legacy.validate_record(record, _native_web_profile=self)
+            return schema
         _require(record.get("source") == "independent_curriculum",
                  "Trusted Web profile requires independent_curriculum records")
         legacy.validate_record(record)  # Preserve every existing replay/grounding condition.
@@ -591,11 +609,9 @@ def prepare_native_training(args, *, source_root, tokenizer=None):
     profile_path = getattr(args, "native_train_profile", None)
     _require(profile_path is not None, "--native-train-profile is required")
     profile = _strict_json(Path(profile_path).read_text())
-    _require(isinstance(profile, dict)
-             and set(profile) in ({"version", "identity", "web"},
-                                  {"version", "identity", "web", "cuad"})
-             and profile["version"] == "dcc-native-train-profile-v1",
-             "Trusted native TRAIN profile is invalid")
+    from dcc_review_training import approved_web_profile, bind_profile_source
+    web_profile = approved_web_profile(profile, WebSchemaProfile)
+    bind_profile_source(profile, source_root)
     cuad = profile.get("cuad")
     _require(not args.cuad_tool_records or cuad is not None,
              "Native CUAD records require a separate trusted CUAD collection profile")
@@ -616,10 +632,6 @@ def prepare_native_training(args, *, source_root, tokenizer=None):
     _require(_json_key(approved) == _json_key(identity.manifest(tokenizer)),
              "Trusted profile and actual training tokenizer differ")
     web = profile["web"]
-    _require(isinstance(web, dict) and set(web) == {"max_steps", "explicit_review", "cached_rows"},
-             "Trusted Web collection profile is invalid")
-    web_profile = WebSchemaProfile(**web)
-    web_profile.validate()
     schema_profile = NativeSchemaProfile(web_profile, cuad_profile)
     data = load_native_training_data(args.records, tokenizer, expected_identity=identity,
                                      source_receipt=receipt, schema_resolver=schema_profile.original_schema,
@@ -630,6 +642,9 @@ def prepare_native_training(args, *, source_root, tokenizer=None):
                           "cuad": copy.deepcopy(cuad), "validated_cuad_records": len(data.cuad_records),
                           "all_files_validated_before_model_load": True,
                           "warm_start": False, "raw_cuad_auxiliary": False}
+    if profile["version"] != "dcc-native-train-profile-v1":
+        data.configuration["training_profile_version"] = profile["version"]
+        data.configuration["collection_overlay_id"] = profile["collection_overlay_id"]
     if not identity.budget.legacy:
         from slime_plugins.dcc.native_thinking_eval import native_configuration
         data.configuration["rollout_native_thinking"] = native_configuration(receipt, budget=identity.budget)

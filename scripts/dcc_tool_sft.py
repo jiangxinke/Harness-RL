@@ -97,7 +97,7 @@ def _is_final_control(value, messages, message, evidence=None):
     return message == {"role": "user", "content": legacy}
 
 
-def validate_record(value: dict) -> dict:
+def validate_record(value: dict, *, _native_web_profile=None) -> dict:
     """Reject split leakage and replay real tool observations for finals."""
     if not isinstance(value, dict) or value.get("source") != "independent_curriculum" or value.get("split") != "train":
         raise ValueError("Web records must be independent_curriculum train rows")
@@ -111,9 +111,17 @@ def validate_record(value: dict) -> dict:
         raise ValueError("Invalid historical message")
     if messages[0]["role"] != "system" or messages[1]["role"] != "user" or messages[-1]["role"] != "user":
         raise ValueError("Teacher prompt must end before the target assistant response")
+    control_indices = set()
+    if _native_web_profile is not None:
+        from dcc_review_training import review_request_state
+        _, control_indices = review_request_state(_native_web_profile, value)
     evidence, fetched = _WebEvidence(), []
     pending = None
     for index, message in enumerate(messages[2:], 2):
+        if index in control_indices:
+            if pending is not None:
+                raise ValueError("Native control cannot replace a pending tool observation")
+            continue
         if (index == len(messages) - 1 and pending is None
                 and _is_final_control(value, messages, message, evidence)):
             continue
@@ -359,7 +367,8 @@ def encode_record(record, tokenizer, *, max_prompt, max_response, batch_tokens, 
 class MixedSampler:
     def __init__(self, records, cuad_tasks, tokenizer, runner, *, rank, world, seed, web_fraction,
                  negative_fraction, max_prompt, max_response, batch_tokens, cuad_records=(), cuad_tool_fraction=0.75,
-                 cuad_tool_partial_stages=False, record_encoder=None, recorded_cuad_stages=False):
+                 cuad_tool_partial_stages=False, record_encoder=None, recorded_cuad_stages=False,
+                 web_stage_profile=None):
         encoder = encode_record if record_encoder is None else record_encoder
         self.rng = random.Random(seed + rank)
         self.tokenizer, self.runner = tokenizer, runner
@@ -411,6 +420,12 @@ class MixedSampler:
             raise ValueError(f"Every local web stage must retain an eligible example; skipped={dict(self.skips)}")
         self.negative_fraction = negative_fraction
         self.cuad_tool_fraction = cuad_tool_fraction
+        self.web_stage_cycle = STAGES
+        if web_stage_profile is not None:
+            from dcc_review_training import WEB_STAGE_PROFILE, WEB_STAGE_CYCLE
+            if web_stage_profile != WEB_STAGE_PROFILE:
+                raise ValueError("Unsupported explicit Web stage profile")
+            self.web_stage_cycle = WEB_STAGE_CYCLE
         self.stage_index, self.cuad_stage_index = rank, rank
         self.pending = None
         self.available = {stage: len(values) for stage, values in self.web.items()}
@@ -420,7 +435,7 @@ class MixedSampler:
             example, self.pending = self.pending, None
             return example
         if self.web and self.rng.random() < self.web_fraction:
-            stage = STAGES[self.stage_index % len(STAGES)]
+            stage = self.web_stage_cycle[self.stage_index % len(self.web_stage_cycle)]
             self.stage_index += 1
             return self.rng.choice(self.web[stage])
         for _ in range(300):
@@ -521,7 +536,9 @@ def train(args):
     prepare_training_output(output, rank=rank, world_size=world, distributed=dist)
     config = {key: value for key, value in vars(args).items()
               if key not in {"model", "adapter", "records", "cuad_train_data", "cuad_tool_records", "output_dir", "retrieval_profile",
-                             "native_thinking", "native_train_profile", "native_expected_source"}}
+                             "native_thinking", "native_train_profile", "native_expected_source", "web_stage_profile"}}
+    if getattr(args, "web_stage_profile", None) is not None:
+        config["web_stage_profile"] = args.web_stage_profile
     if native_data is not None:
         config["native_thinking"] = native_data.configuration
     config.update(warm_start=bool(args.adapter), retrieval_profile_enabled=bool(args.retrieval_profile),
@@ -551,7 +568,8 @@ def train(args):
                                cuad_records=cuad_records, cuad_tool_fraction=args.cuad_tool_fraction,
                                cuad_tool_partial_stages=getattr(args, "cuad_tool_partial_stages", False),
                                record_encoder=native_data.encode_record if native_data is not None else None,
-                               recorded_cuad_stages=native_data is not None)
+                               recorded_cuad_stages=native_data is not None,
+                               web_stage_profile=getattr(args, "web_stage_profile", None))
         record(event="eligible", web_stages=sampler.available, cuad_tasks=sum(len(rows) for categories in sampler.cuad.values() for rows in categories.values()),
                cuad_tool_stages=dict(Counter({stage: sum(len(stages.get(stage, [])) for categories in sampler.cuad_tools.values() for stages in categories.values()) for stage in CUAD_STAGES})),
                cuad_missing_stages=sampler.cuad_missing_stages,
@@ -632,6 +650,8 @@ def main():
     parser.add_argument("--steps", type=int, default=24)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--lora-rank", type=int, default=8)
+    parser.add_argument("--web-stage-profile", choices=("final50-search25-fetch25",), default=None,
+                        help="Opt in to exact final/search/final/fetch Web-stage cycle; default preserves original sampler")
     parser.add_argument("--web-fraction", type=float, default=0.5)
     parser.add_argument("--negative-fraction", type=float, default=1 / 3)
     parser.add_argument("--max-prompt-tokens", type=int, default=8192)

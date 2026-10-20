@@ -79,16 +79,12 @@ def load_approved(profile_path, source_root, expected_source, tokenizer):
     receipt = validate_source_receipt(
         _strict_json((Path(source_root) / ".dcc-native-source.json").read_text()), expected_source)
     profile = _strict_json(Path(profile_path).read_text())
-    require(isinstance(profile, dict) and set(profile) in (
-        {"version", "identity", "web"}, {"version", "identity", "web", "cuad"})
-        and profile["version"] == "dcc-native-train-profile-v1", "Invalid approved TRAIN profile")
+    from dcc_review_training import approved_web_profile, bind_profile_source
+    web = approved_web_profile(profile, WebSchemaProfile)
+    bind_profile_source(profile, source_root)
     value = profile["identity"]
     identity = identity_from_manifest(value, expected_source)
     require(value == identity.manifest(tokenizer), "Approved identity differs from actual local tokenizer")
-    require(set(profile["web"]) == {"max_steps", "explicit_review", "cached_rows"},
-            "Invalid approved Web profile")
-    web = WebSchemaProfile(**profile["web"])
-    web.validate()
     require(not web.cached_rows, "Initial collection does not enable cached-row histories")
     cuad = None
     if "cuad" in profile:
@@ -200,7 +196,8 @@ def make_runner(benchmark, schema_profile, *, timeout_seconds, web_tools_factory
         temperature=0.0, evaluation_temperature=0.0, initial_chunks=4,
         timeout_seconds=timeout_seconds, auto_read_sources=0,
         web_structured_final=True, web_structured_actions=True, cuad_structured_actions=True,
-        web_explicit_review=False, web_navigation_ledger=False,
+        web_explicit_review=(benchmark == "widesearch" and schema_profile.web.explicit_review),
+        web_navigation_ledger=(benchmark == "widesearch" and schema_profile.web.navigation_ledger),
         web_research_checkpoints=False, web_cached_rows=False, **kwargs)
 
 
@@ -386,9 +383,11 @@ def training_record(episode, request, trace, label):
 
 
 def select(output, destination, *, labels_path, profile, identity, schema_profile, receipt,
-           tokenizer, world_size=1, minimum_score=1.0):
+           tokenizer, world_size=1, minimum_score=1.0, maximum_episode_requests=None):
     require(type(world_size) is int and world_size > 0 and not isinstance(minimum_score, bool)
             and math.isfinite(minimum_score) and 0 <= minimum_score <= 1, "Invalid selector limits")
+    require(maximum_episode_requests is None or type(maximum_episode_requests) is int
+            and maximum_episode_requests > 0, "Positive complete-trajectory request limit required")
     episodes, requests, traces = read_closed(output, profile=profile, receipt=receipt, world_size=world_size)
     # This is intentionally the first labels access, after every rank is closed.
     labels = load_train_labels(labels_path, {episode["task_id"]: episode["benchmark"] for episode in episodes})
@@ -403,6 +402,8 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
             label, bundles, score = labels[episode["task_id"]], [], None
             try:
                 require(episode["status"] == "completed", "Episode did not complete: " + episode["status"])
+                require(maximum_episode_requests is None or len(episode["trace_ids"]) <= maximum_episode_requests,
+                        "Completed trajectory exceeds predeclared request limit; never crop it")
                 if episode["benchmark"] == "cuad":
                     from slime_plugins.dcc.metrics import cuad_task_metrics
                     score = cuad_task_metrics(episode["task_id"], label["gold"], episode["answer"])
@@ -432,7 +433,8 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                             "inserted_close": False, "inserted_eos": False, "episode_id": episode["episode_id"],
                             "turn": request["turn_index"], "rank": request["rank"], "trace_id": key},
                         "native_trace": copy.deepcopy(trace)}
-                    validate_native_record(bundle, tokenizer, expected_identity=identity, original_schema=schema)
+                    validate_native_record(bundle, tokenizer, expected_identity=identity, original_schema=schema,
+                                           web_schema_profile=schema_profile.web)
                     bundles.append(bundle)
                 require(bundles, "Completed episode has no actual requests")
                 segment_keys = [_segment_key(bundle["record"]) for bundle in bundles]
@@ -470,6 +472,9 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                "nonempty_mixed_training_data": bool(web.count and cuad.count),
                "held_out_labels_read": False, "web_selection_score": "strict_exact_proxy",
                "web_required_only_default": "all-required-compound-key-exact-match-v1"}
+    if maximum_episode_requests is not None:
+        summary["maximum_episode_requests"] = maximum_episode_requests
+        summary["whole_trajectory_filter_only"] = True
     write_fresh_json(destination / "selection_summary.json", summary)
     write_fresh_json(destination / "native_train_profile.json", profile)
     return summary
@@ -501,6 +506,8 @@ def main():
             part.add_argument("--train-labels", required=True)
             part.add_argument("--destination", required=True)
             part.add_argument("--minimum-train-score", type=float, default=1.0)
+            part.add_argument("--maximum-episode-requests", type=int, default=None,
+                              help="Reject whole longer trajectories; never truncate or synthesize targets")
     args = parser.parse_args()
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=True, trust_remote_code=False)
@@ -509,7 +516,8 @@ def main():
     if args.command == "select":
         print(json_text(select(args.output_dir, args.destination, labels_path=args.train_labels,
             profile=profile, identity=identity, schema_profile=schemas, receipt=receipt, tokenizer=tokenizer,
-            world_size=args.world_size, minimum_score=args.minimum_train_score)))
+            world_size=args.world_size, minimum_score=args.minimum_train_score,
+            maximum_episode_requests=args.maximum_episode_requests)))
         return
     tasks = fixed_tasks(load_public_train(args.public_train_data), max_tasks_per_benchmark=args.max_tasks_per_benchmark,
                         rank=args.rank, world_size=args.world_size)
