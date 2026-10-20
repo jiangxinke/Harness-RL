@@ -15,6 +15,7 @@ import dataclasses
 import json
 import os
 import sys
+import tempfile
 import time
 from importlib import metadata
 from pathlib import Path
@@ -302,6 +303,27 @@ async def _finish_evaluation(policy, stream, workers, failure):
             raise primary
 
 
+def _publish_completion_marker(marker, completion):
+    """Publish complete JSON atomically and fail on sync or readback errors."""
+    marker = Path(marker)
+    raw = (json.dumps(completion, allow_nan=False) + "\n").encode("utf-8")
+    # Keep failed temporary files for diagnosis. A unique name permits a fresh
+    # attempt without overwriting evidence from an earlier publication failure.
+    with tempfile.NamedTemporaryFile(mode="wb", dir=marker.parent,
+                                     prefix=f".{marker.name}.", suffix=".tmp",
+                                     delete=False) as stream:
+        temporary = Path(stream.name)
+        if stream.write(raw) != len(raw):
+            raise OSError("Incomplete shard completion marker write")
+        stream.flush()
+        os.fsync(stream.fileno())
+    if temporary.read_bytes() != raw:
+        raise OSError("Shard completion temporary readback differs")
+    temporary.replace(marker)
+    if marker.read_bytes() != raw:
+        raise OSError("Published shard completion marker readback differs")
+
+
 async def evaluate(args):
     enabled = getattr(args, "web_browser_reader", False)
     if type(enabled) is not bool:
@@ -328,7 +350,7 @@ async def evaluate(args):
                     raise
                 failure.add_note(f"Browser cleanup also failed: {type(error).__name__}: {error}")
     # Cleanup failures must not certify the shard as successfully completed.
-    marker.write_text(json.dumps(completion))
+    _publish_completion_marker(marker, completion)
 
 
 async def _evaluate(args, *, browser_reader=None):
