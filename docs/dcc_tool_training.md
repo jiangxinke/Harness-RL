@@ -89,7 +89,20 @@ average adapter gradients before clipping and updating. Frozen base weights
 receive no optimizer updates. Non-finite losses or zero/non-finite gradients
 abort the run. Per-rank logs record actual task IDs, categories, stages, token
 counts, skips, gradients and quantization coverage. Checkpoints and logs always
-use the explicit output directory.
+use the explicit output directory. The output directory must be new or empty;
+existing runs are never appended to or automatically resumed. Keep launcher logs
+outside this fresh training directory.
+
+Each checkpoint retains its original `initial`, `step_####`, or `final` layout.
+Files are written into a hidden temporary sibling, then the complete directory is
+published with `checkpoint_complete.json`. A failed save retains incomplete
+artifacts for diagnosis. `training_complete.json` is published only after all
+ranks close their journals and validate the complete optimizer-step sequence.
+Use that receipt together with a successful launcher exit when consuming a run;
+individual `finished` rows alone are not a terminal completion receipt.
+`--sync-artifacts` optionally requests file and directory `fsync` at checkpoint
+and terminal boundaries. Step logging itself never calls `fsync`. Filesystem
+support and storage durability remain properties of the selected filesystem.
 
 For a fresh tool-only attention LoRA, start with a conservative learning rate
 and balanced positive/negative CUAD tool records:

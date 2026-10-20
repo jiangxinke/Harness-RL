@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import torch
 import torch.distributed as dist
 from dcc_train import supervised_example
+from dcc_training_io import TrainingJournal, finalize_training, prepare_training_output, publish_checkpoint
 from slime_plugins.dcc import EpisodeRunner, Task, load_tasks
 from slime_plugins.dcc.episode import CUAD_FINAL_REVIEW, EPISODE_PROMPT_VERSION, FINAL_TURN, _WebEvidence, final_turn_message
 from slime_plugins.dcc.hf_policy import (
@@ -517,7 +518,7 @@ def train(args):
                            retrieval_context_chars=getattr(args, "retrieval_context_chars", 0),
                            retrieval_max_context_chars=getattr(args, "retrieval_max_context_chars", 16000))
     output = Path(args.output_dir)
-    output.mkdir(parents=True, exist_ok=True)
+    prepare_training_output(output, rank=rank, world_size=world, distributed=dist)
     config = {key: value for key, value in vars(args).items()
               if key not in {"model", "adapter", "records", "cuad_train_data", "cuad_tool_records", "output_dir", "retrieval_profile",
                              "native_thinking", "native_train_profile", "native_expected_source"}}
@@ -528,10 +529,9 @@ def train(args):
                   prompt_encoding_version=PROMPT_ENCODING_VERSION,
                   web_reader_version=WEB_READER_VERSION)
     started, counts, ids = time.monotonic(), Counter(), set()
-    with (output / f"train_rank{rank}.jsonl").open("a", buffering=1) as log:
+    with TrainingJournal(output, rank, sync=getattr(args, "sync_artifacts", False)) as log:
         def record(**value):
-            line = json.dumps(value, ensure_ascii=False, allow_nan=False)
-            log.write(line + "\n")
+            line = log.record(**value)
             if rank == 0:
                 print(line, flush=True)
 
@@ -559,16 +559,19 @@ def train(args):
         optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, weight_decay=0.0)
 
         def save(name, step):
+            log.checkpoint_boundary()
             if world > 1:
                 dist.barrier()
             if rank == 0:
-                destination = output / name
-                model.save_pretrained(destination)
-                tokenizer.save_pretrained(destination)
-                torch.save({"optimizer": optimizer.state_dict(), "optimizer_steps": step,
-                            "torch_rng": torch.get_rng_state(), "cuda_rng": torch.cuda.get_rng_state(),
-                            "sampler_rng": sampler.rng.getstate()}, destination / "training_state.pt")
-                (destination / "training_config.json").write_text(json.dumps(config, indent=2) + "\n")
+                def write_checkpoint(destination):
+                    model.save_pretrained(destination)
+                    tokenizer.save_pretrained(destination)
+                    torch.save({"optimizer": optimizer.state_dict(), "optimizer_steps": step,
+                                "torch_rng": torch.get_rng_state(), "cuda_rng": torch.cuda.get_rng_state(),
+                                "sampler_rng": sampler.rng.getstate()}, destination / "training_state.pt")
+                    (destination / "training_config.json").write_text(json.dumps(config, indent=2) + "\n")
+
+                publish_checkpoint(output, name, step, write_checkpoint, sync=log.sync)
             if world > 1:
                 dist.barrier()
 
@@ -598,6 +601,7 @@ def train(args):
         save("final", args.steps)
         record(event="finished", optimizer_steps=args.steps, stage_counts=dict(counts), unique_task_ids=len(ids),
                skipped=dict(sampler.skips), elapsed=time.monotonic() - started)
+        finalize_training(log, args.steps, world_size=world, distributed=dist)
     if world > 1:
         dist.destroy_process_group()
 
@@ -617,7 +621,9 @@ def main():
     parser.add_argument("--cuad-tool-fraction", type=float, default=0.75)
     parser.add_argument("--cuad-tool-partial-stages", action="store_true",
                         help="Allow positive search/read-only category buckets; negatives still require final")
-    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--output-dir", required=True, help="New or empty directory; existing runs are never resumed")
+    parser.add_argument("--sync-artifacts", action="store_true",
+                        help="Request filesystem fsync only at checkpoint/terminal boundaries")
     parser.add_argument("--adapter")
     parser.add_argument("--retrieval-profile")
     parser.add_argument("--retrieval-context-chars", type=int, default=0)
