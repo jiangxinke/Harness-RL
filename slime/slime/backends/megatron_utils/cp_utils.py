@@ -161,6 +161,10 @@ def reduce_train_step_metrics(
 
     if calculate_per_token_loss:
         num_samples_or_tokens = values[0]
+        if num_samples_or_tokens == 0:
+            # A globally masked batch has no metric observations. Local zero
+            # counts must stay zero until this DP/CP reduction completes.
+            return {key: 0.0 for key in keys}
         cp_factor = cp_size
     else:
         num_samples_or_tokens = step_global_batch_size
