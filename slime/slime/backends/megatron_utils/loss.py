@@ -728,10 +728,13 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
         rewards = []
         kl_coef = -args.kl_coef
         cp_size = mpu.get_context_parallel_world_size()
-        for reward, k, total_length, response_length in zip(
-            old_rewards, kl, total_lengths, response_lengths, strict=True
+        for reward, k, loss_mask, total_length, response_length in zip(
+            old_rewards, kl, loss_masks, total_lengths, response_lengths, strict=True
         ):
-            k *= kl_coef
+            # Tool/environment tokens are not policy actions. Mask their KL
+            # rewards before GAE can propagate them to earlier trained tokens.
+            local_mask = slice_log_prob_with_cp(loss_mask, total_length, response_length)
+            k = kl_coef * k * local_mask
             if response_length > 0:
                 if cp_size == 1:
                     k[-1] += reward
