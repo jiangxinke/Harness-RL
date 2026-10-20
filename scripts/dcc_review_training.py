@@ -11,6 +11,7 @@ from jsonschema import Draft202012Validator
 LEGACY_PROFILE = "dcc-native-train-profile-v1"
 REVIEW20_PROFILE = "dcc-native-train-profile-web20-review-navigation-v1"
 WEB32K_PROFILE = "dcc-native-train-profile-web32k-whole-turn-v2"
+CUAD_RETRIEVAL_PROFILE = "dcc-native-train-profile-cuad-retrieval-v1"
 WEB_STAGE_PROFILE = "final50-search25-fetch25"
 WEB_STAGE_CYCLE = ("final", "search", "final", "fetch")
 
@@ -34,6 +35,18 @@ def strict_json(text):
 def approved_web_profile(profile, profile_class):
     require(isinstance(profile, dict), "Trusted native TRAIN profile must be an object")
     version = profile.get("version")
+    if version == CUAD_RETRIEVAL_PROFILE:
+        # Reuse an explicitly declared, unchanged Web route. Retrieval belongs
+        # to the CUAD harness and never alters the shared model identity.
+        route = profile.get("web_profile_version")
+        require(route in {REVIEW20_PROFILE, WEB32K_PROFILE}, "Explicit existing Web profile version required")
+        require("cuad" in profile, "Explicit retrieval profile requires CUAD configuration")
+        from dcc_native_sft import CuadSchemaProfile
+        approved_cuad_profile(profile, CuadSchemaProfile)
+        original = dict(profile)
+        original.pop("web_profile_version")
+        original["version"] = route
+        return approved_web_profile(original, profile_class)
     base = {"version", "identity", "web"}
     if version in {REVIEW20_PROFILE, WEB32K_PROFILE}:
         base.add("collection_overlay_id")
@@ -87,8 +100,24 @@ def approved_web_profile(profile, profile_class):
     return result
 
 
+def approved_cuad_profile(profile, profile_class):
+    value = profile.get("cuad")
+    bound = profile.get("version") == CUAD_RETRIEVAL_PROFILE
+    if value is None:
+        require(not bound, "Explicit retrieval profile requires CUAD configuration")
+        return None
+    keys = {"max_steps", "structured_actions", "schema_version"}
+    if bound:
+        keys.add("retrieval")
+    require(isinstance(value, dict) and set(value) == keys, "Invalid approved CUAD profile fields")
+    require(not bound or isinstance(value["retrieval"], dict), "Explicit CUAD retrieval binding required")
+    result = profile_class(**value)
+    result.validate()
+    return result
+
+
 def bind_profile_source(profile, source_root):
-    if profile["version"] in {REVIEW20_PROFILE, WEB32K_PROFILE}:
+    if profile["version"] in {REVIEW20_PROFILE, WEB32K_PROFILE, CUAD_RETRIEVAL_PROFILE}:
         overlay = strict_json((Path(source_root) / ".dcc-training-code-overlay.json").read_text())
         require(overlay.get("overlay_id") == profile["collection_overlay_id"]
                 and overlay.get("explicit_training_profile") == profile["version"]

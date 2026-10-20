@@ -31,7 +31,7 @@ from dcc_native_sft import (
     CONTRACT, CuadSchemaProfile, NativeIdentity, NativeSchemaProfile, WebSchemaProfile,
     _json_key, _strict_json, identity_from_manifest, validate_source_receipt,
 )
-from dcc_review_training import approved_web_profile
+from dcc_review_training import approved_web_profile, approved_cuad_profile
 from slime_plugins.dcc.data import Task
 from slime_plugins.dcc.episode import EpisodeRunner, _WebEvidence, final_turn_message
 from slime_plugins.dcc.native_thinking_eval import NativeThinkingPolicy, NativeTraceJournal
@@ -198,7 +198,12 @@ def public_request_schemas(task, messages, *, turn, schemas):
         if task.benchmark == "widesearch" and profile.multi_citation else {})
     require(type(turn) is int and 0 <= turn < profile.max_steps,
             "Current public turn exceeds approved runner budget")
-    anchors = EpisodeRunner(max_steps=profile.max_steps, initial_chunks=4).initial_messages(task)
+    runner_kwargs = {"initial_chunks": 4}
+    if task.benchmark == "cuad" and profile.retrieval is not None:
+        from dcc_cuad_retrieval import retrieval_runner_kwargs, public_request_schema
+        runner_kwargs = retrieval_runner_kwargs(profile.retrieval)
+        public_request_schema(task, messages, turn=turn, max_steps=profile.max_steps, binding=profile.retrieval)
+    anchors = EpisodeRunner(max_steps=profile.max_steps, **runner_kwargs).initial_messages(task)
     if task.benchmark == "widesearch" and profile.explicit_review:
         from dcc_review_training import review_request_state
         from slime_plugins.dcc.web_navigation import WEB_NAVIGATION_INSTRUCTIONS
@@ -271,9 +276,7 @@ def public_request_schemas(task, messages, *, turn, schemas):
 def source_schema_profile(profile):
     web = approved_web_profile(profile, WebSchemaProfile)
     require(not web.cached_rows, "Prospective collector does not support cached-row source histories")
-    cuad = CuadSchemaProfile(**profile["cuad"]) if "cuad" in profile else None
-    if cuad is not None:
-        cuad.validate()
+    cuad = approved_cuad_profile(profile, CuadSchemaProfile)
     return NativeSchemaProfile(web, cuad)
 
 
@@ -399,6 +402,10 @@ def export_prefixes(closed_source, destination, *, source_profile, source_receip
         for name, attribute in OPTIONAL_WEB_HARNESS.items():
             if getattr(schemas.web, attribute):
                 freeze[name] = True
+    bound_cuad = (schemas.cuad is not None and schemas.cuad.retrieval is not None
+                  and any(prefix.benchmark == "cuad" for prefix, _ in selected))
+    if bound_cuad:
+        freeze["cuad_retrieval"] = copy.deepcopy(schemas.cuad.retrieval)
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=False)
     for filename, values in (("prefixes.jsonl", [p.to_dict() for p, _ in selected]),
@@ -421,7 +428,10 @@ def export_prefixes(closed_source, destination, *, source_profile, source_receip
         "version": VERSION, "source_profile": copy.deepcopy(source_profile),
         "source_receipt": copy.deepcopy(source_receipt), "source_world_size": world_size,
         "source_journals_closed": True, "labels_loaded": False,
-        "source_completion_or_reward_retained": False})
+        "source_completion_or_reward_retained": False,
+        **({"cuad_public_tasks": {episode["task_id"]: copy.deepcopy(episode["public_task"])
+            for episode in episodes if episode["benchmark"] == "cuad"
+            and episode["task_id"] in freeze["task_ids"]}} if bound_cuad else {})})
     # Last write establishes the pre-generation immutable ID/seed declaration.
     write_fresh_json(destination / "freeze.json", freeze)
     return freeze
@@ -435,12 +445,15 @@ def load_frozen(directory, tokenizer):
         "selection_policy", "maximum_per_benchmark", "labels_loaded", "web_explicit_review",
         "benchmarks", "prefix_selection_seed"}
     require(isinstance(freeze, dict) and required_keys <= set(freeze)
-        and set(freeze) <= required_keys | set(OPTIONAL_WEB_HARNESS)
+        and set(freeze) <= required_keys | set(OPTIONAL_WEB_HARNESS) | {"cuad_retrieval"}
         and freeze["version"] == VERSION and freeze["labels_loaded"] is False
         and freeze["selection_policy"] == SELECTION
         and freeze["schema_policy"] in {ORIGINAL_ONLY, FINAL_INTERVENTION},
         "Explicit independently approved prospective freeze required")
     optional_web_harness(freeze)
+    if "cuad_retrieval" in freeze:
+        from dcc_cuad_retrieval import retrieval_runner_kwargs
+        retrieval_runner_kwargs(freeze["cuad_retrieval"])
     checked_seeds(freeze["seeds"])
     require(checked_benchmarks(freeze["benchmarks"]) == freeze["benchmarks"]
             and type(freeze["prefix_selection_seed"]) is int and freeze["prefix_selection_seed"] >= 0
@@ -468,14 +481,48 @@ def load_frozen(directory, tokenizer):
     approval_path = directory / "export_source_approval.json"
     if approval_path.is_file():
         approval = _strict_json(approval_path.read_text())
-        source_web = source_schema_profile(approval["source_profile"]).web
+        source_schemas = source_schema_profile(approval["source_profile"])
+        source_web = source_schemas.web
         has_web = any(prefix.benchmark == "widesearch" for prefix in prefixes)
         require(all(freeze.get(name, False) is (has_web and getattr(source_web, attribute))
                     for name, attribute in OPTIONAL_WEB_HARNESS.items()),
                 "Frozen optional Web harness controls differ from approved original source profile")
+        has_cuad = any(prefix.benchmark == "cuad" for prefix in prefixes)
+        binding = (source_schemas.cuad.retrieval
+                   if has_cuad and source_schemas.cuad is not None else None)
+        require(("cuad_retrieval" in freeze and _json_key(freeze["cuad_retrieval"]) == _json_key(binding))
+                if binding is not None else "cuad_retrieval" not in freeze,
+                "Frozen CUAD retrieval differs from approved original source profile")
+        if binding is not None:
+            from dcc_cuad_retrieval import public_cuad_task
+            require(set(approval) == {"version", "source_profile", "source_receipt", "source_world_size",
+                "source_journals_closed", "labels_loaded", "source_completion_or_reward_retained", "cuad_public_tasks"}
+                and approval["version"] == VERSION and approval["source_journals_closed"] is True
+                and approval["labels_loaded"] is False and approval["source_completion_or_reward_retained"] is False
+                and type(approval["source_world_size"]) is int and approval["source_world_size"] > 0,
+                "Bound CUAD requires complete closed-source approval without rewards")
+            validate_source_receipt(approval["source_receipt"], approval["source_profile"]["identity"]["source_commit"])
+            tasks = approval.get("cuad_public_tasks")
+            require(isinstance(tasks, dict) and set(tasks) == {
+                p.task_id for p in prefixes if p.benchmark == "cuad"},
+                "Bound CUAD frozen prefixes require exact approved public source tasks")
+            for prefix in prefixes:
+                if prefix.benchmark != "cuad":
+                    continue
+                task = public_cuad_task(tasks[prefix.task_id], task_id=prefix.task_id)
+                messages = _strict_json(prefix.messages_json)
+                turn = sum(message["role"] == "assistant" for message in messages)
+                if freeze["schema_policy"] == FINAL_INTERVENTION and turn < source_schemas.cuad.max_steps - 1:
+                    require(messages[-1] == final_turn_message(task), "Bound CUAD final intervention differs")
+                    messages = messages[:-1]
+                _, final, _ = public_request_schemas(task, messages, turn=turn, schemas=source_schemas)
+                require(_strict_json(prefix.schema_json) == final, "Bound CUAD frozen final schema differs")
+        else:
+            require("cuad_public_tasks" not in approval, "Unapproved bound CUAD source tasks")
     else:
         require(not optional_web_harness(freeze),
                 "Enabled optional Web harness controls require original source approval")
+        require("cuad_retrieval" not in freeze, "Bound CUAD retrieval requires original source approval")
     return freeze, prefixes, identity
 
 

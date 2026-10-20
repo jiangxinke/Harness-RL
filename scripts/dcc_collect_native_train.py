@@ -83,19 +83,14 @@ def load_approved(profile_path, source_root, expected_source, tokenizer):
     receipt = validate_source_receipt(
         _strict_json((Path(source_root) / ".dcc-native-source.json").read_text()), expected_source)
     profile = _strict_json(Path(profile_path).read_text())
-    from dcc_review_training import approved_web_profile, bind_profile_source
+    from dcc_review_training import approved_web_profile, approved_cuad_profile, bind_profile_source
     web = approved_web_profile(profile, WebSchemaProfile)
     bind_profile_source(profile, source_root)
     value = profile["identity"]
     identity = identity_from_manifest(value, expected_source)
     require(value == identity.manifest(tokenizer), "Approved identity differs from actual local tokenizer")
     require(not web.cached_rows, "Initial collection does not enable cached-row histories")
-    cuad = None
-    if "cuad" in profile:
-        require(set(profile["cuad"]) == {"max_steps", "structured_actions", "schema_version"},
-                "Invalid approved CUAD profile")
-        cuad = CuadSchemaProfile(**profile["cuad"])
-        cuad.validate()
+    cuad = approved_cuad_profile(profile, CuadSchemaProfile)
     return profile, identity, NativeSchemaProfile(web, cuad), receipt
 
 
@@ -159,6 +154,7 @@ class RecordingPolicy:
         self.native, self.journal = native, journal
         self.task_id, self.rank, self.episode_id = task_id, rank, episode_id
         self.trace_ids = []
+        self.cuad_retrieval = None
 
     async def generate_structured(self, messages, **kwargs):
         trace_id = uuid.uuid4().hex
@@ -167,7 +163,9 @@ class RecordingPolicy:
         self.trace_ids.append(trace_id)
         snapshot, options = copy.deepcopy(messages), copy.deepcopy(kwargs)
         self.journal.write({"event": "request", "episode_id": self.episode_id,
-                            **metadata, "messages": snapshot, "options": options})
+                            **metadata, "messages": snapshot, "options": options,
+                            **({"cuad_retrieval": copy.deepcopy(self.cuad_retrieval)}
+                               if self.cuad_retrieval is not None else {})})
         error, completion = None, None
         try:
             if any(message["role"] == "user" and message["content"].startswith(
@@ -200,8 +198,14 @@ def make_runner(benchmark, schema_profile, *, timeout_seconds, web_tools_factory
         kwargs["web_data_discovery_guidance"] = True
     if benchmark == "widesearch" and schema_profile.web.multi_citation:
         kwargs["web_multi_citation"] = True
+    initial_chunks = 4
+    if benchmark == "cuad" and profile.retrieval is not None:
+        from dcc_cuad_retrieval import retrieval_runner_kwargs
+        retrieval = retrieval_runner_kwargs(profile.retrieval)
+        initial_chunks = retrieval.pop("initial_chunks")
+        kwargs.update(retrieval)
     return EpisodeRunner(max_steps=profile.max_steps, max_new_tokens=total_tokens,
-        temperature=0.0, evaluation_temperature=0.0, initial_chunks=4,
+        temperature=0.0, evaluation_temperature=0.0, initial_chunks=initial_chunks,
         timeout_seconds=timeout_seconds, auto_read_sources=0,
         web_structured_final=True, web_structured_actions=True, cuad_structured_actions=True,
         web_explicit_review=(benchmark == "widesearch" and schema_profile.web.explicit_review),
@@ -214,6 +218,16 @@ async def generate(tasks, native, output, *, collection_id, profile, schema_prof
                    web_tools_factory=None):
     """Generate one fixed shard; no parameter or branch can load TRAIN labels."""
     require(isinstance(native, NativeThinkingPolicy), "Use the actual NativeThinkingPolicy")
+    from dcc_review_training import approved_cuad_profile, approved_web_profile
+    approved_cuad = approved_cuad_profile(profile, CuadSchemaProfile)
+    binding = approved_cuad.retrieval if approved_cuad is not None else None
+    if binding is not None and schema_profile.cuad is not None:
+        schema_profile.cuad.validate()
+        require(approved_web_profile(profile, WebSchemaProfile) == schema_profile.web,
+                "Explicit CUAD collection must preserve the approved independent Web schema")
+    require((approved_cuad == schema_profile.cuad) if binding is not None else
+            (schema_profile.cuad is None or schema_profile.cuad.retrieval is None),
+            "CUAD retrieval differs between approved profile and actual runner schema")
     approved_identity = identity_from_manifest(profile["identity"], native.source_receipt["source_commit"])
     expected_history = (PromptHistoryConfig.from_dict(profile["identity"]["prompt_history"])
                         if "prompt_history" in profile["identity"] else PromptHistoryConfig())
@@ -260,6 +274,14 @@ async def generate(tasks, native, output, *, collection_id, profile, schema_prof
                     runner = make_runner(task.benchmark, schema_profile,
                         timeout_seconds=timeout_seconds, web_tools_factory=web_tools_factory,
                         total_tokens=native.budget.total_tokens)
+                    if task.benchmark == "cuad" and binding is not None:
+                        from dcc_cuad_retrieval import retrieval_runner_kwargs
+                        require(runner.max_steps == approved_cuad.max_steps
+                                and all(type(getattr(runner, name)) is type(value)
+                                        and getattr(runner, name) == value
+                                    for name, value in retrieval_runner_kwargs(binding).items()),
+                                "Actual CUAD runner retrieval differs from approved binding")
+                        recorder.cuad_retrieval = binding
                     result = await runner.run(task, recorder, evaluation=True, score_train=False)
                 except Exception as exc:
                     error = type(exc).__name__
@@ -281,6 +303,7 @@ async def generate(tasks, native, output, *, collection_id, profile, schema_prof
             "task_ids": [task.id for task in tasks], "request_events": requests.count,
             "episodes": episodes.count, "native_traces": len(native.traces),
             "generation_journals_closed": True, "labels_loaded": False,
+            **({"cuad_retrieval": copy.deepcopy(binding)} if binding is not None else {}),
             **({"native_phase_timing": copy.deepcopy(native.provenance["native_phase_timing"])}
                if "native_phase_timing" in native.provenance else {})})
 
@@ -288,6 +311,11 @@ async def generate(tasks, native, output, *, collection_id, profile, schema_prof
 def read_closed(output, *, profile, receipt, world_size):
     """Verify all rank closures/journal joins before selector can open labels."""
     output = Path(output)
+    from dcc_review_training import approved_cuad_profile, approved_web_profile
+    cuad = approved_cuad_profile(profile, CuadSchemaProfile)
+    binding = cuad.retrieval if cuad is not None else None
+    if binding is not None:
+        approved_web_profile(profile, WebSchemaProfile)
     all_episodes, all_requests, all_traces, collection_id = [], {}, {}, None
     seen_tasks = set()
     for rank in range(world_size):
@@ -297,6 +325,9 @@ def read_closed(output, *, profile, receipt, world_size):
                 and closed.get("source_receipt") == receipt
                 and closed.get("generation_journals_closed") is True and closed.get("labels_loaded") is False,
                 "Generation closure differs from independently approved source/profile")
+        require((json_text(closed.get("cuad_retrieval")) == json_text(binding) and "cuad_retrieval" in closed)
+                if binding is not None else "cuad_retrieval" not in closed,
+                "Generation closure CUAD retrieval differs from approved actual harness")
         collection_id = closed["collection_id"] if collection_id is None else collection_id
         require(closed["collection_id"] == collection_id, "Collection ID differs across shards")
         episodes = list(read_jsonl(output / f"episodes_rank{rank}.jsonl"))
@@ -337,6 +368,17 @@ def read_closed(output, *, profile, receipt, world_size):
             for index, key in enumerate(owned):
                 require(requests[key]["episode_id"] == responses[key]["episode_id"] == episode["episode_id"]
                         and requests[key]["turn_index"] == index, "Episode/turn ownership differs")
+                if public.benchmark == "cuad" and binding is not None:
+                    from dcc_cuad_retrieval import public_request_schema
+                    require(json_text(requests[key].get("cuad_retrieval")) == json_text(binding),
+                            "Closed request CUAD retrieval differs from approved harness")
+                    schema = public_request_schema(public, requests[key]["messages"], turn=index,
+                                                   max_steps=cuad.max_steps, binding=binding)
+                    require(json_text(requests[key]["options"]["json_schema"]) == json_text(schema),
+                            "Closed bound CUAD schema differs from public replay")
+                else:
+                    require("cuad_retrieval" not in requests[key],
+                            "Unapproved CUAD retrieval declaration in closed request")
             all_episodes.append(episode)
         require(not all_requests.keys() & requests.keys(), "Request ID reused across shards")
         all_requests.update({key: (request, responses[key]) for key, request in requests.items()})
@@ -449,14 +491,19 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                             and completion["prompt_ids"] == trace["original_prompt_ids"]
                             and completion["completion_ids"] == trace["completion_ids"], "Response/trace differs")
                     record = training_record(episode, request, trace, label)
-                    schema = schema_profile.original_schema(record, {"turn": request["turn_index"]})
+                    owner = {"turn": request["turn_index"]}
+                    if episode["benchmark"] == "cuad" and schema_profile.cuad.retrieval is not None:
+                        owner.update(cuad_retrieval=copy.deepcopy(schema_profile.cuad.retrieval),
+                                     public_task=copy.deepcopy(episode["public_task"]))
+                    schema = schema_profile.original_schema(record, owner)
                     require(request["options"] == {"max_new_tokens": identity.budget.total_tokens, "temperature": 0.0,
                                                   "json_schema": schema}, "Recorded actual request schema/options differ")
                     bundle = {"contract": CONTRACT, "record": record, "identity": identity.manifest(tokenizer),
                         "collector": {"split": "train", "task_input": "public-train-task-without-gold",
                             "gold_visible_to_policy": False, "recorded_messages": True, "synthetic_thought": False,
                             "inserted_close": False, "inserted_eos": False, "episode_id": episode["episode_id"],
-                            "turn": request["turn_index"], "rank": request["rank"], "trace_id": key},
+                            "turn": request["turn_index"], "rank": request["rank"], "trace_id": key,
+                            **{name: value for name, value in owner.items() if name != "turn"}},
                         "native_trace": copy.deepcopy(trace)}
                     validate_native_record(bundle, tokenizer, expected_identity=identity, original_schema=schema,
                                            web_schema_profile=schema_profile.web)

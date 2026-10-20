@@ -365,6 +365,7 @@ class CuadSchemaProfile:
     max_steps: int
     structured_actions: bool
     schema_version: str
+    retrieval: dict | None = None
 
     def validate(self):
         from slime_plugins.dcc.cuad_structured import CUAD_STRUCTURED_SCHEMA_VERSION
@@ -374,6 +375,9 @@ class CuadSchemaProfile:
         _require(self.structured_actions is True
                  and self.schema_version == CUAD_STRUCTURED_SCHEMA_VERSION,
                  "Trusted CUAD canonical structured route/version is required")
+        if self.retrieval is not None:
+            from dcc_cuad_retrieval import retrieval_runner_kwargs
+            retrieval_runner_kwargs(self.retrieval)
 
     def original_schema(self, record, collector):
         """Use the same zero-label early/last schemas as actual collection."""
@@ -383,6 +387,17 @@ class CuadSchemaProfile:
         self.validate()
         _require(record.get("source") == "cuad_train",
                  "Trusted CUAD profile requires cuad_train records")
+        if self.retrieval is not None:
+            from dcc_cuad_retrieval import public_cuad_task, public_request_schema
+            _require(isinstance(collector, dict)
+                     and _json_key(collector.get("cuad_retrieval")) == _json_key(self.retrieval),
+                     "CUAD collector retrieval differs from approved harness")
+            task = public_cuad_task(collector.get("public_task"), task_id=record.get("task_id"))
+            public_request_schema(task, record.get("messages"), turn=collector.get("turn"),
+                                  max_steps=self.max_steps, binding=self.retrieval)
+        else:
+            _require(not isinstance(collector, dict) or "cuad_retrieval" not in collector,
+                     "Legacy CUAD profile cannot strip an explicit retrieval binding")
         legacy.validate_cuad_record(record)
         _require(isinstance(collector, dict) and type(collector.get("turn")) is int
                  and 0 <= collector["turn"] < self.max_steps,
@@ -527,19 +542,13 @@ def prepare_native_training(args, *, source_root, tokenizer=None):
     profile_path = getattr(args, "native_train_profile", None)
     _require(profile_path is not None, "--native-train-profile is required")
     profile = _strict_json(Path(profile_path).read_text())
-    from dcc_review_training import approved_web_profile, bind_profile_source, WEB32K_PROFILE
+    from dcc_review_training import approved_web_profile, approved_cuad_profile, bind_profile_source, WEB32K_PROFILE
     web_profile = approved_web_profile(profile, WebSchemaProfile)
     bind_profile_source(profile, source_root)
     cuad = profile.get("cuad")
     _require(not args.cuad_tool_records or cuad is not None,
              "Native CUAD records require a separate trusted CUAD collection profile")
-    cuad_profile = None
-    if cuad is not None:
-        _require(isinstance(cuad, dict)
-                 and set(cuad) == {"max_steps", "structured_actions", "schema_version"},
-                 "Trusted CUAD collection profile is invalid")
-        cuad_profile = CuadSchemaProfile(**cuad)
-        cuad_profile.validate()
+    cuad_profile = approved_cuad_profile(profile, CuadSchemaProfile)
     approved = profile["identity"]
     _require(isinstance(approved, dict) and approved.get("source_commit") == expected_source,
              "Trusted profile differs from explicit expected source")
@@ -562,7 +571,7 @@ def prepare_native_training(args, *, source_root, tokenizer=None):
                                      source_receipt=receipt, schema_resolver=schema_profile.original_schema,
                                      cuad_path=args.cuad_tool_records, expected_cuad_identity=cuad_identity,
                                      approved_cuad_identity_differences=profile.get("cuad_identity_differences"),
-                                     strict_training_budgets=profile["version"] == WEB32K_PROFILE)
+                                     strict_training_budgets=web_profile.profile_version == WEB32K_PROFILE)
     data.configuration = {"enabled": True, "protocol": identity.budget.protocol, "source_receipt": receipt,
                           "derivative_id": identity.derivative_id, "model_revision": MODEL_REVISION,
                           "web": copy.deepcopy(web), "validated_records": len(data.records),
@@ -579,7 +588,7 @@ def prepare_native_training(args, *, source_root, tokenizer=None):
         else:
             from slime_plugins.dcc.native_thinking_eval import native_configuration
             data.configuration["rollout_native_thinking"] = native_configuration(receipt, budget=identity.budget)
-    if profile["version"] == WEB32K_PROFILE:
+    if web_profile.profile_version == WEB32K_PROFILE:
         data.configuration["domain_identities"] = {"independent_curriculum": copy.deepcopy(approved),
             "cuad_train": copy.deepcopy(profile.get("cuad_identity", approved))}
         data.configuration["prompt_history"] = copy.deepcopy(identity.prompt_history)

@@ -91,3 +91,44 @@ training rollout configuration; the saved training configuration and update audi
 must also match the frozen training plan. Protocol failures remain zero-score
 observations in the full evaluation denominator. Runtime checks establish
 compatibility; benchmark improvement requires a completed matched comparison.
+
+CUAD TRAIN collection can explicitly bind its retrieval harness with profile
+version `dcc-native-train-profile-cuad-retrieval-v1`. This separate profile
+requires `web_profile_version` to select the unchanged reviewed Web20 or Web32K
+route, the usual `collection_overlay_id`, and a `cuad.retrieval` binding. The
+actual source overlay must name this new top-level profile version. Existing
+profile IDs cannot enable the binding. Keep the original model identity;
+retrieval is a harness setting, so previously validated Web records can still
+share the native training loader and adapter with newly collected CUAD records.
+Web32K continues to require its existing explicit CUAD domain identity and exact
+identity-difference declaration; the old allowed differences are unchanged.
+
+Build the binding from an existing TRAIN-fitted profile's original bytes:
+
+```python
+from pathlib import Path
+from dcc_cuad_retrieval import make_retrieval_binding
+
+profile["version"] = "dcc-native-train-profile-cuad-retrieval-v1"
+profile["web_profile_version"] = "dcc-native-train-profile-web20-review-navigation-v1"
+profile["cuad"]["retrieval"] = make_retrieval_binding(
+    Path(retrieval_profile_path).read_bytes(), initial_chunks=8,
+    retrieval_context_chars=0, retrieval_max_context_chars=16000)
+```
+
+Run this with `scripts` and `slime` on the Python path. The resulting binding
+contains exact base64 UTF-8 profile bytes and numeric retrieval settings, without
+the input path. It invokes the same profile validator as runtime evaluation and
+additionally rejects unknown fields, duplicate keys, nonfinite JSON and non-TRAIN
+provenance. Keep generated profiles outside Git. Context 800 is a separate
+explicit configuration; context zero never enables it automatically.
+
+Bound collection records the approved retrieval in request and rank closure
+provenance. Before the selector opens labels, it recomputes the original initial
+retrieval and every historical document search/read from the public question and
+contract. Selected CUAD bundles retain that public task and binding in collector
+provenance, allowing the training schema resolver to repeat the check. Prospective
+preference export uses the same anchors and freezes the binding; loading that
+freeze requires the approved source profile and matching public source tasks.
+Removing or changing those declarations fails validation. Old collections and
+freezes retain their original default fields and four-chunk anchors.

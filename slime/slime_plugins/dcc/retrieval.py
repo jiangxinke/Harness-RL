@@ -118,12 +118,9 @@ def fit_retrieval_profile(
     }
 
 
-def load_retrieval_profile(path: str | Path | None) -> RetrievalProfile | None:
-    """None disables the feature; explicit missing or malformed paths fail."""
-    if path is None:
-        return None
+def parse_retrieval_profile(value: Any) -> RetrievalProfile:
+    """The runtime profile validator, also used by portable TRAIN bindings."""
     try:
-        value = json.loads(Path(path).read_text(encoding="utf-8"))
         if not isinstance(value, dict) or value.get("schema") != SCHEMA or type(value.get("version")) is not int or value["version"] != VERSION or value.get("method") != METHOD:
             raise ValueError("unsupported retrieval profile schema, version, or method")
         training = value["training"]
@@ -154,6 +151,16 @@ def load_retrieval_profile(path: str | Path | None) -> RetrievalProfile | None:
                 raise ValueError("invalid retrieval expansion terms")
             normalized[question] = tuple(words)
         return RetrievalProfile(normalized, float(constant))
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("malformed retrieval profile") from exc
+
+
+def load_retrieval_profile(path: str | Path | None) -> RetrievalProfile | None:
+    """None disables the feature; explicit missing or malformed paths fail."""
+    if path is None:
+        return None
+    try:
+        return parse_retrieval_profile(json.loads(Path(path).read_text(encoding="utf-8")))
     except (KeyError, TypeError, json.JSONDecodeError) as exc:
         raise ValueError("malformed retrieval profile") from exc
 
