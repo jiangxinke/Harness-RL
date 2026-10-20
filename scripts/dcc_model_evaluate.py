@@ -25,6 +25,7 @@ from slime_plugins.dcc import EpisodeRunner, load_tasks
 from slime_plugins.dcc.browser_reader import BrowserReader, validate_browser_reader_runtime
 from slime_plugins.dcc.evaluation import evaluate_results
 from slime_plugins.dcc.episode import EPISODE_PROMPT_VERSION, WIDESEARCH_EVIDENCE_GUARD_VERSION
+from slime_plugins.dcc.episode_diagnostics import terminal_summary, token_accounting
 from slime_plugins.dcc.hf_judge import HFBatchedJudge
 from slime_plugins.dcc.hf_policy import PROMPT_ENCODING_VERSION, HFPolicy, load_policy_model
 from slime_plugins.dcc.tools import WEB_READER_VERSION, WebTools
@@ -649,6 +650,10 @@ async def _evaluate(args, *, browser_reader=None):
                         "completion": sum(len(step.completion_ids) for step in result.steps),
                     }
                     value["token_usage"] = token_usage
+                    value["token_accounting"] = token_accounting(
+                        result, native_references=episode_policy.references if native is not None else None,
+                    )
+                    value["terminal_summary"] = terminal_summary(result, max_steps=args.max_steps)
                     stream.write(json.dumps(value, ensure_ascii=False) + "\n")
                     print(
                         json.dumps(
@@ -658,6 +663,8 @@ async def _evaluate(args, *, browser_reader=None):
                                 "status": result.status,
                                 "turns": len(result.steps),
                                 "token_usage": token_usage,
+                                "token_accounting": value["token_accounting"],
+                                "terminal_summary": value["terminal_summary"],
                                 "episode_latency_seconds": value["episode_latency_seconds"],
                                 "elapsed": time.monotonic() - start,
                             }

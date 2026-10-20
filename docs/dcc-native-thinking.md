@@ -140,3 +140,23 @@ approved training source/protocol, derivative and model revision; actual LoRA
 header shapes and request binding remain checked. Training and evaluation sources
 may differ and both are recorded. The v2 TRAIN collector and training validators
 retain their existing protocol and constraints.
+
+## Episode diagnostics
+
+Saved predictions and compact evaluation console records include an additive
+`terminal_summary`. It distinguishes episode deadlines, dependency failures,
+exhausted model turns, evidence rejections and native protocol failures using
+fixed reason labels and counts. It contains no prompt, answer, source URL or
+raw exception text. Full native traces and existing validators remain the
+authority for inspecting a failure; the summary does not alter scoring or
+generation budgets.
+
+The existing `token_usage` fields keep their original meaning: token IDs in
+returned policy completions. `token_accounting.logical` repeats those counts;
+`token_accounting.native` separately records both phase-input prompts and
+observed completion IDs, including a cancelled request without a returned
+policy completion. Native prompt counts describe recorded inputs, without
+adjusting for engine caching or billing. Zero observed completion IDs does not
+prove zero generated tokens. Unobserved suffixes and incomplete or conflicting
+references leave `completion_tokens_total` and `completion_tokens_unobserved`
+as `null`; no missing work is estimated.
