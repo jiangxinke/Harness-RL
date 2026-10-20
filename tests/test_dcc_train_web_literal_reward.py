@@ -63,7 +63,7 @@ class SyntheticControls(unittest.TestCase):
         for change in ['missing','extra','capitalized']:
             rows=copy.deepcopy(self.label['gold'])
             if change=='missing':del rows[0]['nullable']
-            if change=='extra':rows[0]['unexpected']='ignored?' 
+            if change=='extra':rows[0]['unexpected']='ignored?'
             if change=='capitalized':rows[0]['Amount']=rows[0].pop('amount')
             self.assertFalse(self.assert_zero(rows)['prediction_valid'])
     def test_citations_only_are_excluded(self):
