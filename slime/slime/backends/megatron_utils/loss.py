@@ -977,6 +977,12 @@ def policy_loss_function(
             full_old_log_probs=full_old_log_probs,
             advantages=batch["advantages"],
             loss_masks=batch["loss_masks"],
+            local_loss_masks=[
+                slice_log_prob_with_cp(loss_mask, total_length, response_length)
+                for loss_mask, total_length, response_length in zip(
+                    batch["loss_masks"], total_lengths, response_lengths, strict=True
+                )
+            ],
         )
 
     # Compute KL divergence (GSPO uses sequence-level KL, others use per-token KL)
