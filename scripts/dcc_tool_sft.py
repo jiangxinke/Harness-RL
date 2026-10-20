@@ -551,10 +551,20 @@ def average_example_gradients(parameters, local_examples, world):
 def train(args):
     phase_normalized = getattr(args, "native_phase_normalized_loss", False)
     mixture_loss = getattr(args, "native_completion_json_mixture_loss", False)
+    task_coverage = getattr(args, "native_global_stage_task_coverage", False)
     if phase_normalized and mixture_loss:
         raise ValueError("Native loss modes are mutually exclusive")
     if (phase_normalized or mixture_loss) and not getattr(args, "native_thinking", False):
         raise ValueError("Native loss modes require --native-thinking")
+    if task_coverage and not getattr(args, "native_thinking", False):
+        raise ValueError("Global task coverage requires --native-thinking")
+    sampler_factory = MixedSampler
+    if task_coverage:
+        from dcc_stage_task_coverage import GlobalStageTaskCoverageSampler, STAGE_TASK_COVERAGE_CONFIGURATION
+
+        def sampler_factory(*values, **options):
+            return GlobalStageTaskCoverageSampler(
+                *values, sampler_class=MixedSampler, batch_sampler=sample_batch, **options)
     native_data = None
     if getattr(args, "native_thinking", False):
         from dcc_native_sft import prepare_native_training
@@ -579,7 +589,10 @@ def train(args):
     config = {key: value for key, value in vars(args).items()
               if key not in {"model", "adapter", "records", "cuad_train_data", "cuad_tool_records", "output_dir", "retrieval_profile",
                              "native_thinking", "native_train_profile", "native_expected_source", "web_stage_profile",
-                             "native_phase_normalized_loss", "native_completion_json_mixture_loss"}}
+                             "native_phase_normalized_loss", "native_completion_json_mixture_loss",
+                             "native_global_stage_task_coverage"}}
+    if task_coverage:
+        config["sampler_configuration"] = dict(STAGE_TASK_COVERAGE_CONFIGURATION)
     if getattr(args, "web_stage_profile", None) is not None:
         config["web_stage_profile"] = args.web_stage_profile
     if native_data is not None:
@@ -616,7 +629,7 @@ def train(args):
             raise ValueError("Tool SFT requires LoRA dropout=0")
         if hasattr(model, "dcc_quantization_report"):
             record(event="quantization", **model.dcc_quantization_report)
-        sampler = MixedSampler(records, tasks, tokenizer, runner, rank=rank, world=world, seed=args.seed,
+        sampler = sampler_factory(records, tasks, tokenizer, runner, rank=rank, world=world, seed=args.seed,
                                web_fraction=args.web_fraction, negative_fraction=args.negative_fraction,
                                max_prompt=args.max_prompt_tokens, max_response=args.max_new_tokens, batch_tokens=args.batch_tokens,
                                cuad_records=cuad_records, cuad_tool_fraction=args.cuad_tool_fraction,
@@ -627,7 +640,8 @@ def train(args):
         record(event="eligible", web_stages=sampler.available, cuad_tasks=sum(len(rows) for categories in sampler.cuad.values() for rows in categories.values()),
                cuad_tool_stages=dict(Counter({stage: sum(len(stages.get(stage, [])) for categories in sampler.cuad_tools.values() for stages in categories.values()) for stage in CUAD_STAGES})),
                cuad_missing_stages=sampler.cuad_missing_stages,
-               effective_web_fraction=sampler.web_fraction, skipped=dict(sampler.skips), trainable_parameters=sum(p.numel() for p in parameters))
+               effective_web_fraction=sampler.web_fraction, skipped=dict(sampler.skips), trainable_parameters=sum(p.numel() for p in parameters),
+               **({"sampler_buckets": sampler.bucket_summary()} if task_coverage else {}))
         optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, weight_decay=0.0)
 
         def save(name, step):
@@ -652,7 +666,8 @@ def train(args):
 
         for step in range(1, args.steps + 1):
             begin = time.monotonic()
-            examples = sample_batch(sampler, args.samples_per_step)
+            examples = (sampler.next_batch(args.samples_per_step) if task_coverage
+                        else sample_batch(sampler, args.samples_per_step))
             model.train()
             optimizer.zero_grad(set_to_none=True)
             step_telemetry = {} if mixture_loss else None
@@ -690,6 +705,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--native-thinking", action="store_true",
                         help="Train fresh LoRA on fully validated recorded native Thinking Web/CUAD rollouts")
+    parser.add_argument("--native-global-stage-task-coverage", action="store_true",
+                        help="Opt in to global domain/polarity/stage task decks; reweights categories; fresh runs only")
     native_losses = parser.add_mutually_exclusive_group()
     native_losses.add_argument("--native-phase-normalized-loss", action="store_true",
                                help="Opt in to SFT loss 0.2*thought_mean + 0.8*JSON_mean on real native IDs")
@@ -733,6 +750,8 @@ def main():
     args = parser.parse_args()
     if (args.native_phase_normalized_loss or args.native_completion_json_mixture_loss) and not args.native_thinking:
         parser.error("Native loss modes require --native-thinking")
+    if args.native_global_stage_task_coverage and not args.native_thinking:
+        parser.error("Global task coverage requires --native-thinking")
     if min(args.steps, args.lora_rank, args.max_prompt_tokens, args.max_new_tokens, args.batch_tokens,
            args.samples_per_step, args.initial_chunks) < 1 or args.save_every < 0:
         parser.error("training steps, ranks and token budgets must be positive; save-every must be nonnegative")
