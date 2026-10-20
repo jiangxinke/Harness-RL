@@ -16,3 +16,4 @@ onnxscript==0.5.6
 onnx-ir==0.1.12
 ml-dtypes==0.5.3
 pyarrow==19.0.1
+pylatexenc==2.10

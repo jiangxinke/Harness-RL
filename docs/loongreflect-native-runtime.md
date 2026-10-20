@@ -52,6 +52,12 @@ whose native module requires NumPy 2 and failed with the NumPy 1.26.4 runtime.
 imports in this environment. Keep this pin under the same constraints. These
 CPU checks do not establish production GPU training acceptance.
 
+The default SGLang rollout imports the reward hub before dispatching the
+custom LoongReflect reward. Its math utility imports `pylatexenc`, which is
+already declared in `slime/requirements.txt`; include `pylatexenc==2.10` in the
+manual native setup below. Verify the actual rollout and reward-hub modules,
+as well as the actor. A successful actor import alone does not cover this path.
+
 ```bash
 CUDA_VISIBLE_DEVICES='' python -m pip install \
   torch==2.11.0+cu129 torchvision==0.26.0+cu129 torchaudio==2.11.0+cu129 \
@@ -227,7 +233,8 @@ Install the remaining runtime utilities under the constraints:
 ```bash
 CUDA_VISIBLE_DEVICES='' python -m pip install \
   -r "$RUNTIME_DIR/sglang-cu12-base.requirements" \
-  'ray[default]==2.59.0' pyarrow==19.0.1 wandb tensorboard PyYAML httpx \
+  'ray[default]==2.59.0' pyarrow==19.0.1 pylatexenc==2.10 \
+  wandb tensorboard PyYAML httpx \
   blake3 xxhash zstandard omegaconf accelerate
 export PYTHONPATH="$REPO_ROOT/slime:$RUNTIME_DIR/Megatron-LM${PYTHONPATH:+:$PYTHONPATH}"
 ```
@@ -246,7 +253,7 @@ assert sys.prefix != sys.base_prefix
 for name, expected in {
     'torch': '2.11.0+cu129', 'numpy': '1.26.4', 'scipy': '1.17.1',
     'transformer-engine': '2.16.1', 'sglang': '0.5.15.post1',
-    'pyarrow': '19.0.1',
+    'pyarrow': '19.0.1', 'pylatexenc': '2.10',
 }.items():
     assert metadata.version(name) == expected, (name, metadata.version(name))
 assert torch.version.cuda == '12.9'
@@ -255,6 +262,9 @@ for name in [
     'sglang.srt.server_args', 'sglang_router.launch_router',
     'megatron.core.optimizer', 'megatron.training.training',
     'slime.backends.megatron_utils.actor', 'slime_plugins.loongreflect.runtime',
+    'slime.rollout.sglang_rollout', 'slime.rollout.rm_hub', 'slime.ray.rollout',
+    'slime.backends.sglang_utils.sglang_engine',
+    'slime_plugins.loongreflect.slime_adapter', 'slime_plugins.loongreflect.self_distill',
 ]:
     module = importlib.import_module(name)
     print(name, module.__file__)
