@@ -261,10 +261,13 @@ async def train(args):
             # Wait for model access to finish before scoring or backpropagation.
             await policy.close()
             rewards = [result.reward for result in results]
+            # Center rewards over the same replayable episodes used below.
+            # Protocol/context failures and empty episodes have no policy loss;
+            # including them here would leave an unmatched positive advantage.
             valid = [
                 index
                 for index, result in enumerate(results)
-                if result.status != "infrastructure_error"
+                if result.trainable_steps
             ]
             average = sum(rewards[i] for i in valid) / len(valid) if valid else 0.0
             variance = (
