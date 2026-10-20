@@ -133,39 +133,37 @@ def distributed_masked_whiten(
     Returns:
         torch.Tensor: The locally whitened tensor using global statistics.
     """
-    # Calculate local intermediate statistics
-    local_sum = (values * mask).sum()
-    local_sum_sq = ((values**2) * mask).sum()
-    local_mask_sum = mask.sum()
+    # Use corrected two-pass centered moments. E[x**2] - E[x]**2 can
+    # become negative or erase a small nonzero variance in float32.
+    # Only actual float64 inputs need float64 communication; PPO uses float32.
+    stats_dtype = torch.float64 if values.dtype == torch.float64 else torch.float32
+    with torch.no_grad():
+        stats_values = values.to(dtype=stats_dtype)
+        stats_mask = mask.to(dtype=stats_dtype)
+        stats = torch.stack([(stats_values * stats_mask).sum(), stats_mask.sum()])
+        dist.all_reduce(stats, group=process_group)
+        global_sum, global_mask_sum = stats
+        if global_mask_sum.item() == 0:
+            raise ValueError("The global mask sum across all participating GPUs is zero.")
+        global_mean = global_sum / global_mask_sum
 
-    stats_tensor = torch.tensor(
-        [local_sum, local_sum_sq, local_mask_sum],
-        device=values.device,
-        dtype=torch.float32,
-    )
+        centered = stats_values - global_mean
+        centered_stats = torch.stack([
+            (centered * stats_mask).sum(),
+            (centered.square() * stats_mask).sum(),
+        ])
+        dist.all_reduce(centered_stats, group=process_group)
+        # Correct the rounded first-pass mean too. For constant float32 0.8
+        # this removes its tiny summation offset without FP64 collectives.
+        mean_correction = centered_stats[0] / global_mask_sum
+        global_mean = global_mean + mean_correction
+        centered_sum_sq = centered_stats[1] - centered_stats[0] * mean_correction
+        denominator = global_mask_sum - 1 if global_mask_sum.item() >= 2 else global_mask_sum
+        global_var = (centered_sum_sq / denominator).clamp_min(0)
 
-    # Aggregate via all_reduce within the DP group
-    dist.all_reduce(stats_tensor, group=process_group)
-
-    # Calculate global stats from aggregated results
-    global_sum, global_sum_sq, global_mask_sum = stats_tensor
-
-    if global_mask_sum.item() == 0:
-        raise ValueError("The global mask sum across all participating GPUs is zero.")
-
-    global_mean = global_sum / global_mask_sum
-    global_mean_sq = global_sum_sq / global_mask_sum
-    global_var = global_mean_sq - global_mean**2
-
-    # Bessel's correction for unbiased estimate
-    if global_mask_sum.item() >= 2:
-        bessel_correction = global_mask_sum / (global_mask_sum - 1)
-        global_var = global_var * bessel_correction
-
-    # Whiten local data using global stats
-    whitened_values = (values - global_mean) * torch.rsqrt(global_var + epsilon)
-
+    # Keep statistics detached as before, and preserve the floating input dtype.
+    whitened_values = (values.to(dtype=stats_dtype) - global_mean) * torch.rsqrt(global_var + epsilon)
     if not shift_mean:
         whitened_values += global_mean
-
-    return whitened_values
+    output_dtype = values.dtype if values.is_floating_point() else stats_dtype
+    return whitened_values.to(dtype=output_dtype)
