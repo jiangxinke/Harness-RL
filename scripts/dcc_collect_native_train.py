@@ -35,6 +35,8 @@ from slime_plugins.dcc.prompt_history import (
 )
 
 VERSION = "native-train-collection-closed-journals-v3"
+LEGACY_WEB_TRAIN_REWARD = "legacy-csv-inference-v2"
+LITERAL_WEB_TRAIN_REWARD = "dcc-web-train-native-text-null-exact-v1"
 
 
 def require(ok, reason):
@@ -385,7 +387,7 @@ def read_closed(output, *, profile, receipt, world_size):
     return all_episodes, all_requests, all_traces
 
 
-def load_train_labels(path, selected):
+def _legacy_load_train_labels(path, selected):
     labels = {}
     for value in read_jsonl(path):
         require(isinstance(value, dict) and set(value) <= {
@@ -403,6 +405,43 @@ def load_train_labels(path, selected):
             labels[key] = value
     require(labels.keys() == selected.keys(), "Selected fixed task IDs need exactly matching TRAIN labels")
     return labels
+
+
+def load_train_labels(path, selected, *, web_train_reward_protocol=LEGACY_WEB_TRAIN_REWARD):
+    # The entire original loader body is unchanged in the default branch.
+    if web_train_reward_protocol == LEGACY_WEB_TRAIN_REWARD:
+        return _legacy_load_train_labels(path, selected)
+    require(web_train_reward_protocol == LITERAL_WEB_TRAIN_REWARD,
+            "Unsupported explicitly selected TRAIN Web reward protocol")
+    labels = {}
+    for value in read_jsonl(path):
+        require(isinstance(value, dict) and set(value) <= {
+            "task_id", "benchmark", "split", "gold", "category", "evaluation",
+            "label_protocol", "train_reward"} and value.get("split") == "train",
+            "Explicit literal selector accepts separately versioned TRAIN labels only")
+        key = value["task_id"]
+        require(key not in labels, "Duplicate TRAIN label task ID")
+        if key in selected:
+            require(value["benchmark"] == selected[key], "TRAIN label benchmark differs")
+            require(isinstance(value.get("gold"), list), "TRAIN labels require an explicit gold list")
+            if value["benchmark"] == "cuad":
+                require("label_protocol" not in value and "train_reward" not in value,
+                        "Web reward must not relabel CUAD")
+                require(all(isinstance(span, str) and span.strip() for span in value["gold"])
+                        and isinstance(value.get("category"), str) and value["category"].strip(),
+                        "CUAD TRAIN needs source spans and an offline category")
+            labels[key] = value
+    require(labels.keys() == selected.keys(), "Selected fixed task IDs need exactly matching TRAIN labels")
+    return labels
+
+
+def validate_literal_train_reward_labels(episodes, labels, *, expected_protocol):
+    # This runs only after read_closed and labels loading, before output creation.
+    from dcc_train_web_literal_reward import validate_label
+    for episode in episodes:
+        if episode["benchmark"] == "widesearch":
+            validate_label(labels[episode["task_id"]], episode["public_task"],
+                           expected_protocol=expected_protocol)
 
 
 def web_train_evaluation(label, public_task):
@@ -450,14 +489,20 @@ def training_record(episode, request, trace, label):
 
 
 def select(output, destination, *, labels_path, profile, identity, schema_profile, receipt,
-           tokenizer, world_size=1, minimum_score=1.0, maximum_episode_requests=None):
+           tokenizer, world_size=1, minimum_score=1.0, maximum_episode_requests=None,
+           web_train_reward_protocol=LEGACY_WEB_TRAIN_REWARD):
     require(type(world_size) is int and world_size > 0 and not isinstance(minimum_score, bool)
             and math.isfinite(minimum_score) and 0 <= minimum_score <= 1, "Invalid selector limits")
     require(maximum_episode_requests is None or type(maximum_episode_requests) is int
             and maximum_episode_requests > 0, "Positive complete-trajectory request limit required")
+    require(web_train_reward_protocol in {LEGACY_WEB_TRAIN_REWARD, LITERAL_WEB_TRAIN_REWARD},
+            "Unsupported explicitly selected TRAIN Web reward protocol")
     episodes, requests, traces = read_closed(output, profile=profile, receipt=receipt, world_size=world_size)
     # This is intentionally the first labels access, after every rank is closed.
-    labels = load_train_labels(labels_path, {episode["task_id"]: episode["benchmark"] for episode in episodes})
+    labels = load_train_labels(labels_path, {episode["task_id"]: episode["benchmark"] for episode in episodes},
+                               web_train_reward_protocol=web_train_reward_protocol)
+    if web_train_reward_protocol == LITERAL_WEB_TRAIN_REWARD:
+        validate_literal_train_reward_labels(episodes, labels, expected_protocol=web_train_reward_protocol)
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=False)
     web, cuad = Journal(destination / "native_web_train.jsonl"), Journal(destination / "native_cuad_train.jsonl")
@@ -476,10 +521,17 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                     score = cuad_task_metrics(episode["task_id"], label["gold"], episode["answer"])
                     measure, score_protocol = score["f1"], "cuad_train_f1"
                 else:
-                    from slime_plugins.dcc.widesearch_metrics import evaluate_widesearch
-                    evaluation = web_train_evaluation(label, episode["public_task"])
-                    score = evaluate_widesearch(episode["answer"], label["gold"], evaluation)
-                    measure, score_protocol = score["f1_by_item"], "strict_exact_proxy"
+                    if web_train_reward_protocol == LITERAL_WEB_TRAIN_REWARD:
+                        from dcc_train_web_literal_reward import evaluate_train_literal_rows
+                        evaluation = copy.deepcopy(label["evaluation"])
+                        score = evaluate_train_literal_rows(episode["answer"], label, episode["public_task"],
+                                                            expected_protocol=web_train_reward_protocol)
+                        measure, score_protocol = score["train_exact_row_f1"], LITERAL_WEB_TRAIN_REWARD
+                    else:
+                        from slime_plugins.dcc.widesearch_metrics import evaluate_widesearch
+                        evaluation = web_train_evaluation(label, episode["public_task"])
+                        score = evaluate_widesearch(episode["answer"], label["gold"], evaluation)
+                        measure, score_protocol = score["f1_by_item"], "strict_exact_proxy"
                 require(measure >= minimum_score, "TRAIN correctness threshold not met")
                 for key in episode["trace_ids"]:
                     request, response = requests[key]
@@ -523,7 +575,11 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                 accepted += 1
                 decisions.write({"task_id": episode["task_id"], "accepted": True,
                                  "segments": len(bundles), "score": measure, "score_protocol": score_protocol,
-                                 **({"train_evaluation": evaluation} if episode["benchmark"] == "widesearch" else {})})
+                                 **({"train_evaluation": evaluation} if episode["benchmark"] == "widesearch" else {}),
+                                 **({"train_reward": score["train_reward"],
+                                     "label_protocol": score["label_protocol"]}
+                                    if episode["benchmark"] == "widesearch"
+                                    and web_train_reward_protocol == LITERAL_WEB_TRAIN_REWARD else {})})
             except (ValueError, TypeError, KeyError, ValidationError) as exc:
                 rejected += 1
                 audit.write({"task_id": episode["task_id"], "episode_id": episode["episode_id"],
@@ -544,6 +600,12 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                "nonempty_mixed_training_data": bool(web.count and cuad.count),
                "held_out_labels_read": False, "web_selection_score": "strict_exact_proxy",
                "web_required_only_default": "all-required-compound-key-exact-match-v1"}
+    if web_train_reward_protocol == LITERAL_WEB_TRAIN_REWARD:
+        from dcc_train_web_literal_reward import configuration, LABEL_PROTOCOL
+        summary.update(version="native-train-collection-closed-journals-literal-reward-v1",
+                       web_selection_score=LITERAL_WEB_TRAIN_REWARD,
+                       web_train_reward=configuration(), web_label_protocol=LABEL_PROTOCOL,
+                       web_required_only_default="all-required-native-text-null-compound-key-v1")
     if maximum_episode_requests is not None:
         summary["maximum_episode_requests"] = maximum_episode_requests
         summary["whole_trajectory_filter_only"] = True
@@ -584,6 +646,9 @@ def main():
             part.add_argument("--train-labels", required=True)
             part.add_argument("--destination", required=True)
             part.add_argument("--minimum-train-score", type=float, default=1.0)
+            part.add_argument("--web-train-reward-protocol", default=LEGACY_WEB_TRAIN_REWARD,
+                              choices=(LEGACY_WEB_TRAIN_REWARD, LITERAL_WEB_TRAIN_REWARD),
+                              help="Explicit TRAIN-only reward; literal route also requires new complete label.train_reward")
             part.add_argument("--maximum-episode-requests", type=int, default=None,
                               help="Reject whole longer trajectories; never truncate or synthesize targets")
     args = parser.parse_args()
@@ -595,7 +660,8 @@ def main():
         print(json_text(select(args.output_dir, args.destination, labels_path=args.train_labels,
             profile=profile, identity=identity, schema_profile=schemas, receipt=receipt, tokenizer=tokenizer,
             world_size=args.world_size, minimum_score=args.minimum_train_score,
-            maximum_episode_requests=args.maximum_episode_requests)))
+            maximum_episode_requests=args.maximum_episode_requests,
+            web_train_reward_protocol=args.web_train_reward_protocol)))
         return
     history_configuration = prompt_history_from_arguments(args)
     declared_history = (PromptHistoryConfig.from_dict(profile["identity"]["prompt_history"])

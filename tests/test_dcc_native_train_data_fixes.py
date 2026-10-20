@@ -388,6 +388,62 @@ class NativeCollectorIntegrationTests(unittest.TestCase):
         self.assertIn('Recorded prompt differs from exact original message encoding', audit['reason'])
 
 
+    def literal_labels(self, **kwargs):
+        from dcc_train_web_literal_reward import LABEL_PROTOCOL, configuration
+        path = self.labels(**kwargs)
+        rows = list(collector.read_jsonl(path))
+        rows[0].update(label_protocol=LABEL_PROTOCOL, train_reward=configuration())
+        path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        return path
+
+    def select_literal(self, output, labels):
+        return collector.select(output, self.root / 'selected', labels_path=labels,
+            profile=self.profile, identity=self.identity, schema_profile=self.schemas,
+            receipt=self.receipt, tokenizer=self.tokenizer,
+            web_train_reward_protocol=collector.LITERAL_WEB_TRAIN_REWARD)
+
+    def test_literal_reward_exports_real_native_records_without_benchmark_scorer(self):
+        from dcc_train_web_literal_reward import configuration
+        output, _ = self.generate()
+        before = {path.name: path.read_bytes() for path in output.iterdir()}
+        with mock.patch('slime_plugins.dcc.widesearch_metrics.evaluate_widesearch',
+                        side_effect=AssertionError('benchmark scorer reached literal TRAIN')):
+            summary = self.select_literal(output, self.literal_labels())
+        self.assertEqual((summary['accepted_episodes'], summary['web_segments'], summary['cuad_segments']),
+                         (3, 3, 2))
+        self.assertTrue(summary['exported_files_fully_native_validated'])
+        self.assertEqual(summary['web_train_reward'], configuration())
+        self.assertEqual(summary['web_selection_score'], collector.LITERAL_WEB_TRAIN_REWARD)
+        self.assertEqual(before, {path.name: path.read_bytes() for path in output.iterdir()})
+        decision = next(collector.read_jsonl(self.root / 'selected/decisions.jsonl'))
+        self.assertEqual(decision['score_protocol'], collector.LITERAL_WEB_TRAIN_REWARD)
+        self.assertEqual(decision['train_reward'], configuration())
+        self.assertEqual(decision['score'], 1.0)
+
+    def test_literal_selector_requires_both_explicit_protocol_and_complete_labels(self):
+        output, _ = self.generate()
+        with self.assertRaises(ValueError):
+            self.select(output, self.literal_labels())
+        self.assertFalse((self.root / 'selected').exists())
+        with self.assertRaises(ValueError):
+            self.select_literal(output, self.labels())
+        self.assertFalse((self.root / 'selected').exists())
+        labels = self.literal_labels()
+        rows = list(collector.read_jsonl(labels))
+        rows[0]['train_reward'].pop('row_key')
+        labels.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        with self.assertRaises(ValueError):
+            self.select_literal(output, labels)
+        self.assertFalse((self.root / 'selected').exists())
+
+    def test_literal_reward_rejects_wrong_content_after_real_native_generation(self):
+        output, _ = self.generate()
+        summary = self.select_literal(output, self.literal_labels(wrong_web=True))
+        self.assertEqual((summary['accepted_episodes'], summary['rejected_episodes'],
+                          summary['web_segments']), (2, 1, 0))
+        self.assertFalse(summary['nonempty_mixed_training_data'])
+
+
 class BudgetedCollectorIntegrationTests(NativeCollectorIntegrationTests):
     def setUp(self):
         super().setUp()
