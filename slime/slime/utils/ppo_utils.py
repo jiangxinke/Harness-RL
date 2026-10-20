@@ -1,11 +1,32 @@
 # Adapt from https://github.com/OpenRLHF/OpenRLHF/blob/10c733694ed9fbb78a0a2ff6a05efc7401584d46/openrlhf/models/utils.py
 # and https://github.com/OpenRLHF/OpenRLHF/blob/10c733694ed9fbb78a0a2ff6a05efc7401584d46/openrlhf/trainer/ppo_utils/experience_maker.py
 
+import math
 from argparse import Namespace
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+
+
+def _assert_finite(tensor: torch.Tensor, message: str) -> None:
+    # Unlike a Python bool(tensor), this check does not synchronize every CUDA
+    # microbatch and remains usable inside torch.compile.
+    torch._assert_async(torch.isfinite(tensor).all(), message)
+
+
+class _FiniteGradient(torch.autograd.Function):
+    """Keep unrepresentable weighted-KL derivatives from reaching the actor."""
+
+    @staticmethod
+    def forward(ctx, tensor, message):
+        ctx.message = message
+        return tensor
+
+    @staticmethod
+    def backward(ctx, gradient):
+        _assert_finite(gradient, ctx.message)
+        return gradient, None
 
 
 @torch.compile(dynamic=True)
@@ -25,13 +46,61 @@ def compute_approx_kl(
         kl_loss_type: Type of KL estimator (k1, k2, k3, low_var_kl).
         importance_ratio: Optional IS ratio (π_θ/π_old) for unbiased KL estimation.
     """
+    _assert_finite(log_probs, "compute_approx_kl received non-finite log_probs")
+    _assert_finite(log_probs_base, "compute_approx_kl received non-finite reference log_probs")
     log_ratio = log_probs.float() - log_probs_base.float()
+    _assert_finite(log_ratio, "compute_approx_kl log-ratio overflowed")
+
+    if importance_ratio is not None:
+        _assert_finite(importance_ratio, "compute_approx_kl received a non-finite importance ratio")
+        torch._assert_async((importance_ratio >= 0).all(), "KL importance ratios must be nonnegative")
+
+    if kl_loss_type == "low_var_kl":
+        # Clipping *after* exp is not enough: exp(100) has an infinite
+        # derivative, and clamp's zero gradient then produces 0 * inf = NaN.
+        # These conservative bounds lie strictly inside the saturated region
+        # of exp(-r) - 1 + r, so they leave the clipped objective unchanged.
+        if importance_ratio is None:
+            bounded_ratio = log_ratio.clamp(min=-1.0 - math.log1p(10.0), max=11.0)
+            kl = (torch.expm1(-bounded_ratio) + bounded_ratio).clamp(min=-10.0, max=10.0)
+        else:
+            # IS weighting precedes clipping. Its bounds must therefore depend
+            # on the weight; fixed bounds would change the weighted objective.
+            # FP64 intermediates also cover subnormal FP32 importance ratios.
+            ratio64 = _FiniteGradient.apply(log_ratio, "Weighted low_var_kl log-ratio gradient is non-finite").double()
+            weight64 = _FiniteGradient.apply(
+                importance_ratio, "Weighted low_var_kl importance gradient is non-finite"
+            ).double()
+            # At zero weight the student derivative is zero, but the weight
+            # derivative is still the unclipped KL. Do not replace it by zero.
+            # Bounds are already in a region where the final clip has zero
+            # derivative. Detach them also to avoid differentiating 10 / 0
+            # through an unused infinite upper bound at subnormal weights.
+            positive_weight = torch.where(weight64 > 0, weight64.detach(), torch.finfo(torch.float64).tiny)
+            log_limit = math.log(10.0) - positive_weight.log()
+            lower = -1.0 - F.softplus(log_limit)
+            upper = 1.0 + 10.0 / positive_weight
+            bounded_ratio = torch.minimum(torch.maximum(ratio64, lower), upper)
+            # Split the exponential on the far tail so even the conservative
+            # zero-weight bound cannot overflow before multiplication by zero.
+            on_tail = bounded_ratio.abs() > 50.0
+            tail_ratio = torch.where(on_tail, bounded_ratio, 0.0)
+            half_exp = (-0.5 * tail_ratio).exp()
+            tail = (weight64 * half_exp) * half_exp - weight64 + weight64 * tail_ratio
+            central_ratio = bounded_ratio.clamp(min=-50.0, max=50.0)
+            central = weight64 * (torch.expm1(-central_ratio) + central_ratio)
+            weighted_kl = torch.where(on_tail, tail, central)
+            _assert_finite(weighted_kl, "Weighted low_var_kl exceeded its intermediate numeric range")
+            output_dtype = torch.promote_types(log_ratio.dtype, importance_ratio.dtype)
+            kl = weighted_kl.clamp(min=-10.0, max=10.0).to(output_dtype)
+        _assert_finite(kl, "compute_approx_kl produced a non-finite clipped KL")
+        return kl
 
     if kl_loss_type == "k1":
         kl = log_ratio
     elif kl_loss_type == "k2":
         kl = log_ratio**2 / 2.0
-    elif kl_loss_type in ["k3", "low_var_kl"]:
+    elif kl_loss_type == "k3":
         # The non negative kl approximation in
         # http://joschu.net/blog/kl-approx.html
         # Besides non negative, it is also unbiased and have lower variance.
@@ -44,10 +113,9 @@ def compute_approx_kl(
     if importance_ratio is not None:
         kl = importance_ratio * kl
 
-    # Clamp only for low_var_kl for numerical stability
-    if kl_loss_type == "low_var_kl":
-        kl = torch.clamp(kl, min=-10, max=10)
-
+    # Unbounded estimators must report overflow, rather than silently changing
+    # the training objective by clipping or replacing non-finite values.
+    _assert_finite(kl, "compute_approx_kl produced a non-finite unbounded KL")
     return kl
 
 
@@ -129,22 +197,51 @@ def compute_policy_loss(
     eps_clip_high: float,
     eps_clip_c: float | None = None,
 ):
-    ratio = (-ppo_kl).exp()
+    _assert_finite(ppo_kl, "compute_policy_loss received non-finite ppo_kl")
+    _assert_finite(advantages, "compute_policy_loss received non-finite advantages")
+    assert 0.0 < 1.0 + eps_clip_high < float("inf") and 1.0 - eps_clip <= 1.0 + eps_clip_high
+    if eps_clip_c is not None:
+        assert 1.0 < eps_clip_c < float("inf"), (
+            "The lower bound of the clip_ratio_c for dual-clip PPO should be "
+            f"greater than 1.0, but get the value: {eps_clip_c}."
+        )
+
+    log_ratio = -ppo_kl
+    # A positive-advantage PPO loss is already flat beyond the upper clip.
+    # Bound exp there (with margin to retain the original boundary/clipfrac
+    # behavior), instead of creating inf and multiplying its gradient by zero.
+    safe_log_ratio = torch.where(
+        advantages > 0,
+        log_ratio.clamp(max=math.log1p(eps_clip_high) + 1.0),
+        log_ratio,
+    )
+    if eps_clip_c is not None:
+        safe_log_ratio = torch.where(
+            advantages < 0,
+            safe_log_ratio.clamp(max=math.log(eps_clip_c) + 1.0),
+            safe_log_ratio,
+        )
+    # Zero advantages contribute no policy gradient, including at extreme
+    # ratios. Keep ordinary finite ratios unchanged for advantage derivatives.
+    safe_log_ratio = torch.where(
+        advantages == 0,
+        safe_log_ratio.clamp(max=math.log(torch.finfo(ppo_kl.dtype).max) - 1.0),
+        safe_log_ratio,
+    )
+    ratio = safe_log_ratio.exp()
     pg_losses1 = -ratio * advantages
     pg_losses2 = -ratio.clamp(1 - eps_clip, 1 + eps_clip_high) * advantages
     clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)
     clipfrac = torch.gt(pg_losses2, pg_losses1).float()
 
     if eps_clip_c is not None:
-        assert (
-            eps_clip_c > 1.0
-        ), f"The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0, but get the value: {eps_clip_c}."
         pg_losses3 = -eps_clip_c * advantages
         clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
         pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
     else:
         pg_losses = clip_pg_losses1
 
+    _assert_finite(pg_losses, "compute_policy_loss produced a non-finite active PPO loss")
     return pg_losses, clipfrac
 
 
@@ -320,6 +417,10 @@ class _VocabParallelLogProbEntropy(torch.autograd.Function):
             # Build entropy grad before mutating log_prob_softmax below.
             grad_entropy_input = sum_softmax_times_logits - vocab_parallel_logits
             grad_entropy_input.mul_(entropy_softmax)
+            # Unused prompt/padding rows may have undefined softmax/entropy.
+            # Clear only rows with zero upstream gradient before multiplying;
+            # NaN * 0 would otherwise contaminate an entirely finite loss.
+            grad_entropy_input.masked_fill_(grad_entropy.reshape(-1, 1) == 0, 0.0)
             grad_entropy_input.mul_(grad_entropy.reshape(-1, 1))
 
         vocab_parallel_size = log_prob_softmax.size(-1)
@@ -328,10 +429,17 @@ class _VocabParallelLogProbEntropy(torch.autograd.Function):
         arange_1d = torch.arange(grad_2d.size(0), device=grad_2d.device)
         target_update = (~target_mask).to(dtype=grad_2d.dtype)
         grad_2d[arange_1d, masked_target_1d] += target_update
+        grad_input.masked_fill_(grad_log_prob.reshape(-1, 1) == 0, 0.0)
         grad_input.mul_(grad_log_prob.reshape(-1, 1))
 
         if grad_entropy_input is not None:
             grad_input.add_(grad_entropy_input)
+
+        # Reduce first to avoid allocating a full-vocabulary isfinite buffer.
+        # Active invalid rows and non-finite upstream gradients must still fail.
+        row_min, row_max = torch.aminmax(grad_input, dim=-1)
+        _assert_finite(row_min, "Vocabulary backward produced a non-finite active gradient")
+        _assert_finite(row_max, "Vocabulary backward produced a non-finite active gradient")
 
         return grad_input, None, None, None, None, None
 
