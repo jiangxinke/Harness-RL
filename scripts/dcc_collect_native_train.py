@@ -29,6 +29,9 @@ from slime_plugins.dcc.data import Task
 from slime_plugins.dcc.episode import EpisodeRunner, ModelProtocolFailure, PolicyCompletion
 from slime_plugins.dcc.eval_sampling import EvaluationSampling
 from slime_plugins.dcc.native_thinking_eval import NativeThinkingPolicy, NativeTraceJournal
+from slime_plugins.dcc.prompt_history import (
+    PromptHistoryConfig, add_prompt_history_arguments, prompt_history_from_arguments,
+)
 
 VERSION = "native-train-collection-closed-journals-v3"
 
@@ -207,6 +210,10 @@ async def generate(tasks, native, output, *, collection_id, profile, schema_prof
     """Generate one fixed shard; no parameter or branch can load TRAIN labels."""
     require(isinstance(native, NativeThinkingPolicy), "Use the actual NativeThinkingPolicy")
     approved_identity = identity_from_manifest(profile["identity"], native.source_receipt["source_commit"])
+    expected_history = (PromptHistoryConfig.from_dict(profile["identity"]["prompt_history"])
+                        if "prompt_history" in profile["identity"] else PromptHistoryConfig())
+    require(native.prompt_history_config == expected_history,
+            "Actual prompt history differs from the explicit collection identity")
     require(native.budget == approved_identity.budget,
             "Actual native phase budgets/sampling differ from approved collection identity")
     require(type(concurrency) is int and concurrency > 0, "Positive request concurrency required")
@@ -492,6 +499,7 @@ def main():
         part.add_argument("--output-dir", required=True, help="Fresh durable generation directory")
         part.add_argument("--world-size", type=int, default=1)
         if command == "generate":
+            add_prompt_history_arguments(part)
             part.add_argument("--public-train-data", required=True)
             part.add_argument("--collection-id", required=True)
             part.add_argument("--max-tasks-per-benchmark", type=int, default=2, help="Fixed pilot default, selected by task ID only")
@@ -519,8 +527,16 @@ def main():
             world_size=args.world_size, minimum_score=args.minimum_train_score,
             maximum_episode_requests=args.maximum_episode_requests)))
         return
+    history_configuration = prompt_history_from_arguments(args)
+    declared_history = (PromptHistoryConfig.from_dict(profile["identity"]["prompt_history"])
+                        if "prompt_history" in profile["identity"] else PromptHistoryConfig())
+    require(history_configuration == declared_history,
+            "Prompt history flags must exactly match the new approved collection profile")
     tasks = fixed_tasks(load_public_train(args.public_train_data), max_tasks_per_benchmark=args.max_tasks_per_benchmark,
                         rank=args.rank, world_size=args.world_size)
+    if history_configuration.enabled:
+        require(all(task.benchmark == "widesearch" for task in tasks),
+                "Web32k fresh collection accepts Web TRAIN only; preserved CUAD requires its approved prior file")
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     require(not list(output.glob(f"*rank{args.rank}.*")), "Generation rank output must be fresh")
@@ -535,6 +551,7 @@ def main():
             and identity.manifest(base.tokenizer) == profile["identity"], "Actual engine tokenizer/EOS differs")
     base.allow_truncation = False
     native = NativeThinkingPolicy(base, source_receipt=receipt, budget=identity.budget,
+        prompt_history_config=history_configuration,
         trace_sink=NativeTraceJournal(output / f"native_thinking_traces_rank{args.rank}.jsonl"))
     asyncio.run(generate(tasks, native, output, collection_id=args.collection_id, profile=profile,
         schema_profile=schemas, rank=args.rank, world_size=args.world_size, concurrency=args.concurrency,

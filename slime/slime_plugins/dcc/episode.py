@@ -16,6 +16,7 @@ from .data import Task
 from .metrics import cuad_predictions, cuad_task_metrics
 from .retrieval import RetrievalProfile, search_document
 from .tools import DocumentTools, InfrastructureError, WebTools
+from .prompt_history import PromptHistoryBudgetExceeded
 
 WIDESEARCH_EVIDENCE_GUARD_VERSION = "read-grounded-nonempty-exact-schema-v5"
 EPISODE_PROMPT_VERSION = "legal-review-web-autoread-v8"
@@ -84,7 +85,7 @@ class EpisodeResult:
         would incorrectly train on retrieved observations and truncate context.
         """
 
-        return [] if self.status in {"infrastructure_error", "model_protocol_failure"} else [step for step in self.steps if step.completion_ids]
+        return [] if self.status in {"infrastructure_error", "model_protocol_failure", "context_budget_failure"} else [step for step in self.steps if step.completion_ids]
 
     def to_dict(self, *, include_tokens: bool = True) -> dict[str, Any]:
         result = dataclasses.asdict(self)
@@ -521,6 +522,7 @@ class EpisodeRunner:
         answer: Any = []
         status, detail = "max_steps", ""
         model_protocol_failure = None
+        prompt_history_failure = None
         infrastructure_failure = None
         episode_timeout = asyncio.timeout(self.timeout_seconds)
         operation, turn_index = "initialization", None
@@ -639,6 +641,12 @@ class EpisodeRunner:
             steps.append(exc.completion)
             status, detail = "model_protocol_failure", exc.reason
             model_protocol_failure = {"protocol": exc.protocol, "trace_id": exc.trace_id, "reason": exc.reason}
+        except PromptHistoryBudgetExceeded as exc:
+            status, detail = "context_budget_failure", str(exc)
+            prompt_history_failure = {"reason": exc.reason,
+                "diagnostics": exc.diagnostics,
+                "request_messages": [message.copy() for message in request_messages],
+                "generation_submitted": False}
         except (InfrastructureError, TimeoutError, ConnectionError) as exc:
             # asyncio.timeout converts its own cancellation to an often-empty
             # TimeoutError. A dependency can also raise TimeoutError before the
@@ -669,6 +677,8 @@ class EpisodeRunner:
             metrics["infrastructure_error"] = infrastructure_failure
         if model_protocol_failure is not None:
             metrics["model_protocol_failure"] = model_protocol_failure
+        if prompt_history_failure is not None:
+            metrics["prompt_history_failure"] = prompt_history_failure
         if evidence is not None:
             if status == "max_steps":
                 status, detail = "evidence_failure", "WideSearch did not submit an evidence-supported final within the model turn budget"

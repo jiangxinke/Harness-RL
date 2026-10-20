@@ -26,6 +26,13 @@ import torch
 import torch.distributed as dist
 from dcc_train import supervised_example
 from dcc_training_io import TrainingJournal, finalize_training, prepare_training_output, publish_checkpoint
+from dcc_native_loss import (
+    LOSS_TELEMETRY_CONFIGURATION,
+    MIXTURE_LOSS_CONFIGURATION,
+    backward_native_mixture_batch,
+    merge_native_loss_summaries,
+    native_sample_metadata,
+)
 from slime_plugins.dcc import EpisodeRunner, Task, load_tasks
 from slime_plugins.dcc.episode import CUAD_FINAL_REVIEW, EPISODE_PROMPT_VERSION, FINAL_TURN, _WebEvidence, final_turn_message
 from slime_plugins.dcc.hf_policy import (
@@ -49,6 +56,8 @@ class Example:
     category: str
     prompt: list[int]
     completion: list[int]
+    # Set only after native validation of both actual recorded phase ID lists.
+    native_phase_lengths: tuple[int, int] | None = None
 
     @property
     def tokens(self):
@@ -477,13 +486,39 @@ def sample_batch(sampler, max_examples):
     return examples
 
 
-def backward_batch(model, examples):
+def native_phase_normalized_nll(logprobs, example):
+    """Fixed phase mass, preserving every validated native completion token."""
+    lengths = example.native_phase_lengths
+    if (not isinstance(lengths, tuple) or len(lengths) != 2
+            or any(type(length) is not int or length < 1 for length in lengths)
+            or sum(lengths) != len(example.completion)
+            or logprobs.ndim != 1 or logprobs.numel() != sum(lengths)):
+        raise ValueError("Phase-normalized SFT requires validated native phase lengths")
+    thought_length, _ = lengths
+    # The boundary comes from validated real phase IDs, never text extraction.
+    if example.completion[thought_length - 1] != 151668:
+        raise ValueError("Native thought phase must retain its actual closing ID")
+    return -(0.2 * logprobs[:thought_length].mean()
+             + 0.8 * logprobs[thought_length:].mean())
+
+
+def backward_batch(model, examples, *, native_phase_normalized_loss=False,
+                   native_completion_json_mixture_loss=False, native_loss_telemetry=None,
+                   native_telemetry_metadata=None):
     """Equal example weight; observations and historical assistants are context."""
+    if native_phase_normalized_loss and native_completion_json_mixture_loss:
+        raise ValueError("Native loss modes are mutually exclusive")
+    if native_completion_json_mixture_loss:
+        return backward_native_mixture_batch(model, examples, logprob_fn=completion_logprobs,
+                                            telemetry=native_loss_telemetry,
+                                            sample_metadata=native_telemetry_metadata)
     if not examples:
         raise ValueError("Cannot train an empty token batch")
     total = 0.0
     for example in examples:
-        loss = -completion_logprobs(model, example.prompt, example.completion).mean() / len(examples)
+        logprobs = completion_logprobs(model, example.prompt, example.completion)
+        loss = (native_phase_normalized_nll(logprobs, example) if native_phase_normalized_loss
+                else -logprobs.mean()) / len(examples)
         if not torch.isfinite(loss):
             raise FloatingPointError("Non-finite supervised loss; refusing adapter update")
         loss.backward()
@@ -514,6 +549,12 @@ def average_example_gradients(parameters, local_examples, world):
 
 
 def train(args):
+    phase_normalized = getattr(args, "native_phase_normalized_loss", False)
+    mixture_loss = getattr(args, "native_completion_json_mixture_loss", False)
+    if phase_normalized and mixture_loss:
+        raise ValueError("Native loss modes are mutually exclusive")
+    if (phase_normalized or mixture_loss) and not getattr(args, "native_thinking", False):
+        raise ValueError("Native loss modes require --native-thinking")
     native_data = None
     if getattr(args, "native_thinking", False):
         from dcc_native_sft import prepare_native_training
@@ -532,20 +573,33 @@ def train(args):
                            retrieval_profile=load_retrieval_profile(args.retrieval_profile),
                            retrieval_context_chars=getattr(args, "retrieval_context_chars", 0),
                            retrieval_max_context_chars=getattr(args, "retrieval_max_context_chars", 16000))
+    telemetry_metadata = native_sample_metadata(records, cuad_records) if mixture_loss else None
     output = Path(args.output_dir)
     prepare_training_output(output, rank=rank, world_size=world, distributed=dist)
     config = {key: value for key, value in vars(args).items()
               if key not in {"model", "adapter", "records", "cuad_train_data", "cuad_tool_records", "output_dir", "retrieval_profile",
-                             "native_thinking", "native_train_profile", "native_expected_source", "web_stage_profile"}}
+                             "native_thinking", "native_train_profile", "native_expected_source", "web_stage_profile",
+                             "native_phase_normalized_loss", "native_completion_json_mixture_loss"}}
     if getattr(args, "web_stage_profile", None) is not None:
         config["web_stage_profile"] = args.web_stage_profile
     if native_data is not None:
         config["native_thinking"] = native_data.configuration
+    if phase_normalized or mixture_loss:
+        config["training_method"] = "accepted-trajectory supervised fine-tuning; not RL"
+        config["loss_configuration"] = (dict(MIXTURE_LOSS_CONFIGURATION) if mixture_loss else {
+            "version": "native-phase-normalized-completion-sft-v1",
+            "thought_weight": 0.2, "json_weight": 0.8,
+            "phase_boundaries": "validated-real-native-phase-ids",
+            "example_weighting": "global-equal-example",
+        })
+        if mixture_loss:
+            config["loss_telemetry_configuration"] = dict(LOSS_TELEMETRY_CONFIGURATION)
     config.update(warm_start=bool(args.adapter), retrieval_profile_enabled=bool(args.retrieval_profile),
                   episode_prompt_version=EPISODE_PROMPT_VERSION,
                   prompt_encoding_version=PROMPT_ENCODING_VERSION,
                   web_reader_version=WEB_READER_VERSION)
     started, counts, ids = time.monotonic(), Counter(), set()
+    loss_summary = None
     with TrainingJournal(output, rank, sync=getattr(args, "sync_artifacts", False)) as log:
         def record(**value):
             line = log.record(**value)
@@ -601,7 +655,13 @@ def train(args):
             examples = sample_batch(sampler, args.samples_per_step)
             model.train()
             optimizer.zero_grad(set_to_none=True)
-            loss = backward_batch(model, examples)
+            step_telemetry = {} if mixture_loss else None
+            loss = backward_batch(model, examples, native_phase_normalized_loss=phase_normalized,
+                                  native_completion_json_mixture_loss=mixture_loss,
+                                  native_loss_telemetry=step_telemetry,
+                                  native_telemetry_metadata=telemetry_metadata)
+            if mixture_loss:
+                loss_summary = merge_native_loss_summaries(loss_summary, step_telemetry["summary"])
             global_examples = average_example_gradients(parameters, len(examples), world)
             norm = torch.nn.utils.clip_grad_norm_(parameters, args.max_grad_norm)
             if not torch.isfinite(norm) or norm <= 0:
@@ -613,12 +673,14 @@ def train(args):
                    global_examples=global_examples,
                    samples=[{"task_id": e.task_id, "stage": e.stage, "category": e.category,
                              "prompt_tokens": len(e.prompt), "completion_tokens": len(e.completion)} for e in examples],
-                   stage_counts=dict(counts), skipped=dict(sampler.skips))
+                   stage_counts=dict(counts), skipped=dict(sampler.skips),
+                   **({"native_loss_telemetry": step_telemetry} if mixture_loss else {}))
             if args.save_every and step % args.save_every == 0:
                 save(f"step_{step:04d}", step)
         save("final", args.steps)
         record(event="finished", optimizer_steps=args.steps, stage_counts=dict(counts), unique_task_ids=len(ids),
-               skipped=dict(sampler.skips), elapsed=time.monotonic() - started)
+               skipped=dict(sampler.skips), elapsed=time.monotonic() - started,
+               **({"native_loss_summary": loss_summary} if mixture_loss else {}))
         finalize_training(log, args.steps, world_size=world, distributed=dist)
     if world > 1:
         dist.destroy_process_group()
@@ -628,6 +690,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--native-thinking", action="store_true",
                         help="Train fresh LoRA on fully validated recorded native Thinking Web/CUAD rollouts")
+    native_losses = parser.add_mutually_exclusive_group()
+    native_losses.add_argument("--native-phase-normalized-loss", action="store_true",
+                               help="Opt in to SFT loss 0.2*thought_mean + 0.8*JSON_mean on real native IDs")
+    native_losses.add_argument("--native-completion-json-mixture-loss", action="store_true",
+                               help="Opt in to SFT loss 0.8*completion_mean + 0.2*JSON_mean and detached phase telemetry")
     parser.add_argument("--native-train-profile",
                         help="Separately approved native identity and public collection schema profile")
     parser.add_argument("--native-expected-source",
@@ -664,6 +731,8 @@ def main():
     parser.add_argument("--save-initial", action="store_true", help="Save the initial adapter before any optimizer update")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    if (args.native_phase_normalized_loss or args.native_completion_json_mixture_loss) and not args.native_thinking:
+        parser.error("Native loss modes require --native-thinking")
     if min(args.steps, args.lora_rank, args.max_prompt_tokens, args.max_new_tokens, args.batch_tokens,
            args.samples_per_step, args.initial_chunks) < 1 or args.save_every < 0:
         parser.error("training steps, ranks and token budgets must be positive; save-every must be nonnegative")

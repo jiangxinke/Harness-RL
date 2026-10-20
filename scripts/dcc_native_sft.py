@@ -81,6 +81,7 @@ class NativeIdentity:
     generation_seed: int = 42
     thought_tokens: int = 4096
     thought_sampling_profile: str = "greedy"
+    prompt_history: dict | None = None
 
     @property
     def budget(self):
@@ -131,6 +132,12 @@ class NativeIdentity:
         if not self.budget.legacy:
             result.update(thought_tokens=self.thought_tokens,
                           thought_sampling_profile=self.thought_sampling_profile)
+        if self.prompt_history is not None:
+            from dcc_historical_native_config import HISTORICAL_TRAIN_SOURCE
+            _require(self.source_commit != HISTORICAL_TRAIN_SOURCE,
+                     "Historical TRAIN source cannot approve a new context policy")
+            from slime_plugins.dcc.prompt_history import PromptHistoryConfig
+            result["prompt_history"] = PromptHistoryConfig.from_dict(self.prompt_history).to_dict()
         return result
 
 
@@ -138,7 +145,8 @@ def identity_from_manifest(value, expected_source):
     """Reconstruct only caller-approved values; manifest equality rejects extras."""
     return NativeIdentity(value["derivative_id"], tuple(value["eos_token_ids"]), expected_source,
         value["max_prompt_tokens"], value["max_model_len"], value["generation_seed"],
-        value.get("thought_tokens", 4096), value.get("thought_sampling_profile", "greedy"))
+        value.get("thought_tokens", 4096), value.get("thought_sampling_profile", "greedy"),
+        copy.deepcopy(value.get("prompt_history")))
 
 
 def validate_native_record(bundle, tokenizer, *, expected_identity: NativeIdentity,
@@ -190,8 +198,13 @@ def validate_native_record(bundle, tokenizer, *, expected_identity: NativeIdenti
              "Actual native runtime configuration required")
     validate_source_receipt(native.get("source_receipt"), expected_identity.source_commit)
     if not budget.legacy:
-        from slime_plugins.dcc.native_thinking_eval import native_configuration
-        _require(native == native_configuration(native["source_receipt"], budget=budget),
+        from dcc_historical_native_config import HISTORICAL_TRAIN_SOURCE, historical_native_configuration
+        if expected_identity.source_commit == HISTORICAL_TRAIN_SOURCE:
+            approved_configuration = historical_native_configuration(native["source_receipt"], budget=budget)
+        else:
+            from slime_plugins.dcc.native_thinking_eval import native_configuration
+            approved_configuration = native_configuration(native["source_receipt"], budget=budget)
+        _require(_json_key(native) == _json_key(approved_configuration),
                  "Actual budgeted TRAIN configuration differs from caller approval")
     _require(trace.get("status") == "completed" and trace.get("failure_reason") is None
              and trace.get("json_complete") is True and trace.get("json_schema_valid") is True,
@@ -206,9 +219,28 @@ def validate_native_record(bundle, tokenizer, *, expected_identity: NativeIdenti
 
     vocabulary = len(tokenizer)
     prompt = _ids(trace.get("original_prompt_ids"), vocabulary=vocabulary, name="original prompt")
-    actual_prompt = encode_messages(tokenizer, record["messages"],
-                                    expected_identity.max_prompt_tokens, allow_truncation=False)
-    _require(prompt == actual_prompt, "Recorded prompt differs from exact original message encoding")
+    if expected_identity.prompt_history is not None:
+        from slime_plugins.dcc.prompt_history import PromptHistoryConfig, fit_prompt_history
+        config = PromptHistoryConfig.from_dict(expected_identity.prompt_history)
+    else:
+        config = None
+    if config is not None and config.enabled:
+        _require(_json_key(trace.get("prompt_history_original_messages")) == _json_key(record["messages"]),
+                 "Prompt history audit differs from complete original record messages")
+        plan = fit_prompt_history(tokenizer, record["messages"],
+            max_prompt_tokens=expected_identity.max_prompt_tokens,
+            max_new_tokens=budget.total_tokens, max_model_len=expected_identity.max_model_len,
+            config=config)
+        _require(_json_key(trace.get("prompt_history")) == _json_key(plan.report),
+                 "Prompt history receipt differs from trusted deterministic replay")
+        _require(prompt == plan.prompt_ids,
+                 "Recorded prompt differs from exact effective whole-turn encoding")
+    else:
+        _require("prompt_history" not in trace and "prompt_history_original_messages" not in trace,
+                 "Unapproved prompt history audit in unmanaged native record")
+        actual_prompt = encode_messages(tokenizer, record["messages"],
+                                        expected_identity.max_prompt_tokens, allow_truncation=False)
+        _require(prompt == actual_prompt, "Recorded prompt differs from exact original message encoding")
     suffix = tokenizer.encode(NATIVE_SUFFIX, add_special_tokens=False)
     _require(suffix and prompt[-len(suffix):] == suffix,
              "Prompt must use the native open-thinking generation suffix")
@@ -307,7 +339,8 @@ def validate_native_record(bundle, tokenizer, *, expected_identity: NativeIdenti
         _require(all(" ".join(field.split()) in visible or
                      " ".join(json.dumps(field, ensure_ascii=False)[1:-1].split()) in visible
                      for field in fields), "Final grounding is absent from actual encoded prompt")
-    return legacy.Example(record["task_id"], stage, category, prompt, completion)
+    return legacy.Example(record["task_id"], stage, category, prompt, completion,
+                          native_phase_lengths=(len(thought), len(final)))
 
 
 def encode_training_record(record, tokenizer, *, max_prompt, max_response,
@@ -418,9 +451,9 @@ class WebSchemaProfile:
                  "Trusted collection max_steps required")
         _require(type(self.explicit_review) is bool and type(self.cached_rows) is bool,
                  "Trusted Web schema flags must be booleans")
-        from dcc_review_training import LEGACY_PROFILE, REVIEW20_PROFILE
+        from dcc_review_training import LEGACY_PROFILE, REVIEW20_PROFILE, WEB32K_PROFILE
         _require(type(self.navigation_ledger) is bool, "Trusted navigation flag must be boolean")
-        if self.profile_version == REVIEW20_PROFILE:
+        if self.profile_version in {REVIEW20_PROFILE, WEB32K_PROFILE}:
             _require(self.max_steps == 20 and self.explicit_review and self.navigation_ledger
                      and not self.cached_rows, "Explicit TRAIN20 requires review/navigation on and cached rows off")
         else:
@@ -545,35 +578,64 @@ class NativeTrainingData:
     examples: dict
     record_json: dict
     configuration: dict | None = None
+    cuad_identity: NativeIdentity | None = None
+    cuad_manifest: dict | None = None
+    strict_training_budgets: bool = False
 
     def encode_record(self, record, tokenizer, *, max_prompt, max_response, batch_tokens, skips):
         _require(_json_key(self.identity.manifest(tokenizer)) == _json_key(self.manifest),
                  "Loaded training tokenizer differs from fully validated data tokenizer")
+        if self.cuad_identity is not None:
+            _require(_json_key(self.cuad_identity.manifest(tokenizer)) == _json_key(self.cuad_manifest),
+                     "Loaded training tokenizer differs from approved CUAD data tokenizer")
         key = _segment_key(record)
         _require(key in self.examples and _json_key(record) == self.record_json[key],
                  "Flat training record differs from fully validated native data")
         example = self.examples[key]
         # Return fresh lists: the sampler never gains mutable access to cached targets.
         example = legacy.Example(example.task_id, example.stage, example.category,
-                                 list(example.prompt), list(example.completion))
+                                 list(example.prompt), list(example.completion),
+                                 native_phase_lengths=example.native_phase_lengths)
+        if self.strict_training_budgets:
+            for count, limit, name in ((len(example.prompt), max_prompt, "prompt"),
+                    (len(example.completion), max_response, "completion"),
+                    (example.tokens, batch_tokens, "cumulative batch")):
+                _require(type(limit) is int and limit > 0 and count <= limit,
+                         "Approved native sample exceeds training " + name + " budget; refusing to skip")
         return apply_training_budgets(example, max_prompt=max_prompt, max_response=max_response,
                                       batch_tokens=batch_tokens, skips=skips)
 
 
 def load_native_training_data(web_path, tokenizer, *, expected_identity, source_receipt,
-                              schema_resolver, cuad_path=None):
+                              schema_resolver, cuad_path=None, expected_cuad_identity=None,
+                              approved_cuad_identity_differences=None, strict_training_budgets=False):
     """Validate ALL input files before returning any sampler-visible record.
 
     The schema resolver is independent of row targets/traces. The production
     CLI uses the same pure Web/CUAD schemas as the actual inference route.
     """
     validate_source_receipt(source_receipt, expected_identity.source_commit)
-    files = [(web_path, "independent_curriculum")]
+    _require(type(strict_training_budgets) is bool, "Strict training budget flag must be boolean")
+    if expected_cuad_identity is not None:
+        _require(cuad_path is not None, "Separate CUAD identity requires an explicit CUAD input file")
+        web_manifest = expected_identity.manifest(tokenizer)
+        cuad_manifest = expected_cuad_identity.manifest(tokenizer)
+        differences = {"source_commit", "generation_seed", "max_prompt_tokens", "max_model_len", "prompt_history"}
+        actual_differences = sorted(k for k in set(web_manifest) | set(cuad_manifest)
+                                    if web_manifest.get(k) != cuad_manifest.get(k))
+        _require(isinstance(approved_cuad_identity_differences, list)
+                 and approved_cuad_identity_differences == actual_differences
+                 and set(actual_differences) <= differences,
+                 "Web/CUAD identity differences must be exactly approved; same model/tokenizer/native protocol required")
+    else:
+        _require(approved_cuad_identity_differences is None,
+                 "CUAD identity differences require a separately approved identity")
+    files = [(web_path, "independent_curriculum", expected_identity)]
     if cuad_path is not None:
-        files.append((cuad_path, "cuad_train"))
+        files.append((cuad_path, "cuad_train", expected_cuad_identity or expected_identity))
     validated = []
-    for path, domain in files:
-        rows = list(_iter_validated_native(path, tokenizer, expected_identity=expected_identity,
+    for path, domain, approved_identity in files:
+        rows = list(_iter_validated_native(path, tokenizer, expected_identity=approved_identity,
                                            schema_resolver=schema_resolver))
         _require(all(bundle["record"]["source"] == domain for bundle, _ in rows),
                  "Native input file contains the wrong domain")
@@ -591,7 +653,11 @@ def load_native_training_data(web_path, tokenizer, *, expected_identity, source_
         examples[key], record_json[key] = example, _json_key(record)
         (cuad_records if record["source"] == "cuad_train" else records).append(record)
     return NativeTrainingData(records, cuad_records, expected_identity,
-                              expected_identity.manifest(tokenizer), examples, record_json)
+                              expected_identity.manifest(tokenizer), examples, record_json,
+                              cuad_identity=expected_cuad_identity,
+                              cuad_manifest=(expected_cuad_identity.manifest(tokenizer)
+                                  if expected_cuad_identity is not None else None),
+                              strict_training_budgets=strict_training_budgets)
 
 
 def prepare_native_training(args, *, source_root, tokenizer=None):
@@ -609,7 +675,7 @@ def prepare_native_training(args, *, source_root, tokenizer=None):
     profile_path = getattr(args, "native_train_profile", None)
     _require(profile_path is not None, "--native-train-profile is required")
     profile = _strict_json(Path(profile_path).read_text())
-    from dcc_review_training import approved_web_profile, bind_profile_source
+    from dcc_review_training import approved_web_profile, bind_profile_source, WEB32K_PROFILE
     web_profile = approved_web_profile(profile, WebSchemaProfile)
     bind_profile_source(profile, source_root)
     cuad = profile.get("cuad")
@@ -631,11 +697,20 @@ def prepare_native_training(args, *, source_root, tokenizer=None):
     identity = identity_from_manifest(approved, expected_source)
     _require(_json_key(approved) == _json_key(identity.manifest(tokenizer)),
              "Trusted profile and actual training tokenizer differ")
+    cuad_identity = None
+    if "cuad_identity" in profile:
+        approved_cuad = profile["cuad_identity"]
+        _require(isinstance(approved_cuad, dict), "Trusted CUAD identity must be an object")
+        cuad_identity = identity_from_manifest(approved_cuad, approved_cuad.get("source_commit"))
+        _require(_json_key(approved_cuad) == _json_key(cuad_identity.manifest(tokenizer)),
+                 "Trusted CUAD profile and actual training tokenizer differ")
     web = profile["web"]
     schema_profile = NativeSchemaProfile(web_profile, cuad_profile)
     data = load_native_training_data(args.records, tokenizer, expected_identity=identity,
                                      source_receipt=receipt, schema_resolver=schema_profile.original_schema,
-                                     cuad_path=args.cuad_tool_records)
+                                     cuad_path=args.cuad_tool_records, expected_cuad_identity=cuad_identity,
+                                     approved_cuad_identity_differences=profile.get("cuad_identity_differences"),
+                                     strict_training_budgets=profile["version"] == WEB32K_PROFILE)
     data.configuration = {"enabled": True, "protocol": identity.budget.protocol, "source_receipt": receipt,
                           "derivative_id": identity.derivative_id, "model_revision": MODEL_REVISION,
                           "web": copy.deepcopy(web), "validated_records": len(data.records),
@@ -646,6 +721,17 @@ def prepare_native_training(args, *, source_root, tokenizer=None):
         data.configuration["training_profile_version"] = profile["version"]
         data.configuration["collection_overlay_id"] = profile["collection_overlay_id"]
     if not identity.budget.legacy:
-        from slime_plugins.dcc.native_thinking_eval import native_configuration
-        data.configuration["rollout_native_thinking"] = native_configuration(receipt, budget=identity.budget)
+        from dcc_historical_native_config import HISTORICAL_TRAIN_SOURCE, historical_native_configuration
+        if identity.source_commit == HISTORICAL_TRAIN_SOURCE:
+            data.configuration["rollout_native_thinking"] = historical_native_configuration(receipt, budget=identity.budget)
+        else:
+            from slime_plugins.dcc.native_thinking_eval import native_configuration
+            data.configuration["rollout_native_thinking"] = native_configuration(receipt, budget=identity.budget)
+    if profile["version"] == WEB32K_PROFILE:
+        data.configuration["domain_identities"] = {"independent_curriculum": copy.deepcopy(approved),
+            "cuad_train": copy.deepcopy(profile.get("cuad_identity", approved))}
+        data.configuration["prompt_history"] = copy.deepcopy(identity.prompt_history)
+        if cuad_identity is not None:
+            data.configuration["cuad_identity_differences"] = copy.deepcopy(profile["cuad_identity_differences"])
+        data.configuration["training_budget_overflow"] = "fail; never skip approved samples"
     return data

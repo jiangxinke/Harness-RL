@@ -39,6 +39,9 @@ from slime_plugins.dcc.web_navigation import web_navigation_configuration, valid
 from slime_plugins.dcc.web_rows import web_cached_rows_configuration, validate_web_cached_rows_records
 from slime_plugins.dcc.web_research import web_research_configuration, validate_web_research_records
 from slime_plugins.dcc.web_structured import web_structured_actions_configuration, web_structured_configuration
+from slime_plugins.dcc.prompt_history import (
+    add_prompt_history_arguments, prompt_history_from_arguments, validate_prompt_history_records,
+)
 
 
 def _evaluation_sampling(args, backend):
@@ -128,6 +131,7 @@ def _score_predictions(output, tasks, *, require_ownership=False):
             f"Coverage mismatch: {len(expected - set(saved))} missing, {len(set(saved) - expected)} extra predictions"
         )
     runtime = _saved_runtime(output)
+    history_configuration = validate_prompt_history_records((manifest, runtime or {}))
     validate_web_navigation_records((manifest, runtime or {}))
     validate_web_research_records((manifest, runtime or {}))
     validate_web_cached_rows_records((manifest, runtime or {}))
@@ -183,6 +187,8 @@ def _score_predictions(output, tasks, *, require_ownership=False):
         statuses = {"completed", "invalid_answer", "max_steps", "evidence_failure", "infrastructure_error"}
         if "native_thinking" in manifest:
             statuses.add("model_protocol_failure")
+        if history_configuration.enabled:
+            statuses.add("context_budget_failure")
         for rank in range(count):
             assigned = {task.id for task in tasks[rank::count]}
             if {task_id for task_id, owner in owners.items() if owner == rank} != assigned:
@@ -389,6 +395,9 @@ async def _evaluate(args, *, browser_reader=None):
             or getattr(args, "native_lora_training_protocol", None) is not None):
         from slime_plugins.dcc.native_thinking_eval import native_options
         native = native_options(args, tasks, sampling, Path(__file__).resolve().parents[1])
+    history_configuration = prompt_history_from_arguments(args)
+    if history_configuration.enabled and native is None:
+        raise ValueError("--prompt-history-whole-turns currently requires --native-thinking")
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     retrieval_profile = load_retrieval_profile(getattr(args, "retrieval_profile", None))
@@ -413,6 +422,8 @@ async def _evaluate(args, *, browser_reader=None):
         )
     }
     manifest["world_size"] = world
+    if history_configuration.enabled:
+        manifest["prompt_history"] = history_configuration.to_dict()
     if native is not None:
         manifest["native_thinking"] = native
         if args.adapter is not None:
@@ -574,11 +585,14 @@ async def _evaluate(args, *, browser_reader=None):
                     from slime_plugins.dcc.native_thinking_eval import NativeThinkingPolicy, NativeTraceJournal, budget_from_configuration
                     journal = NativeTraceJournal(output / f"native_thinking_traces_rank{rank}.jsonl")
                     try:
+                        if history_configuration.enabled:
+                            policy.allow_truncation = False
                         policy = NativeThinkingPolicy(policy, source_receipt=native["source_receipt"], trace_sink=journal,
                             approved_derivative_id=getattr(args, "native_lora_derivative_id", None),
                             budget=budget_from_configuration(native),
                             approved_training_source=getattr(args, "native_lora_training_source", None),
-                            approved_training_protocol=getattr(args, "native_lora_training_protocol", None))
+                            approved_training_protocol=getattr(args, "native_lora_training_protocol", None),
+                            prompt_history_config=history_configuration)
                     except BaseException:
                         journal.close()
                         raise
@@ -964,6 +978,7 @@ def score(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    add_prompt_history_arguments(parser)
     parser.add_argument("--model", required=True)
     parser.add_argument("--model-name", default="Qwen/Qwen3-30B-A3B-Instruct-2507")
     parser.add_argument("--adapter")

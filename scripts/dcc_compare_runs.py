@@ -53,6 +53,7 @@ from slime_plugins.dcc.web_navigation import web_navigation_configuration, valid
 from slime_plugins.dcc.web_rows import validate_web_cached_rows_records
 from slime_plugins.dcc.web_research import validate_web_research_records
 from slime_plugins.dcc.web_structured import web_structured_actions_configuration, web_structured_configuration
+from slime_plugins.dcc.prompt_history import validate_prompt_history_records
 
 STATUSES = {"completed", "invalid_answer", "max_steps", "evidence_failure", "infrastructure_error"}
 WIDE_METRICS = ("score", "precision_by_row", "recall_by_row", "f1_by_row",
@@ -139,6 +140,8 @@ def load_run(output, tasks):
     for task in tasks:
         row = saved[task.id]
         statuses = STATUSES | ({"model_protocol_failure"} if "native_thinking" in manifest else set())
+        if manifest.get("prompt_history", {}).get("enabled", False):
+            statuses |= {"context_budget_failure"}
         if row.get("status") not in statuses:
             raise ValueError("Prediction has an unknown or missing episode status")
         for key, expected_value in (("benchmark", task.benchmark), ("split", task.split)):
@@ -149,6 +152,7 @@ def load_run(output, tasks):
     runtime_paths = list(output.glob("inference_runtime*.json"))
     runtimes = [_read(path) for path in runtime_paths]
     runtime = runtimes[0] if runtimes else None
+    validate_prompt_history_records((manifest, runtime or {}))
     if any(value != runtime for value in runtimes):
         raise ValueError("Mixed inference runtimes within a run")
     if manifest.get("inference_backend", "hf") == "vllm":
@@ -196,7 +200,8 @@ def _validate_native_pair_run(run, generation, kind):
             or report.get("status_counts") != run["status_counts"]
             or report.get("policy_quantization") != manifest.get("quantization", "none")
             or report.get("policy_inference_backend") != manifest.get("inference_backend", "hf")
-            or (report.get("complete") is not True and not run["status_counts"].get("infrastructure_error"))):
+            or (report.get("complete") is not True and not (
+                run["status_counts"].get("infrastructure_error") or run["status_counts"].get("context_budget_failure")))):
         raise ValueError("Native strict scorer report differs from saved generation/coverage")
     if kind == "base":
         if manifest.get("adapter_identity") is not None or runtime.get("adapter") is not None:
@@ -242,6 +247,7 @@ def validate_protocols(baseline, trained, baseline_protocol, trained_protocol):
         if not isinstance(generation, dict) or any(key not in generation for key in required):
             raise ValueError("Protocol generation must include all budgets, seed, timeout, backend and batching")
         native_v3.append(_validate_native_pair_run(run, generation, kind))
+        validate_prompt_history_records((run["manifest"], run["runtime"] or {}, generation))
         validate_web_navigation_records((run["manifest"], run["runtime"] or {}, generation))
         validate_web_research_records((run["manifest"], run["runtime"] or {}, generation))
         validate_web_cached_rows_records((run["manifest"], run["runtime"] or {}, generation))
@@ -451,7 +457,8 @@ def load_wide_scores(run, tasks, score_name):
         raise ValueError("Scorer policy precision/backend differs from saved generation")
     if wide.get("tasks") != len(tasks) or wide.get("metric_denominator") != len(tasks) or wide.get("judge_failures") != 0:
         raise ValueError("WideSearch scores must include every task with zero judge failures")
-    if not report.get("complete") and not run["status_counts"].get("infrastructure_error"):
+    if not report.get("complete") and not (run["status_counts"].get("infrastructure_error")
+                                           or run["status_counts"].get("context_budget_failure")):
         raise ValueError("Scorer report is incomplete")
     protocol = wide.get("evaluation_protocol")
     if protocol not in {"strict_exact_proxy", "official_protocol_custom_judge"}:
@@ -572,7 +579,10 @@ def compare(tasks, baseline, trained, baseline_protocol, trained_protocol, *, sc
                                       "nonzero_failed_score_overrides": {"baseline": left_overrides, "trained": right_overrides}}
     infrastructure = {name: run["status_counts"].get("infrastructure_error", 0)
                       for name, run in (("baseline", baseline), ("trained", trained))}
-    eligible = not any(infrastructure.values()) and all(value["units"] >= 2 for value in benchmarks.values())
+    context_failures = {name: run["status_counts"].get("context_budget_failure", 0)
+                        for name, run in (("baseline", baseline), ("trained", trained))}
+    eligible = (not any(infrastructure.values()) and not any(context_failures.values())
+                and all(value["units"] >= 2 for value in benchmarks.values()))
     for name, result in benchmarks.items():
         primary = result["metrics"][PRIMARY_METRICS[name]]
         result.update(primary_metric=PRIMARY_METRICS[name],
@@ -592,6 +602,8 @@ def compare(tasks, baseline, trained, baseline_protocol, trained_protocol, *, sc
                      for name, run in (("baseline", baseline), ("trained", trained))},
             "benchmarks": benchmarks,
             "inference_scope": "Conditional on fixed task, retrieval/source and scorer artifacts. A live-web protocol cannot establish source determinism. No checkpoint selection or fresh-test claim is made."}
+    if any("prompt_history" in run["manifest"] for run in (baseline, trained)):
+        report["context_budget_failures"] = context_failures
     if "native_thinking" in common["generation"]:
         report["native_policy_bindings"] = {name: {
             "adapter_identity": run["manifest"].get("adapter_identity"),

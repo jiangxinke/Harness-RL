@@ -26,15 +26,34 @@ calls; every span must remain grounded in the observed source and encoded prompt
 collection and forwards `enforce_eager=True` to the engine. Record the chosen
 execution mode with the collection configuration.
 
+Fresh Web collection can also opt into
+[whole-turn prompt history](dcc_prompt_history.md). Its approved identity and
+runtime flags must agree, and the full original request remains available for
+replay. Use a separate experiment when increasing the prompt budget; preserve
+older CUAD data under its original identity.
+
 Pass the selected Web/CUAD files and the same approved profile to
 `scripts/dcc_tool_sft.py`, using `--native-train-profile` and
 `--native-expected-source`. This validates all bundles before model loading.
-Training limits must accommodate the actual recorded sequences; overlong
-examples are counted as skipped, never truncated. Loss, optimizer, sampling,
-gradient averaging, and checkpoint handling retain the ordinary trainer's path.
+Training limits must accommodate the actual recorded sequences. Legacy profiles
+count overlong examples as skipped, never truncated. The separate Web32K profile
+requires every recorded sequence to fit and fails before training on an
+insufficient budget. Optimizer, sampling, gradient averaging, and checkpoint
+handling retain the ordinary trainer's path.
 Native CUAD sampling uses only stages actually observed; it creates no missing
 search/read examples. `--quantization nf4` can reduce weight memory using the
 separate pinned environment described in [dcc_training.md](dcc_training.md).
+
+The default loss averages all completion tokens with equal example weight.
+Two mutually exclusive options change the native SFT objective:
+`--native-completion-json-mixture-loss` uses 80% completion mean plus 20% JSON
+mean, and `--native-phase-normalized-loss` uses 20% thought mean plus 80% JSON
+mean. Both require validated native phase IDs and retain every generated token.
+The mixture option logs detached phase losses by domain, stage, and TRAIN
+polarity, with counts and sums for aggregation across ranks. These are supervised
+fine-tuning objectives; enabling them does not make the run reinforcement learning
+or establish a benchmark gain. Record the option in the experiment declaration
+and compare checkpoints under identical evaluation settings.
 
 For matched native evaluation, both policies must use the same evaluation source,
 budget, sampling, retrieval, tools, and scoring. Approve the actual training

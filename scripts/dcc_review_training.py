@@ -10,6 +10,7 @@ from jsonschema import Draft202012Validator
 
 LEGACY_PROFILE = "dcc-native-train-profile-v1"
 REVIEW20_PROFILE = "dcc-native-train-profile-web20-review-navigation-v1"
+WEB32K_PROFILE = "dcc-native-train-profile-web32k-whole-turn-v2"
 WEB_STAGE_PROFILE = "final50-search25-fetch25"
 WEB_STAGE_CYCLE = ("final", "search", "final", "fetch")
 
@@ -34,16 +35,48 @@ def approved_web_profile(profile, profile_class):
     require(isinstance(profile, dict), "Trusted native TRAIN profile must be an object")
     version = profile.get("version")
     base = {"version", "identity", "web"}
-    if version == REVIEW20_PROFILE:
+    if version in {REVIEW20_PROFILE, WEB32K_PROFILE}:
         base.add("collection_overlay_id")
         require(isinstance(profile.get("collection_overlay_id"), str)
                 and bool(profile["collection_overlay_id"].strip()), "Explicit collection overlay ID required")
     else:
         require(version == LEGACY_PROFILE, "Unsupported trusted native TRAIN profile version")
-    require(set(profile) in (base, base | {"cuad"}), "Unsupported trusted TRAIN profile fields")
+    allowed = (base, base | {"cuad"})
+    if version == WEB32K_PROFILE:
+        allowed = (base, base | {"cuad", "cuad_identity", "cuad_identity_differences"})
+    require(set(profile) in allowed, "Unsupported trusted TRAIN profile fields")
+    identity = profile["identity"]
+    require(isinstance(identity, dict), "Trusted native identity must be an object")
+    if version == WEB32K_PROFILE:
+        from slime_plugins.dcc.prompt_history import PromptHistoryConfig
+        context = PromptHistoryConfig.from_dict(identity.get("prompt_history"))
+        require(context.enabled and type(identity.get("max_prompt_tokens")) is int
+                and identity["max_prompt_tokens"] == 32768
+                and type(identity.get("max_model_len")) is int and identity["max_model_len"] >= 53248
+                and type(identity.get("thought_tokens")) is int and identity["thought_tokens"] == 16384
+                and identity.get("thought_sampling_profile") == "thinking",
+                "Explicit Web32k requires whole-turn context and full 16384+4096 native budget")
+        if "cuad_identity" in profile:
+            cuad_identity = profile["cuad_identity"]
+            require(isinstance(cuad_identity, dict)
+                    and "prompt_history" not in cuad_identity
+                    and type(cuad_identity.get("max_prompt_tokens")) is int
+                    and cuad_identity["max_prompt_tokens"] == 16384
+                    and type(cuad_identity.get("max_model_len")) is int
+                    and cuad_identity["max_model_len"] == 36864,
+                    "Preserved CUAD identity must retain its original unmanaged declaration")
+            actual_differences = sorted(k for k in set(identity) | set(cuad_identity)
+                                        if identity.get(k) != cuad_identity.get(k))
+            require(isinstance(profile["cuad_identity_differences"], list)
+                    and profile["cuad_identity_differences"] == actual_differences
+                    and set(actual_differences) <= {"source_commit", "generation_seed",
+                        "max_prompt_tokens", "max_model_len", "prompt_history"},
+                    "Trusted profile must enumerate exactly the approved domain identity differences")
+    else:
+        require("prompt_history" not in identity, "Legacy profile cannot approve a new prompt history policy")
     web = profile["web"]
     keys = {"max_steps", "explicit_review", "cached_rows"}
-    if version == REVIEW20_PROFILE:
+    if version in {REVIEW20_PROFILE, WEB32K_PROFILE}:
         keys.add("navigation_ledger")
     require(isinstance(web, dict) and set(web) == keys, "Invalid approved Web profile fields")
     result = profile_class(**web, profile_version=version)
@@ -52,10 +85,10 @@ def approved_web_profile(profile, profile_class):
 
 
 def bind_profile_source(profile, source_root):
-    if profile["version"] == REVIEW20_PROFILE:
+    if profile["version"] in {REVIEW20_PROFILE, WEB32K_PROFILE}:
         overlay = strict_json((Path(source_root) / ".dcc-training-code-overlay.json").read_text())
         require(overlay.get("overlay_id") == profile["collection_overlay_id"]
-                and overlay.get("explicit_training_profile") == REVIEW20_PROFILE
+                and overlay.get("explicit_training_profile") == profile["version"]
                 and overlay.get("baseline_source_unchanged") is False,
                 "Explicit TRAIN profile differs from actual collection/training source overlay")
 
@@ -75,7 +108,7 @@ def review_request_state(profile, record, collector=None):
     from slime_plugins.dcc.web_structured import web_action_schema, web_final_schema
 
     profile.validate()
-    require(profile.profile_version == REVIEW20_PROFILE,
+    require(profile.profile_version in {REVIEW20_PROFILE, WEB32K_PROFILE},
             "Only explicit TRAIN20 review/navigation profile may use replay controls")
     require(record.get("source") == "independent_curriculum" and record.get("split") == "train",
             "Review replay accepts independent Web TRAIN only")

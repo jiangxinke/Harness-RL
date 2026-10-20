@@ -88,7 +88,7 @@ def evaluate_results(tasks: Iterable[Task], predictions: Iterable[dict[str, Any]
         "tasks": len(tasks),
         "prediction_coverage": len(saved) / len(tasks) if tasks else 0.0,
         "status_counts": dict(status),
-        "complete": len(saved) == len(tasks) and not status["infrastructure_error"],
+        "complete": len(saved) == len(tasks) and not status["infrastructure_error"] and not status["context_budget_failure"],
     }
     cuad = [task for task in tasks if task.benchmark == "cuad"]
     if cuad:
@@ -97,7 +97,7 @@ def evaluate_results(tasks: Iterable[Task], predictions: Iterable[dict[str, Any]
     if wide:
 
         def score(task: Task) -> dict[str, Any]:
-            if saved.get(task.id, {}).get("status") == "evidence_failure":
+            if saved.get(task.id, {}).get("status") in {"evidence_failure", "context_budget_failure"}:
                 # Rejected finals are model failures. Keep them in every
                 # denominator without judging unsupported or empty answers.
                 return {"task_id": task.id, "alignment_protocol": ALIGNMENT_PROTOCOL if judge else None, "table_input_protocol": TABLE_INPUT_PROTOCOL, **dict.fromkeys(("score", "precision_by_row", "recall_by_row", "f1_by_row", "precision_by_item", "recall_by_item", "f1_by_item"), 0.0)}

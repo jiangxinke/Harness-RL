@@ -22,6 +22,8 @@ from .eval_sampling import EvaluationSampling
 from .native_budget import NativeBudget, budget_from_configuration, approved_training_receipt, effective_sampling
 from .hf_policy import PROMPT_ENCODING_VERSION, encode_messages
 from .vllm_policy import AsyncVLLMPolicy
+from .prompt_history import (PromptHistoryConfig, PromptHistoryBudgetExceeded,
+                            fit_prompt_history, validate_prompt_history_records, prompt_history_json_equal)
 
 
 BASE_SOURCE_COMMIT = "5bed6188feaaf6c79fac53eead30cfbad83b0beb"
@@ -88,7 +90,14 @@ class NativeThinkingPolicy:
     """
 
     def __init__(self, base, *, source_receipt, trace_sink, approved_derivative_id=None,
-                 budget=None, approved_training_source=None, approved_training_protocol=None):
+                 budget=None, approved_training_source=None, approved_training_protocol=None,
+                 prompt_history_config=None):
+        self.prompt_history_config = (PromptHistoryConfig() if prompt_history_config is None
+                                      else prompt_history_config)
+        if not isinstance(self.prompt_history_config, PromptHistoryConfig):
+            raise TypeError("An explicit PromptHistoryConfig is required")
+        if self.prompt_history_config.enabled and base.allow_truncation:
+            raise ValueError("Whole-turn history requires allow_truncation=False; source slicing stays disabled")
         self.budget = NativeBudget() if budget is None else budget
         if not isinstance(self.budget, NativeBudget):
             raise TypeError("An explicit NativeBudget is required")
@@ -152,6 +161,8 @@ class NativeThinkingPolicy:
             prompt_encoding_version=PROMPT_ENCODING_VERSION,
             native_thinking=native_configuration(self.source_receipt, budget=self.budget),
         )
+        if self.prompt_history_config.enabled:
+            self.provenance["prompt_history"] = self.prompt_history_config.to_dict()
 
         if not self.budget.legacy:
             self.provenance["sampling"] = "Native thought profile=" + self.budget.thought_sampling_profile + "; JSON=greedy-neutral; see native_thinking"
@@ -259,8 +270,44 @@ class NativeThinkingPolicy:
             self.base._owner_loop = loop
         if self.base._owner_loop is not loop:
             raise RuntimeError("Native requests must run on the AsyncLLM owning event loop")
-        prompt = encode_messages(self.base.tokenizer, messages, self.base.max_prompt_tokens,
-                                 allow_truncation=self.base.allow_truncation)
+        if set(trace_metadata) != {"trace_id", "task_id", "rank", "turn_index"}:
+            raise ValueError("Native trace requires exact task/turn ownership metadata")
+        history_plan = None
+        if self.prompt_history_config.enabled:
+            try:
+                history_plan = fit_prompt_history(
+                    self.base.tokenizer, messages, max_prompt_tokens=self.base.max_prompt_tokens,
+                    max_new_tokens=self.budget.total_tokens, max_model_len=self.base.max_model_len,
+                    config=self.prompt_history_config)
+            except PromptHistoryBudgetExceeded as error:
+                # This is a pre-generation failure, not model output. Retain
+                # the full actual caller request and measured IDs without
+                # inventing a thought, a submitted request, or a completion.
+                trace = {"protocol": self.budget.protocol,
+                    "source_commit": self.source_receipt["source_commit"],
+                    **copy.deepcopy(trace_metadata), "status": "preflight_failure",
+                    "failure_reason": error.reason, "exception_type": type(error).__name__,
+                    "generation_submitted": False, "phases": [],
+                    "original_prompt_ids": list(error.original_prompt_ids),
+                    "original_prompt_ids_scope": "measured full caller request; never submitted",
+                    "json_schema": copy.deepcopy(json_schema),
+                    "declared_max_new_tokens": self.budget.total_tokens,
+                    "thought_max_tokens": self.budget.thought_tokens, "json_max_tokens": JSON_TOKENS,
+                    "native_thinking": native_configuration(self.source_receipt, budget=self.budget),
+                    "prompt_history": copy.deepcopy(error.diagnostics),
+                    "prompt_history_original_messages": copy.deepcopy(messages),
+                    "completion_ids": [], "observed_completion_tokens": 0,
+                    "public_text_contains_thought": False}
+                self.traces.append(trace)
+                self.trace_index[trace["trace_id"]] = trace
+                if not self.budget.legacy and "native_lora_binding" in self.provenance:
+                    trace["native_lora_binding"] = copy.deepcopy(self.provenance["native_lora_binding"])
+                self.trace_sink(copy.deepcopy(trace))
+                raise
+            prompt = history_plan.prompt_ids
+        else:
+            prompt = encode_messages(self.base.tokenizer, messages, self.base.max_prompt_tokens,
+                                     allow_truncation=self.base.allow_truncation)
         if prompt[-len(self.suffix_ids):] != self.suffix_ids:
             raise ValueError("The original encoded prompt must end in the native open-thinking suffix")
         if len(prompt) + self.budget.total_tokens > self.base.max_model_len:
@@ -273,9 +320,10 @@ class NativeThinkingPolicy:
             "raw_ids_scope": "All terminal response IDs; on interruption only actually observed responses are known",
             "phases": [], "status": "running", "failure_reason": None,
         }
-        if set(trace_metadata) != {"trace_id", "task_id", "rank", "turn_index"}:
-            raise ValueError("Native trace requires exact task/turn ownership metadata")
         trace.update(copy.deepcopy(trace_metadata))
+        if history_plan is not None:
+            trace["prompt_history"] = copy.deepcopy(history_plan.report)
+            trace["prompt_history_original_messages"] = copy.deepcopy(messages)
         trace["native_thinking"] = native_configuration(self.source_receipt, budget=self.budget)
         if not self.budget.legacy and "native_lora_binding" in self.provenance:
             trace["native_lora_binding"] = copy.deepcopy(self.provenance["native_lora_binding"])
@@ -488,6 +536,7 @@ def validate_native_sidecars(output, saved, manifest, runtime, owners, tasks, *,
     from .web_review import web_review_schema
 
     config = manifest.get("native_thinking")
+    history_configuration = validate_prompt_history_records((manifest, runtime or {}))
     runtime_config = (runtime or {}).get("native_thinking")
     if config is None and runtime_config is None:
         return None
@@ -567,7 +616,9 @@ def validate_native_sidecars(output, saved, manifest, runtime, owners, tasks, *,
         # A cancelled FINAL_ONLY request has no PolicyCompletion. Its one extra
         # terminal trace still belongs to this failed episode and denominator.
         trailing_interruption = len(refs) == len(steps) + 1 and record.get("status") == "infrastructure_error"
-        if len(refs) != len(steps) and not trailing_interruption:
+        trailing_preflight = (history_configuration.enabled and len(refs) == len(steps) + 1
+                              and record.get("status") == "context_budget_failure")
+        if len(refs) != len(steps) and not trailing_interruption and not trailing_preflight:
             raise ValueError("Every native model call must have one durable trace reference")
         evidence = _WebEvidence()
         applied = set()
@@ -596,6 +647,72 @@ def validate_native_sidecars(output, saved, manifest, runtime, owners, tasks, *,
                     schema = web_review_schema(schema)
             if trace.get("json_schema") != schema:
                 raise ValueError("Native schema differs from original Web task/evidence state")
+            history_error = None
+            if history_configuration.enabled:
+                # Reconstruct each actual caller request from the unabridged
+                # episode, including request-only guidance. Do not accept a
+                # self-consistent invented history supplied only by a trace.
+                episode_messages = record.get("messages")
+                if not isinstance(episode_messages, list):
+                    raise ValueError("Whole-turn native audit requires the complete episode history")
+                assistant_positions = [j for j, message in enumerate(episode_messages)
+                                       if message.get("role") == "assistant"]
+                cutoff = assistant_positions[index] if index < len(assistant_positions) else len(episode_messages)
+                original_messages = copy.deepcopy(episode_messages[:cutoff])
+                final_turn = index == manifest["max_steps"] - 1
+                if manifest.get("web_navigation_ledger", {}).get("enabled", False) and task_map[task_id].benchmark == "widesearch":
+                    from .web_navigation import WebNavigationLedger
+                    ledger = WebNavigationLedger()
+                    ledger.observe_events([event for event in record.get("tool_events", [])
+                                           if event.get("turn", -1) < index])
+                    original_messages.insert(len(original_messages) - final_turn,
+                                             {"role": "user", "content": ledger.render()})
+                if manifest.get("web_research_checkpoints", {}).get("enabled", False) and task_map[task_id].benchmark == "widesearch":
+                    from .web_research import web_research_checkpoint
+                    checkpoint = web_research_checkpoint(_answer_columns(task_map[task_id]),
+                                                         turn=index, max_steps=manifest["max_steps"])
+                    original_messages.insert(len(original_messages) - final_turn,
+                                             {"role": "user", "content": checkpoint})
+                if trace.get("prompt_history_original_messages") != original_messages:
+                    raise ValueError("Whole-turn native trace differs from the full episode request")
+                try:
+                    plan = fit_prompt_history(tokenizer, original_messages,
+                        max_prompt_tokens=manifest["max_prompt_tokens"], max_new_tokens=budget.total_tokens,
+                        max_model_len=manifest["inference_parameters"]["max_model_len"],
+                        config=history_configuration)
+                except PromptHistoryBudgetExceeded as error:
+                    history_error = error
+                    if (trace.get("status") != "preflight_failure"
+                            or not prompt_history_json_equal(trace.get("prompt_history"), error.diagnostics)
+                            or trace.get("original_prompt_ids") != error.original_prompt_ids):
+                        raise ValueError("Native preflight diagnostics do not replay from the complete request")
+                else:
+                    if (not prompt_history_json_equal(trace.get("prompt_history"), plan.report)
+                            or trace.get("original_prompt_ids") != plan.prompt_ids):
+                        raise ValueError("Native whole-turn effective prompt or audit report differs")
+            elif "prompt_history" in trace or "prompt_history_original_messages" in trace:
+                raise ValueError("Native history packing lacks explicit manifest/runtime opt-in")
+            if trace.get("status") == "preflight_failure":
+                if (history_error is None or not trailing_preflight or index != len(refs) - 1
+                        or trace.get("failure_reason") != history_error.reason
+                        or trace.get("generation_submitted") is not False
+                        or trace.get("original_prompt_ids_scope") != "measured full caller request; never submitted"
+                        or trace.get("phases") != [] or trace.get("completion_ids") != []
+                        or trace.get("observed_completion_tokens") != 0
+                        or trace.get("public_text_contains_thought") is not False):
+                    raise ValueError("Native context failure must retain a real zero-generation preflight")
+                expected_ref = {"trace_id": trace_id, "task_id": task_id, "rank": owners[task_id],
+                    "turn_index": index, "status": "preflight_failure", "failure_reason": history_error.reason,
+                    "physical_prompt_tokens": 0, "completion_tokens_by_stage": {}}
+                expected_failure = {"reason": history_error.reason, "diagnostics": history_error.diagnostics,
+                                    "request_messages": original_messages, "generation_submitted": False}
+                if (not prompt_history_json_equal(ref, expected_ref)
+                        or not prompt_history_json_equal(record.get("metrics", {}).get("prompt_history_failure"), expected_failure)
+                        or trace.get("declared_max_new_tokens") != budget.total_tokens
+                        or trace.get("thought_max_tokens") != budget.thought_tokens
+                        or trace.get("json_max_tokens") != JSON_TOKENS):
+                    raise ValueError("Native preflight reference/summary/budgets differ")
+                continue
             prompt = trace.get("original_prompt_ids")
             phases = trace.get("phases", [])
             if (not isinstance(prompt, list) or not prompt
@@ -725,7 +842,14 @@ def validate_native_sidecars(output, saved, manifest, runtime, owners, tasks, *,
                 raise ValueError("Prediction tokens/text differ from native trace")
         if record.get("status") == "model_protocol_failure" and (not refs or traces[refs[-1]["trace_id"]]["status"] != "failed"):
             raise ValueError("Model protocol failure lacks its failed trace")
+        if record.get("status") == "context_budget_failure" and (
+                not history_configuration.enabled or not refs
+                or traces[refs[-1]["trace_id"]]["status"] != "preflight_failure"):
+            raise ValueError("Context budget failure lacks its declared terminal preflight")
     if used != traces.keys():
         raise ValueError("Native sidecars contain unreferenced attempts; no implicit retry/overwrite")
-    return {"traces": len(traces), "model_protocol_failures": sum(record.get("status") == "model_protocol_failure" for record in saved.values()),
-            "infrastructure_errors": sum(record.get("status") == "infrastructure_error" for record in saved.values())}
+    result = {"traces": len(traces), "model_protocol_failures": sum(record.get("status") == "model_protocol_failure" for record in saved.values()),
+              "infrastructure_errors": sum(record.get("status") == "infrastructure_error" for record in saved.values())}
+    if history_configuration.enabled:
+        result["context_budget_failures"] = sum(record.get("status") == "context_budget_failure" for record in saved.values())
+    return result
