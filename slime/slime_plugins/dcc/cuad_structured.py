@@ -9,6 +9,7 @@ requested by _system_prompt; the legacy parser continues accepting older forms.
 from copy import deepcopy
 
 CUAD_STRUCTURED_SCHEMA_VERSION = "cuad-public-document-actions-span-confidence-review-v1"
+CUAD_BACKEND_SCHEMA_VERSION = "cuad-structural-pattern-postvalidation-v1"
 # The original final control says at most 40 words, without a character cap.
 # Anchors matter: JSON Schema patterns normally search instead of full-match.
 _BRIEF_REVIEW = {"type": "string", "pattern": r"^\s*\S+(?:\s+\S+){0,39}\s*$"}
@@ -18,10 +19,16 @@ _NONBLANK_TEXT = {"type": "string", "pattern": r"[\s\S]*\S[\s\S]*"}
 def cuad_structured_configuration(enabled=False):
     if type(enabled) is not bool:
         raise ValueError("cuad_structured_actions must be a boolean")
-    return {"enabled": enabled,
-            "schema_version": CUAD_STRUCTURED_SCHEMA_VERSION if enabled else None,
-            "backend": "xgrammar" if enabled else None,
-            "final_review_max_words": 40 if enabled else None}
+    result = {"enabled": enabled,
+              "schema_version": CUAD_STRUCTURED_SCHEMA_VERSION if enabled else None,
+              "backend": "xgrammar" if enabled else None,
+              "final_review_max_words": 40 if enabled else None}
+    if enabled:
+        result.update(backend_schema_version=CUAD_BACKEND_SCHEMA_VERSION,
+                      backend_schema_policy="structural-schema-without-string-patterns",
+                      backend_schema_matches_public=False,
+                      original_public_schema_postvalidation=True)
+    return result
 
 
 def _answer_schema(*, final_review):
@@ -69,20 +76,41 @@ def is_cuad_structured_schema(schema):
     return schema == cuad_action_schema() or schema == cuad_final_schema()
 
 
-def cuad_structured_options(schema):
-    """Keep CUAD separate from the Web-only 240-character review decoder.
+def cuad_backend_schema(schema):
+    """Lower the exact public schema to a JSON-safe backend structural schema.
 
-    vLLM/xgrammar grammar is followed by the native policy's complete strict JSON
-    and JSON Schema validation. In particular that final validation enforces the
-    numeric confidence bounds even if a backend converter overaccepts a number.
+    xgrammar 0.1.25 lowers the public string patterns to raw character classes
+    inside JSON quotes, allowing controls and swallowing structural boundaries.
+    Keep its ordinary JSON string recognizer by omitting only those patterns.
+    This is a physical backend schema change: nonblank text and the 40-word
+    reviews remain enforced by the unchanged original public schema validator.
     """
     if not is_cuad_structured_schema(schema):
         raise ValueError("Expected the exact public CUAD action/final schema")
+
+    def lower(value):
+        if isinstance(value, dict):
+            return {key: lower(item) for key, item in value.items() if key != "pattern"}
+        if isinstance(value, list):
+            return [lower(item) for item in value]
+        return deepcopy(value)
+
+    return lower(schema)
+
+
+def cuad_structured_options(schema):
+    """Compile structural JSON constraints, then validate the public schema.
+
+    The backend receives a structural schema without string patterns. The native
+    policy still applies complete strict JSON parsing and the exact original
+    public JSON Schema, including patterns and numeric confidence bounds.
+    """
+    backend_schema = cuad_backend_schema(schema)
     import xgrammar
     from vllm.sampling_params import StructuredOutputsParams
 
-    xgrammar.Grammar.from_json_schema(schema)
-    return {"structured_outputs": StructuredOutputsParams(json=schema, disable_fallback=True)}
+    xgrammar.Grammar.from_json_schema(backend_schema)
+    return {"structured_outputs": StructuredOutputsParams(json=backend_schema, disable_fallback=True)}
 
 
 def preflight_cuad_structured():

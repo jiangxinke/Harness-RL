@@ -1,0 +1,110 @@
+{
+  "steps": 8,
+  "lora_rank": 2,
+  "native_thinking": {
+    "enabled": true,
+    "protocol": "native-thinking2507-real-close-two-stage-budgeted-v3",
+    "source_receipt": {
+      "version": "dcc-native-inference-source-v1",
+      "source_commit": "cf89170a00eb7c25bf5de038558c479228a87587",
+      "base_source_commit": "5bed6188feaaf6c79fac53eead30cfbad83b0beb",
+      "protocol": "native-thinking2507-real-close-two-stage-4096-4096-v2",
+      "frozen": true
+    },
+    "derivative_id": "synthetic-approved",
+    "model_revision": "144afc2f379b542fdd4e85a1fcd5e1f79112d95d",
+    "all_files_validated_before_model_load": true,
+    "warm_start": false,
+    "raw_cuad_auxiliary": false,
+    "validated_records": 1,
+    "validated_cuad_records": 0,
+    "rollout_native_thinking": {
+      "enabled": true,
+      "encode_messages_requested_enable_thinking": false,
+      "native_template_ignores_enable_thinking": true,
+      "effective_enable_thinking": true,
+      "native_suffix": "<|im_start|>assistant\n<think>\n",
+      "open_think_id": 151667,
+      "end_think_id": 151668,
+      "thought_max_tokens": 16384,
+      "json_max_tokens": 4096,
+      "total_max_new_tokens": 20480,
+      "stage1_structured_outputs": false,
+      "reasoning_parser": "",
+      "stage2_original_schema": true,
+      "stage2_allow_eos": true,
+      "stage2_requires_terminal_eos": true,
+      "stage2_stop_reason_matches_terminal_eos": true,
+      "stage2_none_stop_reason_only_for_primary_eos": true,
+      "reject_duplicate_json_keys": true,
+      "stage2_validate_complete_json_and_schema": true,
+      "public_json_decode": "Remove terminal EOS ID only; preserve all other generated text",
+      "same_real_prompt_and_completion_ids": true,
+      "phase2_retemplate": false,
+      "forced_close": false,
+      "thought_json_extraction": false,
+      "retry": false,
+      "inference_only": true,
+      "comparable_to_old_4096_protocol": false,
+      "protocol": "native-thinking2507-real-close-two-stage-budgeted-v3",
+      "source_receipt": {
+        "version": "dcc-native-inference-source-v1",
+        "source_commit": "cf89170a00eb7c25bf5de038558c479228a87587",
+        "base_source_commit": "5bed6188feaaf6c79fac53eead30cfbad83b0beb",
+        "protocol": "native-thinking2507-real-close-two-stage-4096-4096-v2",
+        "frozen": true
+      },
+      "benchmarks": [
+        "widesearch",
+        "cuad"
+      ],
+      "cuad_structured": {
+        "enabled": true,
+        "schema_version": "cuad-public-document-actions-span-confidence-review-v1",
+        "backend": "xgrammar",
+        "final_review_max_words": 40
+      },
+      "sidecar": "native_thinking_traces_rank{rank}.jsonl",
+      "fresh_generation_only": true,
+      "sampling_profile": "phase-specific-thinking",
+      "thought_sampling_profile": "thinking",
+      "thought_sampling": {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "repetition_penalty": 1.0
+      },
+      "json_sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "top_k": -1,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "repetition_penalty": 1.0
+      },
+      "thought_effective_sampling": {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "repetition_penalty": 1.0
+      },
+      "json_effective_sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "top_k": 0,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "repetition_penalty": 1.0
+      },
+      "phase_sampling_seed": "same explicit seed per physical phase request; no shared RNG history"
+    }
+  }
+}

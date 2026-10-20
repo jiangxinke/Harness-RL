@@ -45,7 +45,14 @@ def validate_native_adapter(adapter, *, source_receipt, approved_derivative_id, 
             or config.get("lora_rank") != metadata["config"]["r"]):
         raise ValueError("Actual adapter TRAIN configuration differs from approved native source/derivative")
     if training_protocol == BUDGET_PROTOCOL:
-        from .native_thinking_eval import native_configuration
+        # These original TRAIN exports predate the CUAD inference backend fix.
+        # Validate their exact saved declaration without relabelling TRAIN.
+        if training_receipt["source_commit"] in {
+                "76b57e227b943fb34a446226fa67cc1420f40e52",
+                "cf89170a00eb7c25bf5de038558c479228a87587"}:
+            from .legacy_native_training_configuration import native_configuration
+        else:
+            from .native_thinking_eval import native_configuration
         rollout = native.get("rollout_native_thinking")
         if not isinstance(rollout, dict):
             raise ValueError("Budgeted native TRAIN requires its actual rollout configuration")

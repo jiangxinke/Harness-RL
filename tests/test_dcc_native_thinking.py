@@ -17,7 +17,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from slime_plugins.dcc import EpisodeRunner, PolicyCompletion, Task
 from slime_plugins.dcc.cuad_structured import (
     cuad_action_schema, cuad_final_schema, cuad_structured_configuration,
-    cuad_structured_options,
+    cuad_backend_schema, cuad_structured_options,
 )
 from slime_plugins.dcc.episode import _system_prompt, _valid_answer, final_turn_message, parse_action
 from slime_plugins.dcc.eval_sampling import EvaluationSampling
@@ -203,7 +203,9 @@ def test_native_cuad_real_ids_tools_final_and_legacy_prompts_equal(tmp_path):
         assert second[0]["prompt_token_ids"] == step.prompt_ids + trace["phases"][0]["token_ids"]
         assert step.completion_ids == trace["completion_ids"]
         assert first[1].structured_outputs is None
-        assert second[1].structured_outputs.json == (cuad_final_schema() if index == 2 else cuad_action_schema())
+        public_schema = cuad_final_schema() if index == 2 else cuad_action_schema()
+        assert second[1].structured_outputs.json == cuad_backend_schema(public_schema)
+        assert trace["json_schema"] == public_schema
         assert first[1].max_tokens == second[1].max_tokens == 4096
         assert trace["phases"][0]["token_ids"][-1] == END_THINK
         assert trace["phases"][1]["token_ids"][-1] == 151645
@@ -236,7 +238,8 @@ def test_cuad_final_review_is_distinct_from_enabled_web_review(tmp_path):
     assert policy.traces[0]["json_schema"] == cuad_final_schema()
 
 
-@pytest.mark.parametrize("damage", ["thought", "eos", "alternate_none", "duplicate", "schema", "confidence", "missing_review"])
+@pytest.mark.parametrize("damage", ["thought", "eos", "alternate_none", "duplicate", "schema", "confidence",
+                                    "missing_review", "blank_span", "long_review", "empty_checks"])
 def test_native_cuad_protocol_failures_never_retry_or_execute_tools(tmp_path, damage):
     tokenizer = FakeTokenizer()
     thought = {"ids": tokenizer.encode("Reason.</think>")}
@@ -252,6 +255,11 @@ def test_native_cuad_protocol_failures_never_retry_or_execute_tools(tmp_path, da
         value["answer"] = [{"text": "span", "confidence": 1.1}]
         final["ids"] = tokenizer.encode(json.dumps(value)) + [151645]
     if damage == "missing_review": final["ids"] = tokenizer.encode('{"answer":[]}') + [151645]
+    if damage == "blank_span": value["answer"] = [{"text": " \t ", "confidence": .5}]
+    if damage == "long_review": value["plan"] = "word " * 41
+    if damage == "empty_checks": value["checks"] = ""
+    if damage in {"blank_span", "long_review", "empty_checks"}:
+        final["ids"] = tokenizer.encode(json.dumps(value)) + [151645]
     tok, engine, policy, result, record, manifest, runtime, audit = run_cuad(tmp_path, scripts=scripts, max_steps=1)
     assert result.status == "model_protocol_failure" and result.reward == 0
     assert len(engine.calls) == (1 if damage == "thought" else 2)
@@ -350,8 +358,9 @@ def test_native_v3_long_thought_actual_sampling_and_exact_continuation(tmp_path,
     # vLLM 0.11.2 normalizes configured greedy top_k=-1 to effective 0 (disabled).
     assert (second[1].temperature, second[1].top_p, second[1].top_k) == (0., 1., 0)
     assert first[1].structured_outputs is None
-    assert second[1].structured_outputs.json == cuad_final_schema()
+    assert second[1].structured_outputs.json == cuad_backend_schema(cuad_final_schema())
     trace = policy.traces[0]
+    assert trace["json_schema"] == cuad_final_schema()
     assert trace["protocol"] == BUDGET_PROTOCOL
     assert trace["phases"][0]["token_ids"] == thought_ids and len(thought_ids) > 4096
     assert second[0]["prompt_token_ids"] == result.steps[0].prompt_ids + thought_ids
