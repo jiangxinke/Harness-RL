@@ -306,6 +306,13 @@ cleaning up the local runtime directory. Clean up only that run's recorded
 descendants or unique run ID, checking PID
 creation times. Do not use global Ray/process shutdown commands.
 
+For the production code to launch its own SGLang router, leave
+`sglang_router_ip` unset (`null` in YAML) and select an available
+`sglang_router_port`. A non-null router IP means an external router already
+exists: `_start_router` returns that address without launching a service.
+Setting a loopback IP alone therefore does not start a router. Retain the
+custom Slime router and verify that its real service starts before rollout.
+
 Use actual training-split inputs and a real searchable corpus. The pretrained
 model must sample the search and reflection actions itself. Do not inject
 reflection tokens or replace the model, retrieval, teacher, or optimizer with
