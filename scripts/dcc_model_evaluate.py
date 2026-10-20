@@ -399,8 +399,10 @@ async def _evaluate(args, *, browser_reader=None):
         raise ValueError("--vllm-async requires --inference-backend vllm")
     if backend == "vllm" and (world != 1 or local != 0 or rank != 0):
         raise ValueError("Use one evaluation process for vLLM; configure tensor parallelism instead of torchrun replicas")
-    if backend == "vllm" and quantization != "none":
-        raise ValueError("The vLLM evaluation backend currently requires BF16 base weights")
+    if backend == "vllm" and quantization not in {"none", "fp8"}:
+        raise ValueError("The vLLM evaluation backend supports BF16 or explicit FP8 base weights")
+    if backend != "vllm" and quantization == "fp8":
+        raise ValueError("FP8 generation requires --inference-backend vllm")
     shard = _evaluation_shard(args, generation=True)
     if shard is not None:
         rank, world = shard
@@ -496,6 +498,11 @@ async def _evaluate(args, *, browser_reader=None):
         # Preserve existing BF16 manifests and reject changing precision when
         # resuming a quantized run. Quantized scores need a separate directory.
         manifest["quantization"] = quantization
+    if quantization == "fp8":
+        from slime_plugins.dcc.fp8_attention_guard import QUANTIZATION, VALIDATION_LAYOUT
+        from slime_plugins.dcc.fp8_runtime import runtime_identity
+        manifest.update(fp8_contract=dict(QUANTIZATION), fp8_validation=dict(VALIDATION_LAYOUT),
+                        runtime_code_identity=runtime_identity())
     if backend != "hf":
         manifest["inference_backend"] = backend
         manifest["evaluation_sampling"] = sampling.to_dict()
@@ -579,6 +586,9 @@ async def _evaluate(args, *, browser_reader=None):
                     async_options["web_cached_rows"] = True
                 if bounded_whitespace:
                     async_options["web_bounded_whitespace"] = True
+                if quantization == "fp8":
+                    async_options.update(quantization="fp8",
+                        fp8_validation_dir=str((output / f"fp8_validation_rank{rank}").absolute()))
                 policy = load_vllm_policy(
                     args.model, adapter=args.adapter, batch_size=args.batch_size,
                     max_prompt_tokens=args.max_prompt_tokens,
@@ -589,6 +599,9 @@ async def _evaluate(args, *, browser_reader=None):
                     enforce_eager=args.vllm_enforce_eager, seed=args.seed,
                     evaluation_sampling=sampling, **async_options,
                 )
+                if quantization == "fp8":
+                    from slime_plugins.dcc.fp8_attention_guard import validate_worker_receipts
+                    validate_worker_receipts(output / f"fp8_validation_rank{rank}", adapter=args.adapter)
                 if native is not None:
                     from slime_plugins.dcc.native_thinking_eval import NativeThinkingPolicy, NativeTraceJournal, budget_from_configuration
                     journal = NativeTraceJournal(output / f"native_thinking_traces_rank{rank}.jsonl")
@@ -982,7 +995,7 @@ def main():
     parser.add_argument("--adapter")
     parser.add_argument("--native-lora-derivative-id",
                         help="Caller-approved actual derivative ID; required with native LoRA evaluation")
-    parser.add_argument("--quantization", choices=("none", "nf4"), default="none")
+    parser.add_argument("--quantization", choices=("none", "nf4", "fp8"), default="none")
     parser.add_argument("--retrieval-profile")
     parser.add_argument("--retrieval-context-chars", type=int, default=0)
     parser.add_argument("--retrieval-max-context-chars", type=int, default=16000)

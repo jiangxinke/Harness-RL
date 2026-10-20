@@ -12,7 +12,7 @@ import json
 import os
 import threading
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 from .episode import PolicyCompletion
@@ -327,13 +327,18 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
                      seed=42, revision=None, tokenizer_revision=None, enforce_eager=False,
                      asynchronous=False, evaluation_sampling=None, web_structured_final=False,
                      web_structured_actions=False, web_explicit_review=False,
-                     web_bounded_whitespace=False, web_navigation_ledger=False, web_research_checkpoints=False, web_cached_rows=False):
-    """Load a BF16 vLLM engine without changing the default HF runtime.
+                     web_bounded_whitespace=False, web_navigation_ledger=False, web_research_checkpoints=False, web_cached_rows=False,
+                     quantization="none", fp8_validation_dir=None):
+    """Load BF16 or explicit FP8 vLLM inference without changing the HF trainer.
 
     Save ``policy.provenance`` alongside prediction manifests in a new external
     output directory. A backend change must never resume an existing HF run.
     GPU ownership and CUDA_VISIBLE_DEVICES are managed by the caller.
     """
+    if quantization not in {"none", "fp8"}:
+        raise ValueError("The vLLM backend supports quantization='none' or 'fp8'")
+    if quantization == "fp8" and tensor_parallel_size != 1:
+        raise ValueError("The FP8-Marlin runtime requires tensor_parallel_size=1")
     evaluation_sampling = EvaluationSampling() if evaluation_sampling is None else evaluation_sampling
     if not isinstance(evaluation_sampling, EvaluationSampling):
         raise TypeError("evaluation_sampling must be an EvaluationSampling")
@@ -383,6 +388,9 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
     config = AutoConfig.from_pretrained(model_name, revision=revision)
     if config.model_type != "qwen3_moe" or getattr(config, "quantization_config", None):
         raise ValueError("This backend currently requires an unquantized Qwen3 MoE base checkpoint")
+    if quantization == "fp8":
+        from .fp8_attention_guard import validate_model_config
+        validate_model_config(config.to_dict())
     tokenizer = AutoTokenizer.from_pretrained(model_name, revision=tokenizer_revision or revision)
     tokenizer.padding_side = "left"
     if tokenizer.pad_token_id is None:
@@ -398,7 +406,8 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
     engine_kwargs = dict(
         model=model_name, tokenizer=model_name, revision=revision,
         tokenizer_revision=tokenizer_revision or revision, dtype="bfloat16",
-        quantization=None, kv_cache_dtype="auto", tensor_parallel_size=tensor_parallel_size,
+        quantization=None if quantization == "none" else "fp8",
+        kv_cache_dtype="auto", tensor_parallel_size=tensor_parallel_size,
         gpu_memory_utilization=gpu_memory_utilization, max_model_len=max_model_len,
         max_num_seqs=batch_size, max_num_batched_tokens=max_num_batched_tokens,
         enable_chunked_prefill=True, enable_prefix_caching=True, seed=seed,
@@ -413,7 +422,13 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
         engine_kwargs["structured_outputs_config"] = StructuredOutputsConfig(
             backend="xgrammar", disable_fallback=True,
         )
-    with _engine_environment():
+    binding = nullcontext()
+    if quantization == "fp8":
+        from .fp8_attention_guard import WORKER_CLASS, worker_binding
+        engine_kwargs["worker_cls"] = WORKER_CLASS
+        binding = worker_binding(adapter=metadata["path"] if metadata else None,
+                                 model_config=config.to_dict(), audit_dir=fp8_validation_dir)
+    with binding, _engine_environment():
         if asynchronous:
             from vllm.engine.arg_utils import AsyncEngineArgs
             from vllm.v1.engine.async_llm import AsyncLLM
@@ -430,7 +445,7 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
         "model": model_name, "revision": revision,
         "resolved_config_revision": getattr(config, "_commit_hash", None),
         "tokenizer_revision": tokenizer_revision or revision,
-        "adapter": metadata, "dtype": "bfloat16", "quantization": "none",
+        "adapter": metadata, "dtype": "bfloat16", "quantization": quantization,
         "lora_dtype": "auto (bfloat16)",
         "kv_cache_dtype": "auto (bfloat16)", "seed": seed,
         "tensor_parallel_size": tensor_parallel_size, "max_model_len": max_model_len,
@@ -446,6 +461,11 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
         "prompt_encoding": "HF encode_messages; enable_thinking=False",
         "prompt_encoding_version": PROMPT_ENCODING_VERSION,
     }
+    if quantization == "fp8":
+        from .fp8_attention_guard import QUANTIZATION, VALIDATION_LAYOUT
+        from .fp8_runtime import runtime_identity
+        provenance.update(fp8_contract=dict(QUANTIZATION), fp8_validation=dict(VALIDATION_LAYOUT),
+                          runtime_code_identity=runtime_identity())
     if evaluation_sampling != EvaluationSampling():
         provenance["sampling"] = "explicit evaluation sampling; explicit EOS; generation_config=vllm"
     if web_structured_final:

@@ -393,3 +393,31 @@ Automatic reading seeks up to `--auto-read-sources` successful new pages after e
 
 
 Structured Web evaluation can opt into `--web-bounded-whitespace`. It bounds insignificant JSON space, LF and TAB runs to eight characters using the pinned xgrammar 0.1.25 EBNF converter, with fallback disabled. It supports both ordinary structured actions and finite explicit review. The flag defaults off; JSON string values, public schema and evidence/scoring guards stay unchanged. Generation, resume, scoring and paired comparison require matching opt-in provenance. This formatting change needs fresh GPU validation and does not by itself establish better answers.
+
+Optional FP8-Marlin weights
+
+Use `--inference-backend vllm --quantization fp8` to reduce weight memory
+while keeping BF16 activations, BF16 router gates and the existing KV cache
+dtype. The default remains BF16. This path supports unquantized 125-expert
+Qwen3 MoE checkpoints on SM80 with vLLM 0.11.2 and tensor parallel size 1.
+Other model layouts and prequantized checkpoints are rejected.
+
+Standard attention-only LoRA with rank 1 through 64 is supported. Before
+loading the model, the worker validates every adapter A/B pair, shape, dtype
+and offset using only its safetensors header. It excludes fused experts from
+the LoRA manager, keeps router gates unquantized and verifies the actual
+FP8-Marlin expert and attention methods after loading. The original manager
+filter is restored even if loading fails. Base-only runs use the same router
+and expert checks with LoRA disabled.
+
+Use fresh output directories for both a quantized base and its trained
+comparison. FP8 runs write create-once header and worker receipts under
+`fp8_validation_rank{rank}` and record the full contract in manifests and
+inference provenance; failed or partial validation directories are not reused.
+The evaluator checks the actual receipts before generating benchmark requests
+and closes the engine if that check fails. Completed predictions are scored
+with the existing separate scoring commands.
+
+For direct `load_vllm_policy` calls, pass `quantization="fp8"` and an absolute
+fresh `fp8_validation_dir`; GPU ownership remains the caller's responsibility.
+Native thinking budgets, stop tokens, schema checks and training are unchanged.
