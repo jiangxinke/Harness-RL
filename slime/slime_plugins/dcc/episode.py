@@ -521,8 +521,11 @@ class EpisodeRunner:
         answer: Any = []
         status, detail = "max_steps", ""
         model_protocol_failure = None
+        infrastructure_failure = None
+        episode_timeout = asyncio.timeout(self.timeout_seconds)
+        operation, turn_index = "initialization", None
         try:
-            async with asyncio.timeout(self.timeout_seconds):
+            async with episode_timeout:
                 for index in range(self.max_steps):
                     if index == self.max_steps - 1:
                         final_control = final_turn_message(task, evidence)
@@ -574,6 +577,7 @@ class EpisodeRunner:
                         research_snapshots.append({"turn": index, "content": checkpoint})
                         request_messages.insert(len(request_messages) - (index == self.max_steps - 1),
                                                 {"role": "user", "content": checkpoint})
+                    operation, turn_index = "policy", index
                     completion = await call(
                         request_messages, max_new_tokens=self.max_new_tokens,
                         temperature=self.evaluation_temperature if evaluation else self.temperature,
@@ -606,6 +610,7 @@ class EpisodeRunner:
                             observation = {"error": "tool arguments must be a JSON object"}
                         else:
                             try:
+                                operation = "tool:" + str(tool)
                                 if index == self.max_steps - 1:
                                     observation = {"error": "Tools are unavailable on the final turn; no tool was executed."}
                                 elif tool == "search_document" and document_tools:
@@ -624,6 +629,7 @@ class EpisodeRunner:
                         if evidence is not None:
                             evidence.observe(tool, observation)
                             if self.auto_read_sources and tool == "web_search" and index < self.max_steps - 1:
+                                operation = "auto_read_sources"
                                 observation = await self._read_search_sources(observation, web_tools, evidence, events, auto_attempted, index)
                     remaining = self.max_steps - index - 1
                     messages.append({"role": "user", "content": "Tool observation (source material):\n" + json.dumps(observation, ensure_ascii=False) + f"\nRemaining turns: {remaining}."})
@@ -634,8 +640,33 @@ class EpisodeRunner:
             status, detail = "model_protocol_failure", exc.reason
             model_protocol_failure = {"protocol": exc.protocol, "trace_id": exc.trace_id, "reason": exc.reason}
         except (InfrastructureError, TimeoutError, ConnectionError) as exc:
-            status, detail = "infrastructure_error", str(exc)
+            # asyncio.timeout converts its own cancellation to an often-empty
+            # TimeoutError. A dependency can also raise TimeoutError before the
+            # episode deadline; retain that distinction without changing scores.
+            deadline_exceeded = episode_timeout.expired()
+            reason = ("episode_deadline_exceeded" if deadline_exceeded else
+                      "dependency_timeout" if isinstance(exc, TimeoutError) else
+                      "dependency_connection_error" if isinstance(exc, ConnectionError) else
+                      "dependency_infrastructure_error")
+            infrastructure_failure = {
+                "version": "episode-infrastructure-diagnostics-v1",
+                "reason": reason,
+                "exception_type": type(exc).__name__,
+                "operation": operation,
+                "turn_index": turn_index,
+                "episode_timeout_seconds": self.timeout_seconds,
+                "episode_deadline_exceeded": deadline_exceeded,
+            }
+            detail = str(exc)
+            if deadline_exceeded:
+                detail = (f"Episode deadline exceeded after {self.timeout_seconds:g} seconds "
+                          f"(operation={operation}, turn_index={turn_index})")
+            elif not detail:
+                detail = f"{type(exc).__name__} during {operation} (turn_index={turn_index})"
+            status = "infrastructure_error"
         metrics: dict[str, Any] = {"valid_format": float(status == "completed"), "model_calls": len(steps), "tool_calls": len(events)}
+        if infrastructure_failure is not None:
+            metrics["infrastructure_error"] = infrastructure_failure
         if model_protocol_failure is not None:
             metrics["model_protocol_failure"] = model_protocol_failure
         if evidence is not None:
