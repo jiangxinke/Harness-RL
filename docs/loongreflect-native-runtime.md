@@ -306,6 +306,15 @@ cleaning up the local runtime directory. Clean up only that run's recorded
 descendants or unique run ID, checking PID
 creation times. Do not use global Ray/process shutdown commands.
 
+Check every configured service port and the full engine/worker port ranges
+immediately before launch. Keep those ranges disjoint and outside the host
+ephemeral port range, which Linux exposes in
+`/proc/sys/net/ipv4/ip_local_port_range`. A free base port does not establish
+that the remaining range is free. If the guard finds an existing listener,
+choose another private range; do not stop the listener. A failure in this
+CPU guard happens before native training starts and is not a failed optimizer
+update.
+
 For the production code to launch its own SGLang router, leave
 `sglang_router_ip` unset (`null` in YAML) and select an available
 `sglang_router_port`. A non-null router IP means an external router already
