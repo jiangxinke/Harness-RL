@@ -33,6 +33,7 @@ from dcc_native_dpo_data import TrainRewardReceipt, best_worst_pair, validate_fi
 from dcc_native_sft import _strict_json
 from dcc_training_io import TrainingJournal, finalize_training, prepare_training_output, publish_checkpoint
 from slime_plugins.dcc.hf_policy import completion_logprobs, load_policy_model
+from slime_plugins.dcc.hf_chunked_logprobs import resolve_logprob_backend
 from slime_plugins.dcc.native_dpo_adapter import DPO_METHOD, PAIR_CONTRACT
 
 ALGORITHM = "offline_native_final_DPO; not RL"
@@ -481,11 +482,17 @@ def parser():
     result.add_argument("--save-every", type=int, default=0)
     result.add_argument("--save-initial", action="store_true")
     result.add_argument("--sync-artifacts", action="store_true")
+    result.add_argument("--logprob-backend", choices=("original", "qwen3-moe-chunked"),
+                        default="original", help="Experimental opt-in bounded-head scorer")
+    result.add_argument("--logprob-head-chunk-tokens", type=int, default=None,
+                        help="Positive head chunk size; requires explicit chunked backend (default 128)")
     return result
 
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    logprob_fn, scoring_backend = resolve_logprob_backend(
+        args.logprob_backend, args.logprob_head_chunk_tokens)
     training_source = training_source_identity(args.training_source_commit)
     require(args.approved_collections is not None or (isinstance(args.expected_source, str)
         and re.fullmatch(r"[0-9a-f]{40}", args.expected_source)), "Explicit approved 40-hex collection source required")
@@ -530,8 +537,8 @@ def main(argv=None):
             output=args.output_dir, steps=args.steps, pairs_per_step=args.pairs_per_step,
             learning_rate=args.learning_rate, beta=args.beta, seed=args.seed,
             rank=rank, world_size=world, config=dict(payload[0]["metadata"], quantization=report,
-                training_source=training_source),
-            save_every=args.save_every, save_initial=args.save_initial, sync_artifacts=args.sync_artifacts)
+                training_source=training_source, scoring_backend=scoring_backend),
+            logprob_fn=logprob_fn, save_every=args.save_every, save_initial=args.save_initial, sync_artifacts=args.sync_artifacts)
     finally:
         if world > 1:
             dist.destroy_process_group()

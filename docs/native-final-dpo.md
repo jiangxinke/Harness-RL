@@ -151,3 +151,21 @@ paired sidecar validation. Synthetic NF4 metadata in CPU adoption fixtures
 does not establish actual NF4 loading, GPU memory, throughput or benchmark
 quality. Real GPU/NF4 validation and independently approved rewards remain
 required before production training or any score claim.
+
+An experimental `--logprob-backend qwen3-moe-chunked` bounds response LM-head
+logits with checkpointed chunks; `--logprob-head-chunk-tokens` defaults to 128
+for that explicit backend. The default remains `original`, and a chunk size
+without the explicit backend is rejected. The alternative preserves every
+prompt/response token and the same raw-probability SUM scoring contract. It
+supports HF Qwen3 MoE with standard q/v/o LoRA only and rejects unsupported
+PEFT extensions. Both reference caching and policy replay use the selected
+scorer through the existing injection point.
+
+Saved `scoring_backend` records backend, chunk size, recipe version and scorer
+implementation version, alongside the actual new clean `training_source`.
+Existing frozen experiments retain their original source and configuration.
+`scripts/dcc_probe_chunked_logprobs.py` prepares a short explicit single-GPU
+actual-NF4 value/gradient comparison with independent children and controlled
+identical nonzero rank-16 adapters. It never trains or evaluates benchmarks.
+Tiny BF16 tests do not establish actual NF4 correctness or real-model memory
+and throughput; close that separate probe before making those claims.
