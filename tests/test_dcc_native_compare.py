@@ -115,6 +115,35 @@ def test_budgeted_native_training_is_bound_independently_of_evaluation(tmp_path,
         COMPARE["validate_protocols"](*values)
 
 
+def test_actual_evaluator_content_identity_retains_full_native_pair_checks(tmp_path, monkeypatch):
+    from slime_plugins.dcc.adapter_identity import adapter_content_identity
+
+    task, values = native_pair(tmp_path, monkeypatch)
+    trained = values[1]
+    identity = adapter_content_identity(trained['manifest']['adapter'])
+    trained['manifest']['adapter_identity'] = identity
+    trained['runtime']['adapter'] = deepcopy(identity)
+    path = trained['output'] / 'scores_strict.json'
+    report = json.loads(path.read_text())
+    report['generation_manifest'] = trained['manifest']
+    report['inference_runtime'] = trained['runtime']
+    dump(path, report)
+    result = COMPARE['compare']([task], *values, resamples=100)
+    assert result['native_policy_bindings']['trained']['adapter_identity'] == identity
+    # A matching content identity cannot exempt a forged training binding.
+    trained['runtime']['native_lora_binding']['lora_rank'] += 1
+    trace_path = trained['output'] / 'native_thinking_traces_rank0.jsonl'
+    traces = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    # Keep sidecar provenance consistent so the actual adapter binding check
+    # itself must reject the forged rank, rather than a stale trace check.
+    for trace in traces:
+        trace['native_lora_binding'] = trained['runtime']['native_lora_binding']
+    trace_path.write_text(''.join(json.dumps(trace) + '\n' for trace in traces))
+    report['inference_runtime'] = trained['runtime']; dump(path, report)
+    with pytest.raises(ValueError, match='metadata/binding'):
+        COMPARE['validate_protocols'](*values)
+
+
 def test_otherwise_valid_training_budget_change_cannot_reuse_saved_binding(tmp_path, monkeypatch):
     from slime_plugins.dcc.native_budget import NativeBudget
     from slime_plugins.dcc.native_thinking_eval import native_configuration

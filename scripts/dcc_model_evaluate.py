@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
-import hashlib
 import json
 import os
 import sys
@@ -77,42 +76,10 @@ def _check_generation_manifests(output, manifest):
     return names
 
 
-_ADAPTER_SHA256_CACHE = {}
-
-
 def _adapter_identity(adapter):
-    if adapter is None:
-        return None
-    path = Path(adapter).absolute()
-    weights = path / "adapter_model.safetensors"
-    config = json.loads((path / "adapter_config.json").read_text())
+    from slime_plugins.dcc.adapter_identity import adapter_content_identity
 
-    def fingerprint(stat):
-        return (stat.st_dev, stat.st_ino, stat.st_ctime_ns, stat.st_mtime_ns, stat.st_size)
-
-    before = weights.stat()
-    # Local filesystem facts only invalidate this process's digest cache. They
-    # must not become semantic identity shared across hosts or copied files.
-    key = (str(weights.resolve()), *fingerprint(before))
-    digest = _ADAPTER_SHA256_CACHE.get(key)
-    if digest is None:
-        hasher = hashlib.sha256()
-        with weights.open("rb") as stream:
-            if fingerprint(os.fstat(stream.fileno())) != fingerprint(before):
-                raise ValueError("Adapter checkpoint changed while computing content identity")
-            for block in iter(lambda: stream.read(1024 * 1024), b""):
-                hasher.update(block)
-            if fingerprint(os.fstat(stream.fileno())) != fingerprint(before):
-                raise ValueError("Adapter checkpoint changed while computing content identity")
-        if fingerprint(weights.stat()) != fingerprint(before):
-            raise ValueError("Adapter checkpoint changed while computing content identity")
-        digest = hasher.hexdigest()
-        _ADAPTER_SHA256_CACHE[key] = digest
-    return {
-        "path": str(path), "config": config,
-        "weights_file": weights.name, "weights_bytes": before.st_size,
-        "weights_sha256": digest,
-    }
+    return adapter_content_identity(adapter)
 
 
 def _saved_runtime(output):

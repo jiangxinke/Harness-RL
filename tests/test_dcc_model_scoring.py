@@ -221,6 +221,8 @@ def test_adapter_identity_accepts_copied_weights_and_rejects_changed_content(tmp
 
 
 def test_adapter_identity_caches_unchanged_small_checkpoint(monkeypatch, tmp_path):
+    from slime_plugins.dcc import adapter_identity
+
     (tmp_path / "adapter_config.json").write_text('{"r":16}')
     weights = tmp_path / "adapter_model.safetensors"
     weights.write_bytes(b"small adapter")
@@ -228,7 +230,7 @@ def test_adapter_identity_caches_unchanged_small_checkpoint(monkeypatch, tmp_pat
     identity = namespace["_adapter_identity"](tmp_path)
     def unexpected_hash(*args, **kwargs):
         raise AssertionError("Unchanged adapter should use the cached digest")
-    monkeypatch.setattr(namespace["hashlib"], "sha256", unexpected_hash)
+    monkeypatch.setattr(adapter_identity.hashlib, "sha256", unexpected_hash)
     assert namespace["_adapter_identity"](tmp_path) == identity
     assert namespace["_adapter_identity"](None) is None
     (tmp_path / "adapter_config.json").write_text('{"r":8}')
