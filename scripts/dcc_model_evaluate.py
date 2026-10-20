@@ -43,7 +43,8 @@ from slime_plugins.dcc.web_data_discovery import (
     web_data_discovery_configuration, validate_web_data_discovery_records,
     validate_web_data_discovery_messages,
 )
-from slime_plugins.dcc.web_structured import web_structured_actions_configuration, web_structured_configuration
+from slime_plugins.dcc.web_structured import (web_structured_actions_configuration, web_structured_configuration,
+    web_multi_citation_configuration, validate_web_multi_citation_records)
 from slime_plugins.dcc.prompt_history import (
     add_prompt_history_arguments, prompt_history_from_arguments, validate_prompt_history_records,
 )
@@ -143,6 +144,7 @@ def _score_predictions(output, tasks, *, require_ownership=False):
     validate_web_navigation_records((manifest, runtime or {}))
     validate_web_research_records((manifest, runtime or {}))
     discovery = validate_web_data_discovery_records((manifest, runtime or {}))
+    validate_web_multi_citation_records((manifest, runtime or {}))
     if discovery["enabled"]:
         for task in tasks:
             if task.benchmark == "widesearch":
@@ -381,6 +383,10 @@ async def _evaluate(args, *, browser_reader=None):
     navigation = web_navigation_configuration(navigation_ledger)
     if navigation_ledger and not (structured_final and structured_actions and backend == "vllm"):
         raise ValueError("--web-navigation-ledger requires --web-structured-final, --web-structured-actions and vLLM")
+    multi_citation_enabled = getattr(args, "web_multi_citation", False)
+    multi_citation = web_multi_citation_configuration(multi_citation_enabled)
+    if multi_citation_enabled and not (structured_final and structured_actions and backend == "vllm"):
+        raise ValueError("--web-multi-citation requires --web-structured-final, --web-structured-actions and vLLM")
     discovery_guidance = getattr(args, "web_data_discovery_guidance", False)
     discovery = web_data_discovery_configuration(discovery_guidance)
     if discovery_guidance and not (structured_final and structured_actions and backend == "vllm"):
@@ -504,6 +510,8 @@ async def _evaluate(args, *, browser_reader=None):
         manifest["web_research_checkpoints"] = research
     if discovery_guidance:
         manifest["web_data_discovery_guidance"] = discovery
+    if multi_citation_enabled:
+        manifest["web_multi_citation"] = multi_citation
     if cached_rows_enabled:
         manifest["web_cached_rows"] = cached_rows
     manifest["episode_prompt_version"] = EPISODE_PROMPT_VERSION
@@ -591,6 +599,7 @@ async def _evaluate(args, *, browser_reader=None):
         if previous_runtime is not None:
             validate_web_research_records((manifest, previous_runtime))
             validate_web_data_discovery_records((manifest, previous_runtime))
+            validate_web_multi_citation_records((manifest, previous_runtime))
             validate_web_cached_rows_records((manifest, previous_runtime))
         _check_saved_adapter(args.adapter, previous_runtime)
         if previous_runtime is not None and previous_runtime.get("web_browser_reader") != browser_runtime:
@@ -614,6 +623,8 @@ async def _evaluate(args, *, browser_reader=None):
                     async_options["web_research_checkpoints"] = True
                 if discovery_guidance:
                     async_options["web_data_discovery_guidance"] = True
+                if multi_citation_enabled:
+                    async_options["web_multi_citation"] = True
                 if cached_rows_enabled:
                     async_options["web_cached_rows"] = True
                 if bounded_whitespace:
@@ -662,6 +673,7 @@ async def _evaluate(args, *, browser_reader=None):
                 provenance["adapter"] = identity
                 validate_web_research_records((manifest, provenance))
                 validate_web_data_discovery_records((manifest, provenance))
+                validate_web_multi_citation_records((manifest, provenance))
                 validate_web_cached_rows_records((manifest, provenance))
                 if previous_runtime is not None and provenance != previous_runtime:
                     raise ValueError("Inference runtime or adapter changed; use a new output directory")
@@ -699,6 +711,7 @@ async def _evaluate(args, *, browser_reader=None):
                 **({"web_navigation_ledger": True} if navigation_ledger else {}),
                 **({"web_research_checkpoints": True} if research_checkpoints else {}),
                 **({"web_data_discovery_guidance": True} if discovery_guidance else {}),
+                **({"web_multi_citation": True} if multi_citation_enabled else {}),
                 **({"web_cached_rows": True} if cached_rows_enabled else {}),
                 **({"web_tools_factory": lambda: WebTools(browser_reader=browser_reader)}
                    if browser_reader is not None else {}),
@@ -1076,6 +1089,8 @@ def main():
                         help="Add bounded navigation/read-window advice from observed Web metadata (requires structured actions/final and vLLM)")
     parser.add_argument("--web-research-checkpoints", action="store_true",
                         help="Add request-only public-column and remaining-turn research guidance (requires structured actions/final and vLLM)")
+    parser.add_argument("--web-multi-citation", action="store_true",
+                        help="Allow up to four actually read citation URLs per Web row (requires structured actions/final and vLLM; default one)")
     parser.add_argument("--web-data-discovery-guidance", action="store_true",
                         help="Add generic source-discovery/API navigation instructions once (requires structured Web actions/final and vLLM)")
     parser.add_argument("--web-cached-rows", action="store_true",

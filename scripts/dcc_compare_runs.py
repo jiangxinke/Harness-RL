@@ -53,6 +53,7 @@ from slime_plugins.dcc.web_navigation import web_navigation_configuration, valid
 from slime_plugins.dcc.web_rows import validate_web_cached_rows_records
 from slime_plugins.dcc.web_research import validate_web_research_records
 from slime_plugins.dcc.web_data_discovery import validate_web_data_discovery_records
+from slime_plugins.dcc.web_structured import validate_web_multi_citation_records
 from slime_plugins.dcc.web_structured import web_structured_actions_configuration, web_structured_configuration
 from slime_plugins.dcc.prompt_history import validate_prompt_history_records
 
@@ -253,6 +254,7 @@ def validate_protocols(baseline, trained, baseline_protocol, trained_protocol):
         validate_web_navigation_records((run["manifest"], run["runtime"] or {}, generation))
         validate_web_research_records((run["manifest"], run["runtime"] or {}, generation))
         validate_web_data_discovery_records((run["manifest"], run["runtime"] or {}, generation))
+        validate_web_multi_citation_records((run["manifest"], run["runtime"] or {}, generation))
         validate_web_cached_rows_records((run["manifest"], run["runtime"] or {}, generation))
         review_records = (run["manifest"], run["runtime"] or {}, generation)
         validate_web_whitespace_records(review_records)

@@ -137,7 +137,7 @@ def _cached_grammar(serialized_schema, explicit_review):
     return _bound_whitespace(grammar)
 
 
-def preflight_web_bounded_whitespace(*, explicit_review=False, cached_rows=False):
+def preflight_web_bounded_whitespace(*, explicit_review=False, cached_rows=False, multi_citation=False):
     """Check converter, grammar and vLLM parameter compatibility without a model."""
     import xgrammar
     from vllm.sampling_params import StructuredOutputsParams
@@ -147,8 +147,8 @@ def preflight_web_bounded_whitespace(*, explicit_review=False, cached_rows=False
     _require_converter()
     for columns, urls in ((["name"], []), (["name"], ["https://example.org/source"]),
                           (["中文"], ["https://example.org/source?name=%22"])):
-        schemas = [web_final_schema(columns, urls)]
-        schemas.extend(web_action_schema(columns, urls, successful_search=state, cached_rows=cached_rows) for state in (False, True))
+        schemas = [web_final_schema(columns, urls, multi_citation=multi_citation)]
+        schemas.extend(web_action_schema(columns, urls, successful_search=state, cached_rows=cached_rows, multi_citation=multi_citation) for state in (False, True))
         for schema in schemas:
             if explicit_review:
                 schema = web_review_schema(schema)

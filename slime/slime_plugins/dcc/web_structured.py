@@ -8,6 +8,35 @@ from copy import deepcopy
 
 WEB_FINAL_SCHEMA_VERSION = "web-final-nonempty-row-read-citations-v2"
 WEB_ACTION_SCHEMA_VERSION = "web-single-action-search-first-v1"
+WEB_MULTI_CITATION_VERSION = "web-multi-read-citations-v1"
+
+
+def web_multi_citation_configuration(enabled=False):
+    """Opt in without changing the legacy schema or its recorded version."""
+    if type(enabled) is not bool:
+        raise ValueError("web_multi_citation must be a boolean")
+    return {"enabled": enabled, "version": WEB_MULTI_CITATION_VERSION if enabled else None,
+            "max_citations": 4 if enabled else 1}
+
+
+def validate_web_multi_citation_records(records):
+    values = [record.get("web_multi_citation", web_multi_citation_configuration(False))
+              for record in records]
+    if not values:
+        raise ValueError("Web multi-citation requires configuration records")
+    for value in values:
+        if (not isinstance(value, dict) or type(value.get("enabled")) is not bool
+                or value != web_multi_citation_configuration(value["enabled"])):
+            raise ValueError("Web multi-citation requires complete supported configuration")
+    if any(value != values[0] for value in values[1:]):
+        raise ValueError("Web multi-citation differs between manifest, runtime and protocol")
+    if values[0]["enabled"] and any(
+            record.get("web_structured_final") != web_structured_configuration(True)
+            or record.get("web_structured_actions") != web_structured_actions_configuration(True)
+            or record.get("inference_backend", record.get("backend")) != "vllm"
+            for record in records):
+        raise ValueError("Web multi-citation requires matching structured Web actions/final and vLLM")
+    return values[0]
 
 
 def web_structured_configuration(enabled=False):
@@ -24,7 +53,7 @@ def web_structured_actions_configuration(enabled=False):
             "backend": "xgrammar" if enabled else None}
 
 
-def web_final_schema(columns, read_urls):
+def web_final_schema(columns, read_urls, *, multi_citation=False):
     if (not isinstance(columns, list) or not columns or
             any(not isinstance(column, str) or not column or column == "citations" for column in columns)):
         raise ValueError("Structured Web final requires declared nonempty public answer columns")
@@ -34,7 +63,8 @@ def web_final_schema(columns, read_urls):
         raise ValueError("Structured Web citations require actual read URL strings")
     urls = sorted(set(read_urls))
     properties = {column: {"type": ["string", "number", "boolean", "null"]} for column in columns}
-    properties["citations"] = {"type": "array", "minItems": 1, "maxItems": 1,
+    properties["citations"] = {"type": "array", "minItems": 1,
+                               "maxItems": web_multi_citation_configuration(multi_citation)["max_citations"],
                                "items": {"type": "string", **({"enum": urls} if urls else {})}}
     row = {"type": "object", "properties": properties,
            "required": [*columns, "citations"], "additionalProperties": False}
@@ -58,7 +88,7 @@ def web_final_schema(columns, read_urls):
             "required": ["answer"], "additionalProperties": False}
 
 
-def web_action_schema(columns, read_urls, *, successful_search, cached_rows=False):
+def web_action_schema(columns, read_urls, *, successful_search, cached_rows=False, multi_citation=False):
     """One action per turn; only a real successful search opens other branches.
 
     Columns and citation URLs come from the same public/observed inputs as the
@@ -69,7 +99,7 @@ def web_action_schema(columns, read_urls, *, successful_search, cached_rows=Fals
         raise ValueError("successful_search must be a boolean")
     if type(cached_rows) is not bool:
         raise ValueError("cached_rows must be a boolean")
-    final = web_final_schema(columns, read_urls)
+    final = web_final_schema(columns, read_urls, multi_citation=multi_citation)
     search = {
         "type": "object", "properties": {
             "tool": {"const": "web_search"},
@@ -108,7 +138,7 @@ def validate_web_structured_schema(schema):
                          "public column keys and source URLs must remain exact") from exc
 
 
-def preflight_web_structured(*, actions=False, explicit_review=False, cached_rows=False):
+def preflight_web_structured(*, actions=False, explicit_review=False, cached_rows=False, multi_citation=False):
     """Check installed API/backend and compile a schema without creating an engine."""
     if type(cached_rows) is not bool or cached_rows and not actions:
         raise ValueError("Cached rows preflight requires structured actions")
@@ -122,9 +152,10 @@ def preflight_web_structured(*, actions=False, explicit_review=False, cached_row
             raise ValueError("SamplingParams lacks structured_outputs")
         for columns, urls in ((["name"], []), (["name"], ["https://example.org/source"]),
                               (["中文"], ["https://example.org/source?name=%22"])):
-            schemas = [web_final_schema(columns, urls)]
+            schemas = [web_final_schema(columns, urls, multi_citation=multi_citation)]
             if actions:
-                schemas.extend(web_action_schema(columns, urls, successful_search=state, cached_rows=cached_rows)
+                schemas.extend(web_action_schema(columns, urls, successful_search=state, cached_rows=cached_rows,
+                                                 multi_citation=multi_citation)
                                for state in (False, True))
             if explicit_review:
                 from .web_review import web_review_schema

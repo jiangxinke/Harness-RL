@@ -22,7 +22,7 @@ from .web_structured import (
     preflight_web_structured,
     validate_web_structured_schema,
     web_structured_actions_configuration,
-    web_structured_configuration,
+    web_structured_configuration, web_multi_citation_configuration,
 )
 
 from .web_whitespace import (
@@ -328,7 +328,7 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
                      seed=42, revision=None, tokenizer_revision=None, enforce_eager=False,
                      asynchronous=False, evaluation_sampling=None, web_structured_final=False,
                      web_structured_actions=False, web_explicit_review=False,
-                     web_bounded_whitespace=False, web_navigation_ledger=False, web_research_checkpoints=False, web_data_discovery_guidance=False, web_cached_rows=False,
+                     web_bounded_whitespace=False, web_navigation_ledger=False, web_research_checkpoints=False, web_data_discovery_guidance=False, web_multi_citation=False, web_cached_rows=False,
                      quantization="none", fp8_validation_dir=None):
     """Load BF16 or explicit FP8 vLLM inference without changing the HF trainer.
 
@@ -349,6 +349,9 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
     navigation = web_navigation_configuration(web_navigation_ledger)
     if web_navigation_ledger and not (web_structured_actions and web_structured_final):
         raise ValueError("web_navigation_ledger requires structured Web actions and final")
+    multi_citation = web_multi_citation_configuration(web_multi_citation)
+    if web_multi_citation and not (web_structured_actions and web_structured_final):
+        raise ValueError("web_multi_citation requires structured Web actions and final")
     discovery = web_data_discovery_configuration(web_data_discovery_guidance)
     if web_data_discovery_guidance and not (web_structured_actions and web_structured_final):
         raise ValueError("web_data_discovery_guidance requires structured Web actions and final")
@@ -359,6 +362,8 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
     if web_cached_rows and not (web_structured_actions and web_structured_final):
         raise ValueError("web_cached_rows requires structured Web actions and final")
     cached_options = {"cached_rows": True} if web_cached_rows else {}
+    if web_multi_citation:
+        cached_options["multi_citation"] = True
     whitespace = web_bounded_whitespace_configuration(web_bounded_whitespace)
     if web_bounded_whitespace and not web_structured_final:
         raise ValueError("web_bounded_whitespace requires web_structured_final=True")
@@ -487,6 +492,8 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
         provenance["web_research_checkpoints"] = research
     if web_data_discovery_guidance:
         provenance["web_data_discovery_guidance"] = discovery
+    if web_multi_citation:
+        provenance["web_multi_citation"] = multi_citation
     if web_cached_rows:
         provenance["web_cached_rows"] = cached_rows
     if asynchronous:

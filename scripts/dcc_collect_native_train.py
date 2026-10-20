@@ -196,6 +196,10 @@ def make_runner(benchmark, schema_profile, *, timeout_seconds, web_tools_factory
     profile = schema_profile.web if benchmark == "widesearch" else schema_profile.cuad
     require(profile is not None, "CUAD tasks require the approved CUAD profile")
     kwargs = {} if web_tools_factory is None else {"web_tools_factory": web_tools_factory}
+    if benchmark == "widesearch" and schema_profile.web.data_discovery_guidance:
+        kwargs["web_data_discovery_guidance"] = True
+    if benchmark == "widesearch" and schema_profile.web.multi_citation:
+        kwargs["web_multi_citation"] = True
     return EpisodeRunner(max_steps=profile.max_steps, max_new_tokens=total_tokens,
         temperature=0.0, evaluation_temperature=0.0, initial_chunks=4,
         timeout_seconds=timeout_seconds, auto_read_sources=0,
@@ -217,6 +221,17 @@ async def generate(tasks, native, output, *, collection_id, profile, schema_prof
             "Actual prompt history differs from the explicit collection identity")
     require(native.budget == approved_identity.budget,
             "Actual native phase budgets/sampling differ from approved collection identity")
+    from slime_plugins.dcc.web_data_discovery import web_data_discovery_configuration
+    from slime_plugins.dcc.web_structured import web_multi_citation_configuration
+    for attribute, name, configuration in (
+            ("data_discovery_guidance", "web_data_discovery_guidance", web_data_discovery_configuration),
+            ("multi_citation", "web_multi_citation", web_multi_citation_configuration)):
+        declared = profile.get("web", {}).get(attribute, False)
+        require(type(declared) is bool and declared is getattr(schema_profile.web, attribute),
+                "Optional Web harness differs between approved profile and actual runner: " + name)
+        require(json_text(native.base.provenance.get(name, configuration(False)))
+                == json_text(configuration(declared)),
+                "Actual optional Web harness provenance differs from approved collection: " + name)
     require(type(concurrency) is int and concurrency > 0, "Positive request concurrency required")
     for task in tasks:
         check_public_task(task)
@@ -504,6 +519,10 @@ def main():
         if command == "generate":
             add_prompt_history_arguments(part)
             add_phase_timing_arguments(part)
+            part.add_argument("--web-data-discovery-guidance", action="store_true",
+                              help="Opt in to discovery instructions; must match the approved Web TRAIN profile")
+            part.add_argument("--web-multi-citation", action="store_true",
+                              help="Allow up to four fetched citations per row; must match the approved Web TRAIN profile")
             part.add_argument("--public-train-data", required=True)
             part.add_argument("--collection-id", required=True)
             part.add_argument("--max-tasks-per-benchmark", type=int, default=2, help="Fixed pilot default, selected by task ID only")
@@ -536,6 +555,12 @@ def main():
                         if "prompt_history" in profile["identity"] else PromptHistoryConfig())
     require(history_configuration == declared_history,
             "Prompt history flags must exactly match the new approved collection profile")
+    require(args.web_data_discovery_guidance
+            == profile.get("web", {}).get("data_discovery_guidance", False),
+            "Discovery guidance flag must exactly match the approved Web TRAIN profile")
+    require(args.web_multi_citation
+            == profile.get("web", {}).get("multi_citation", False),
+            "Multi-citation flag must exactly match the approved Web TRAIN profile")
     tasks = fixed_tasks(load_public_train(args.public_train_data), max_tasks_per_benchmark=args.max_tasks_per_benchmark,
                         rank=args.rank, world_size=args.world_size)
     if history_configuration.enabled:
@@ -545,12 +570,16 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     require(not list(output.glob(f"*rank{args.rank}.*")), "Generation rank output must be fresh")
     from slime_plugins.dcc.vllm_policy import load_vllm_policy
+    engine_options = ({"web_data_discovery_guidance": True}
+                      if args.web_data_discovery_guidance else {})
+    if args.web_multi_citation:
+        engine_options["web_multi_citation"] = True
     base = load_vllm_policy(args.model, adapter=None, asynchronous=True,
         max_prompt_tokens=identity.max_prompt_tokens, max_model_len=identity.max_model_len,
         tensor_parallel_size=args.tensor_parallel_size, gpu_memory_utilization=args.gpu_memory_utilization,
         seed=identity.generation_seed, evaluation_sampling=EvaluationSampling(),
         enforce_eager=args.vllm_enforce_eager,
-        web_structured_final=True, web_structured_actions=True)
+        web_structured_final=True, web_structured_actions=True, **engine_options)
     require(base.eos_token_ids == list(identity.eos_token_ids)
             and identity.manifest(base.tokenizer) == profile["identity"], "Actual engine tokenizer/EOS differs")
     base.allow_truncation = False

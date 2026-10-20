@@ -88,7 +88,7 @@ def _cached_review_grammar(serialized_schema):
     return "\n".join([*lines, *additions]) + "\n"
 
 
-def preflight_web_review_decoder(*, cached_rows=False):
+def preflight_web_review_decoder(*, cached_rows=False, multi_citation=False):
     """Validate API/converter compatibility without constructing a model engine."""
     import xgrammar
     from vllm.sampling_params import StructuredOutputsParams
@@ -98,8 +98,8 @@ def preflight_web_review_decoder(*, cached_rows=False):
     configuration = web_review_decoder_configuration()
     for columns, urls in ((["name"], []), (["name"], ["https://example.org/source"]),
                           (["中文"], ["https://example.org/source?name=%22"])):
-        schemas = [web_final_schema(columns, urls)]
-        schemas.extend(web_action_schema(columns, urls, successful_search=state, cached_rows=cached_rows) for state in (False, True))
+        schemas = [web_final_schema(columns, urls, multi_citation=multi_citation)]
+        schemas.extend(web_action_schema(columns, urls, successful_search=state, cached_rows=cached_rows, multi_citation=multi_citation) for state in (False, True))
         for schema in schemas:
             grammar = web_review_grammar(web_review_schema(schema))
             xgrammar.Grammar.from_ebnf(grammar)

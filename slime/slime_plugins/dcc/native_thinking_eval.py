@@ -569,13 +569,15 @@ def validate_native_sidecars(output, saved, manifest, runtime, owners, tasks, *,
     """
     from jsonschema import Draft202012Validator
     from .episode import _WebEvidence, _answer_columns
-    from .web_structured import web_action_schema, web_final_schema
+    from .web_structured import (web_action_schema, web_final_schema,
+                                 validate_web_multi_citation_records)
     from .web_review import web_review_schema
     from .web_data_discovery import (
         validate_web_data_discovery_records, validate_web_data_discovery_messages,
     )
 
     discovery = validate_web_data_discovery_records((manifest, runtime or {}))
+    multi_citation = validate_web_multi_citation_records((manifest, runtime or {}))["enabled"]
     config = manifest.get("native_thinking")
     history_configuration = validate_prompt_history_records((manifest, runtime or {}))
     runtime_config = (runtime or {}).get("native_thinking")
@@ -690,10 +692,12 @@ def validate_native_sidecars(output, saved, manifest, runtime, owners, tasks, *,
                 schema = cuad_final_schema() if index == manifest["max_steps"] - 1 else cuad_action_schema()
             else:
                 if index == manifest["max_steps"] - 1:
-                    schema = web_final_schema(_answer_columns(task_map[task_id]), evidence.fetched_sources)
+                    schema = web_final_schema(_answer_columns(task_map[task_id]), evidence.fetched_sources,
+                                              multi_citation=multi_citation)
                 else:
                     schema = web_action_schema(_answer_columns(task_map[task_id]), evidence.fetched_sources,
-                        successful_search=bool(evidence.searches), cached_rows=manifest.get("web_cached_rows", {}).get("enabled", False))
+                        successful_search=bool(evidence.searches), cached_rows=manifest.get("web_cached_rows", {}).get("enabled", False),
+                        multi_citation=multi_citation)
                 if manifest.get("web_explicit_review", {}).get("enabled", False):
                     schema = web_review_schema(schema)
             if trace.get("json_schema") != schema:

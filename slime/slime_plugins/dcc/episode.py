@@ -378,8 +378,9 @@ def final_turn_message(task: Task, evidence: _WebEvidence | None = None) -> dict
 
 
 class EpisodeRunner:
-    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900, retrieval_profile: RetrievalProfile | None = None, auto_read_sources: int = 0, retrieval_context_chars: int = 0, retrieval_max_context_chars: int = 16000, evaluation_temperature: float = 0.0, web_structured_final: bool = False, web_structured_actions: bool = False, web_explicit_review: bool = False, web_navigation_ledger: bool = False, web_research_checkpoints: bool = False, web_data_discovery_guidance: bool = False, web_cached_rows: bool = False, cuad_structured_actions: bool = False) -> None:
-        from .web_structured import web_structured_actions_configuration, web_structured_configuration
+    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900, retrieval_profile: RetrievalProfile | None = None, auto_read_sources: int = 0, retrieval_context_chars: int = 0, retrieval_max_context_chars: int = 16000, evaluation_temperature: float = 0.0, web_structured_final: bool = False, web_structured_actions: bool = False, web_explicit_review: bool = False, web_navigation_ledger: bool = False, web_research_checkpoints: bool = False, web_data_discovery_guidance: bool = False, web_multi_citation: bool = False, web_cached_rows: bool = False, cuad_structured_actions: bool = False) -> None:
+        from .web_structured import (web_structured_actions_configuration, web_structured_configuration,
+                                     web_multi_citation_configuration)
 
         from .cuad_structured import cuad_structured_configuration
 
@@ -396,6 +397,9 @@ class EpisodeRunner:
         self.web_navigation_ledger = web_navigation_configuration(web_navigation_ledger)["enabled"]
         if self.web_navigation_ledger and not (self.web_structured_actions and self.web_structured_final):
             raise ValueError("web_navigation_ledger requires structured Web actions and final")
+        self.web_multi_citation = web_multi_citation_configuration(web_multi_citation)["enabled"]
+        if self.web_multi_citation and not (self.web_structured_actions and self.web_structured_final):
+            raise ValueError("web_multi_citation requires structured Web actions and final")
         from .web_data_discovery import web_data_discovery_configuration
 
         self.web_data_discovery_guidance = web_data_discovery_configuration(web_data_discovery_guidance)["enabled"]
@@ -555,11 +559,12 @@ class EpisodeRunner:
                         if not callable(call):
                             raise ValueError("Structured Web generation requires a policy with generate_structured capability")
                         if index == self.max_steps - 1:
-                            options["json_schema"] = web_final_schema(_answer_columns(task), evidence.fetched_sources)
+                            options["json_schema"] = web_final_schema(
+                                _answer_columns(task), evidence.fetched_sources, multi_citation=self.web_multi_citation)
                         else:
                             options["json_schema"] = web_action_schema(
                                 _answer_columns(task), evidence.fetched_sources,
-                                successful_search=bool(evidence.searches),
+                                successful_search=bool(evidence.searches), multi_citation=self.web_multi_citation,
                                 **({"cached_rows": True} if cached_rows_enabled else {}),
                             )
                         if review_enabled:

@@ -285,6 +285,8 @@ class WebSchemaProfile:
     cached_rows: bool = False
     navigation_ledger: bool = False
     profile_version: str = "dcc-native-train-profile-v1"
+    data_discovery_guidance: bool = False
+    multi_citation: bool = False
 
     def validate(self):
         _require(type(self.max_steps) is int and self.max_steps > 0,
@@ -293,6 +295,16 @@ class WebSchemaProfile:
                  "Trusted Web schema flags must be booleans")
         from dcc_review_training import LEGACY_PROFILE, REVIEW20_PROFILE, WEB32K_PROFILE
         _require(type(self.navigation_ledger) is bool, "Trusted navigation flag must be boolean")
+        _require(type(self.data_discovery_guidance) is bool,
+                 "Trusted discovery guidance flag must be boolean")
+        _require(type(self.multi_citation) is bool,
+                 "Trusted multi-citation flag must be boolean")
+        _require(not self.data_discovery_guidance or
+                 self.profile_version in {REVIEW20_PROFILE, WEB32K_PROFILE},
+                 "Discovery guidance requires an explicit reviewed Web TRAIN profile")
+        _require(not self.multi_citation or
+                 self.profile_version in {REVIEW20_PROFILE, WEB32K_PROFILE},
+                 "Multi-citation requires an explicit reviewed Web TRAIN profile")
         if self.profile_version in {REVIEW20_PROFILE, WEB32K_PROFILE}:
             _require(self.max_steps == 20 and self.explicit_review and self.navigation_ledger
                      and not self.cached_rows, "Explicit TRAIN20 requires review/navigation on and cached rows off")

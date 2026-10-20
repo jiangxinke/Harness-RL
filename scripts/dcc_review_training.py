@@ -78,7 +78,10 @@ def approved_web_profile(profile, profile_class):
     keys = {"max_steps", "explicit_review", "cached_rows"}
     if version in {REVIEW20_PROFILE, WEB32K_PROFILE}:
         keys.add("navigation_ledger")
-    require(isinstance(web, dict) and set(web) == keys, "Invalid approved Web profile fields")
+    optional_web_keys = ({"data_discovery_guidance", "multi_citation"} if version in {
+        REVIEW20_PROFILE, WEB32K_PROFILE} else set())
+    require(isinstance(web, dict) and keys <= set(web)
+            and set(web) <= keys | optional_web_keys, "Invalid approved Web profile fields")
     result = profile_class(**web, profile_version=version)
     result.validate()
     return result
@@ -108,6 +111,7 @@ def review_request_state(profile, record, collector=None):
     from slime_plugins.dcc.web_structured import web_action_schema, web_final_schema
 
     profile.validate()
+    schema_options = {"multi_citation": True} if profile.multi_citation else {}
     require(profile.profile_version in {REVIEW20_PROFILE, WEB32K_PROFILE},
             "Only explicit TRAIN20 review/navigation profile may use replay controls")
     require(record.get("source") == "independent_curriculum" and record.get("split") == "train",
@@ -130,6 +134,10 @@ def review_request_state(profile, record, collector=None):
                 metadata={"evaluation": {"required": columns}})
     anchors = EpisodeRunner(max_steps=20, initial_chunks=4).initial_messages(task)
     anchors[0]["content"] += WEB_EXPLICIT_REVIEW_INSTRUCTIONS + WEB_NAVIGATION_INSTRUCTIONS
+    if profile.data_discovery_guidance:
+        from slime_plugins.dcc.web_data_discovery import WEB_DATA_DISCOVERY_GUIDANCE
+
+        anchors[0]["content"] += WEB_DATA_DISCOVERY_GUIDANCE
     require(messages[:2] == anchors, "Exact approved TRAIN20 review/navigation system and public task required")
     evidence, events, turn, index = _WebEvidence(), [], 0, 2
     observation_prefix = "Tool observation (source material):\n"
@@ -137,7 +145,7 @@ def review_request_state(profile, record, collector=None):
         require(turn < 19 and index + 1 < len(messages), "Historical tool exceeds TRAIN20 budget")
         action = strict_json(messages[index]["content"])
         schema = web_review_schema(web_action_schema(columns, evidence.fetched_sources,
-            successful_search=bool(evidence.searches), cached_rows=False))
+            successful_search=bool(evidence.searches), cached_rows=False, **schema_options))
         Draft202012Validator(schema).validate(action)
         require(isinstance(action, dict) and "answer" not in action
                 and action.get("tool") in {"web_search", "fetch_url"},
@@ -168,7 +176,7 @@ def review_request_state(profile, record, collector=None):
     require(messages[index:] == controls,
             "Exact actual navigation snapshot and approved last-turn control required")
     require(controls[0]["content"].startswith(WEB_NAVIGATION_PREFIX), "Navigation renderer prefix changed")
-    schema = (web_final_schema(columns, evidence.fetched_sources) if turn == 19 else
+    schema = (web_final_schema(columns, evidence.fetched_sources, **schema_options) if turn == 19 else
               web_action_schema(columns, evidence.fetched_sources,
-                                successful_search=bool(evidence.searches), cached_rows=False))
+                                successful_search=bool(evidence.searches), cached_rows=False, **schema_options))
     return web_review_schema(schema), set(range(index, len(messages)))

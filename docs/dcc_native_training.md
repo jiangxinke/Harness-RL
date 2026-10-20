@@ -32,6 +32,34 @@ runtime flags must agree, and the full original request remains available for
 replay. Use a separate experiment when increasing the prompt budget; preserve
 older CUAD data under its original identity.
 
+Reviewed Web TRAIN profiles can explicitly enable source-discovery instructions
+with `"data_discovery_guidance": true` in the profile's `web` object and
+`generate --web-data-discovery-guidance`. The CLI flag and profile must agree
+before public tasks or model weights are loaded. The setting also reaches the
+engine provenance and actual episode runner. Exact replay requires the same
+system suffix once, following review/navigation instructions; removing,
+duplicating or changing it invalidates the record. The Web32K profile can
+combine this option with whole-turn history. This adds no tools, source records,
+URLs, turns or evidence exceptions, and leaves both native sampling phases
+unchanged. Omitting the field and flag retains the existing default-off profile
+and messages. Use a new collection ID and actual committed source receipt for
+the new experiment; existing frozen sources and collections remain unchanged.
+
+The same reviewed profiles can independently set `"multi_citation": true` and
+`generate --web-multi-citation` to allow up to four fetched citations per answer
+row. The CLI and profile must agree before public data or model loading. Exact
+native replay reconstructs the corresponding early-action and final schemas
+from the approved profile and original fetched URLs. Unread URLs and rows with
+more than four citations remain invalid. Omitting this option preserves the
+original one-citation schema and profile JSON; it can be combined with discovery
+guidance for a separate, explicitly configured collection.
+
+Prospective preference export replays the same approved source settings for both
+the original action schema and the final-only candidate schema. Enabled controls
+are explicitly frozen and must match the actual candidate engine provenance;
+old freezes retain their default-off JSON fields. This changes neither candidate
+seeds, native token targets, journal closure nor the separate TRAIN reward gate.
+
 Pass the selected Web/CUAD files and the same approved profile to
 `scripts/dcc_tool_sft.py`, using `--native-train-profile` and
 `--native-expected-source`. This validates all bundles before model loading.

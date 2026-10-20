@@ -852,7 +852,7 @@ class WebTools:
                     # the successful HTTP source if the optional renderer fails.
                     html = content_type.split(";", 1)[0].strip().lower() in {"text/html", "application/xhtml+xml"}
                     challenge = len(text) < 4000 and re.search(
-                        r"verify (?:that )?you are human|enable javascript and cookies|checking your browser|^\s*(?:access denied|just a moment|百度安全验证|请输入验证码)(?:\b|\s|[.!：:])",
+                        r"verify (?:that )?you are human|verify (?:that )?you(?: are|'re|’re) not a robot|enable javascript and cookies|checking your browser|^\s*(?:access denied|just a moment|百度安全验证|请输入验证码)(?:\b|\s|[.!：:])",
                         text[:1200], re.IGNORECASE,
                     )
                     if self.browser_reader is not None and html and not challenge:
@@ -892,7 +892,7 @@ class WebTools:
                 # A 200 status can still be an access challenge. Do not count
                 # that page as factual evidence or encourage citing it.
                 if len(text) < 4000 and re.search(
-                    r"verify (?:that )?you are human|enable javascript and cookies|checking your browser|^\s*(?:access denied|just a moment|百度安全验证|请输入验证码)(?:\b|\s|[.!：:])",
+                    r"verify (?:that )?you are human|verify (?:that )?you(?: are|'re|’re) not a robot|enable javascript and cookies|checking your browser|^\s*(?:access denied|just a moment|百度安全验证|请输入验证码)(?:\b|\s|[.!：:])",
                     text[:1200], re.IGNORECASE,
                 ):
                     return {"url": url, "error": "Source returned an access challenge, not article text. Fetch a different public source."}

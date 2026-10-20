@@ -44,6 +44,61 @@ SELECTION = "task-id-order-seeded-shuffle-first-complete-final-per-task-v1"
 BENCHMARKS = ("cuad", "widesearch")
 OBSERVATION = "Tool observation (source material):\n"
 FEEDBACK = "Evidence check: final answer rejected."
+OPTIONAL_WEB_HARNESS = {
+    "web_data_discovery_guidance": "data_discovery_guidance",
+    "web_multi_citation": "multi_citation",
+}
+
+
+def optional_web_harness(freeze):
+    """Only enabled optional controls extend an existing prospective freeze."""
+    for name in OPTIONAL_WEB_HARNESS:
+        require(name not in freeze or freeze[name] is True,
+                "Optional frozen Web harness controls must be explicit true booleans")
+    return {name: True for name in OPTIONAL_WEB_HARNESS if freeze.get(name) is True}
+
+
+def validate_optional_web_prefixes(freeze, prefixes):
+    """Bind actual public anchors and every final-row cap to the frozen flags.
+
+    This also detects removed declarations when an old freeze has no optional
+    fields or source-approval file. It never changes a prefix or accepts flags
+    from the prefix itself.
+    """
+    from slime_plugins.dcc.web_data_discovery import (
+        WEB_DATA_DISCOVERY_PREFIX, validate_web_data_discovery_messages,
+    )
+    options = optional_web_harness(freeze)
+    for prefix in prefixes:
+        if prefix.benchmark != "widesearch":
+            continue
+        messages, schema = _strict_json(prefix.messages_json), _strict_json(prefix.schema_json)
+        require(isinstance(messages, list) and bool(messages) and isinstance(messages[0], dict)
+                and messages[0].get("role") == "system"
+                and isinstance(messages[0].get("content"), str),
+                "Frozen Web prefix requires its original system anchor")
+        if "web_data_discovery_guidance" in options:
+            validate_web_data_discovery_messages(messages)
+        else:
+            require(WEB_DATA_DISCOVERY_PREFIX not in messages[0]["content"],
+                    "Frozen Web prefix guidance differs from optional harness declaration")
+        citations = []
+        def visit(value):
+            if isinstance(value, dict):
+                properties = value.get("properties")
+                if isinstance(properties, dict) and "citations" in properties:
+                    citations.append(properties["citations"])
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+        visit(schema)
+        cap = 4 if "web_multi_citation" in options else 1
+        require(bool(citations) and all(isinstance(field, dict)
+                and field.get("type") == "array" and type(field.get("maxItems")) is int
+                and field["maxItems"] == cap for field in citations),
+                "Frozen Web prefix citation caps differ from optional harness declaration")
 
 
 def checked_seeds(seeds):
@@ -139,6 +194,8 @@ def public_request_schemas(task, messages, *, turn, schemas):
     profile = schemas.cuad if task.benchmark == "cuad" else schemas.web
     require(profile is not None, "Approved public benchmark profile required")
     profile.validate()
+    schema_options = ({"multi_citation": True}
+        if task.benchmark == "widesearch" and profile.multi_citation else {})
     require(type(turn) is int and 0 <= turn < profile.max_steps,
             "Current public turn exceeds approved runner budget")
     anchors = EpisodeRunner(max_steps=profile.max_steps, initial_chunks=4).initial_messages(task)
@@ -147,6 +204,9 @@ def public_request_schemas(task, messages, *, turn, schemas):
         from slime_plugins.dcc.web_navigation import WEB_NAVIGATION_INSTRUCTIONS
         from slime_plugins.dcc.web_review import WEB_EXPLICIT_REVIEW_INSTRUCTIONS
         anchors[0]["content"] += WEB_EXPLICIT_REVIEW_INSTRUCTIONS + WEB_NAVIGATION_INSTRUCTIONS
+        if profile.data_discovery_guidance:
+            from slime_plugins.dcc.web_data_discovery import WEB_DATA_DISCOVERY_GUIDANCE
+            anchors[0]["content"] += WEB_DATA_DISCOVERY_GUIDANCE
         require(messages[:2] == anchors, "Closed public task differs from actual reviewed request anchors")
         original, _ = review_request_state(profile, {
             "source": "independent_curriculum", "split": "train", "task_id": task.id,
@@ -167,7 +227,7 @@ def public_request_schemas(task, messages, *, turn, schemas):
         action = _strict_json(messages[index]["content"])
         action_schema = (cuad_action_schema() if task.benchmark == "cuad" else
             web_action_schema(columns, evidence.fetched_sources,
-                              successful_search=bool(evidence.searches), cached_rows=False))
+                              successful_search=bool(evidence.searches), cached_rows=False, **schema_options))
         if task.benchmark == "widesearch" and profile.explicit_review:
             action_schema = web_review_schema(action_schema)
         Draft202012Validator(action_schema).validate(action)
@@ -192,7 +252,7 @@ def public_request_schemas(task, messages, *, turn, schemas):
         index += 2
     require(history_turn == turn, "Actual turn differs from historical public tool count")
     final = (cuad_final_schema() if task.benchmark == "cuad"
-             else web_final_schema(columns, evidence.fetched_sources))
+             else web_final_schema(columns, evidence.fetched_sources, **schema_options))
     if task.benchmark == "widesearch" and profile.explicit_review:
         final = web_review_schema(final)
         # review_request_state already proves exact ledger/final controls.
@@ -203,7 +263,7 @@ def public_request_schemas(task, messages, *, turn, schemas):
         original = final if controls else (
             cuad_action_schema() if task.benchmark == "cuad" else
             web_action_schema(columns, evidence.fetched_sources,
-                              successful_search=bool(evidence.searches), cached_rows=False))
+                              successful_search=bool(evidence.searches), cached_rows=False, **schema_options))
     validate_final_only_schema(final)
     return original, final, sorted(evidence.fetched_sources)
 
@@ -335,6 +395,10 @@ def export_prefixes(closed_source, destination, *, source_profile, source_receip
         "task_ids": [prefix.task_id for prefix, _ in selected], "selection_policy": SELECTION,
         "maximum_per_benchmark": maximum_per_benchmark, "benchmarks": benchmarks,
         "prefix_selection_seed": prefix_selection_seed, "labels_loaded": False}
+    if any(prefix.benchmark == "widesearch" for prefix, _ in selected):
+        for name, attribute in OPTIONAL_WEB_HARNESS.items():
+            if getattr(schemas.web, attribute):
+                freeze[name] = True
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=False)
     for filename, values in (("prefixes.jsonl", [p.to_dict() for p, _ in selected]),
@@ -366,14 +430,17 @@ def export_prefixes(closed_source, destination, *, source_profile, source_receip
 def load_frozen(directory, tokenizer):
     directory = Path(directory)
     freeze = _strict_json((directory / "freeze.json").read_text())
-    require(isinstance(freeze, dict) and set(freeze) == {"version", "experiment_id", "harness_id",
+    required_keys = {"version", "experiment_id", "harness_id",
         "schema_policy", "native_identity", "source_receipt", "seeds", "prefix_ids", "task_ids",
         "selection_policy", "maximum_per_benchmark", "labels_loaded", "web_explicit_review",
         "benchmarks", "prefix_selection_seed"}
+    require(isinstance(freeze, dict) and required_keys <= set(freeze)
+        and set(freeze) <= required_keys | set(OPTIONAL_WEB_HARNESS)
         and freeze["version"] == VERSION and freeze["labels_loaded"] is False
         and freeze["selection_policy"] == SELECTION
         and freeze["schema_policy"] in {ORIGINAL_ONLY, FINAL_INTERVENTION},
         "Explicit independently approved prospective freeze required")
+    optional_web_harness(freeze)
     checked_seeds(freeze["seeds"])
     require(checked_benchmarks(freeze["benchmarks"]) == freeze["benchmarks"]
             and type(freeze["prefix_selection_seed"]) is int and freeze["prefix_selection_seed"] >= 0
@@ -397,6 +464,18 @@ def load_frozen(directory, tokenizer):
     require(all(sum(prefix.benchmark == benchmark for prefix in prefixes)
                 <= freeze["maximum_per_benchmark"] for benchmark in freeze["benchmarks"]),
             "Public prefixes exceed frozen per-domain cap")
+    validate_optional_web_prefixes(freeze, prefixes)
+    approval_path = directory / "export_source_approval.json"
+    if approval_path.is_file():
+        approval = _strict_json(approval_path.read_text())
+        source_web = source_schema_profile(approval["source_profile"]).web
+        has_web = any(prefix.benchmark == "widesearch" for prefix in prefixes)
+        require(all(freeze.get(name, False) is (has_web and getattr(source_web, attribute))
+                    for name, attribute in OPTIONAL_WEB_HARNESS.items()),
+                "Frozen optional Web harness controls differ from approved original source profile")
+    else:
+        require(not optional_web_harness(freeze),
+                "Enabled optional Web harness controls require original source approval")
     return freeze, prefixes, identity
 
 
@@ -417,6 +496,7 @@ async def generate_g4(prefixes, native, output, *, freeze, identity,
     Failures remain genuine journaled attempts and are never retried/repaired.
     """
     require(isinstance(native, NativeThinkingPolicy), "Actual native two-phase policy required")
+    validate_optional_web_prefixes(freeze, prefixes)
     require(type(world_size) is int and world_size > 0 and type(rank) is int and 0 <= rank < world_size
             and type(concurrency) is int and concurrency > 0, "Invalid shard/concurrency declaration")
     require(not native.traces and not native.trace_index, "Fresh native trace owner required")
@@ -432,6 +512,14 @@ async def generate_g4(prefixes, native, output, *, freeze, identity,
     require(native.prompt_history_config == expected_history, "Frozen prompt-history policy differs")
     require((native.base.provenance.get("web_explicit_review", {}).get("enabled") is True)
             is freeze["web_explicit_review"], "Actual Web review decoder differs from frozen public harness")
+    harness_options = optional_web_harness(freeze)
+    from slime_plugins.dcc.web_data_discovery import web_data_discovery_configuration
+    from slime_plugins.dcc.web_structured import web_multi_citation_configuration
+    for name, configuration in (("web_data_discovery_guidance", web_data_discovery_configuration),
+                                ("web_multi_citation", web_multi_citation_configuration)):
+        require(_json_key(native.base.provenance.get(name, configuration(False)))
+                == _json_key(configuration(name in harness_options)),
+                "Actual optional Web harness provenance differs from prospective freeze: " + name)
     manifest = identity.manifest(native.base.tokenizer)
     manifest.pop("generation_seed")
     require(manifest == freeze["native_identity"]
@@ -694,7 +782,7 @@ def main():
         tensor_parallel_size=args.tensor_parallel_size, gpu_memory_utilization=args.gpu_memory_utilization,
         seed=freeze["seeds"][0], evaluation_sampling=EvaluationSampling(),
         enforce_eager=args.vllm_enforce_eager, web_structured_final=True, web_structured_actions=True,
-        web_explicit_review=freeze["web_explicit_review"])
+        web_explicit_review=freeze["web_explicit_review"], **optional_web_harness(freeze))
     base.allow_truncation = False
     native = NativeThinkingPolicy(base, source_receipt=freeze["source_receipt"], budget=identity.budget,
         prompt_history_config=(PromptHistoryConfig.from_dict(identity.prompt_history)
