@@ -36,8 +36,9 @@ from slime_plugins.dcc.data import Task
 from slime_plugins.dcc.episode import EpisodeRunner, _WebEvidence, final_turn_message
 from slime_plugins.dcc.native_thinking_eval import NativeThinkingPolicy, NativeTraceJournal
 
-VERSION = "native-final-g4-prospective-v1"
+VERSION = "native-final-g4-prospective-v2"
 FINAL_INTERVENTION = "final-decision-only-v1"
+PROMPT_INTERVENTION_VERSION = "append-original-final-turn-control-v1"
 ORIGINAL_ONLY = "original-final-only"
 SELECTION = "task-id-order-seeded-shuffle-first-complete-final-per-task-v1"
 BENCHMARKS = ("cuad", "widesearch")
@@ -90,6 +91,35 @@ def collector_owner(request):
             "synthetic_thought": False, "inserted_close": False, "inserted_eos": False,
             "episode_id": request["episode_id"], "turn": request["turn_index"],
             "rank": request["rank"], "trace_id": request["trace_id"]}
+
+
+def final_intervention_messages(task, messages, *, applied, fetched_sources,
+                                web_explicit_review=False):
+    """Make a forced final decision use the original runner's final control.
+
+    The schema-only intervention used to introduce CUAD plan/checks without
+    telling the policy their original 40-word contract. Preserve every source
+    message and append the same role-separated control used during evaluation.
+    Schemas, tool observations, parser and answer scoring remain unchanged.
+    """
+    require(type(applied) is bool and type(web_explicit_review) is bool,
+            "Explicit final prompt intervention flags required")
+    result = copy.deepcopy(messages)
+    if not applied:
+        return result
+    require(task.benchmark in BENCHMARKS, "Unsupported final-control benchmark")
+    evidence = None
+    if task.benchmark == "widesearch":
+        evidence = _WebEvidence()
+        evidence.fetched_sources.update(fetched_sources)
+    control = final_turn_message(task, evidence)
+    if task.benchmark == "widesearch" and web_explicit_review:
+        from slime_plugins.dcc.web_review import web_review_final_control
+        control = web_review_final_control(control)
+    require(control not in result[:-1], "Final control already occurs before the current turn")
+    if not result or result[-1] != control:
+        result.append(control)
+    return result
 
 
 def public_request_schemas(task, messages, *, turn, schemas):
@@ -259,18 +289,25 @@ def export_prefixes(closed_source, destination, *, source_profile, source_receip
                 intervention = original != final
                 require(not intervention or schema_policy == FINAL_INTERVENTION,
                         "Original action schema permits tools; explicit final-decision-only intervention required")
+                generation_messages = final_intervention_messages(task, request["messages"],
+                    applied=intervention, fetched_sources=fetched,
+                    web_explicit_review=schemas.web.explicit_review)
                 prefix_id = f"{experiment_id}:{task.benchmark}:{task.id}:turn{request['turn_index']}"
                 prefix = PublicFinalPrefix.from_dict({
                     "contract": "native-final-public-prefix-v1", "prefix_id": prefix_id,
                     "task_id": task.id, "benchmark": task.benchmark,
                     "source": "cuad_train" if task.benchmark == "cuad" else "independent_curriculum",
                     "split": "train", "harness_id": harness_id,
-                    "messages": copy.deepcopy(request["messages"]), "json_schema": final,
+                    "messages": generation_messages, "json_schema": final,
                     "native_identity": copy.deepcopy(identity_manifest)})
                 lineage = {"prefix_id": prefix_id, "task_id": task.id, "source_trace_id": trace_id,
                     "source_episode_id": episode["episode_id"], "turn": request["turn_index"],
                     "original_json_schema": copy.deepcopy(original), "generation_json_schema": copy.deepcopy(final),
                     "schema_policy": schema_policy, "intervention_applied": intervention,
+                    "prompt_intervention": {"version": PROMPT_INTERVENTION_VERSION,
+                        "applied": intervention, "source_messages_preserved": True,
+                        "source_message_count": len(request["messages"]),
+                        "appended_message_count": len(generation_messages) - len(request["messages"])},
                     "schema_source": "actual-public-runner-history-final-schema",
                     "fetched_sources": fetched, "source_journals_closed": True,
                     "original_completion_retained": False, "original_reward_used": False,

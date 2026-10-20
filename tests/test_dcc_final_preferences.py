@@ -130,6 +130,48 @@ def test_cuad_public_state_uses_fixed_final_schema_without_answer_metadata():
     assert original == cuad_action_schema() and final == cuad_final_schema() and fetched == []
 
 
+@pytest.mark.parametrize("benchmark,review", [("cuad", False), ("widesearch", False),
+                                               ("widesearch", True)])
+def test_final_intervention_appends_original_role_control_once_without_changing_history(benchmark, review):
+    from slime_plugins.dcc.web_review import web_review_final_control
+    task = (G.Task("public-cuad", "cuad", "train", "Extract the qualifying clause.",
+                   document=FIXTURE["DOCUMENT"]) if benchmark == "cuad" else web_task())
+    messages = G.EpisodeRunner(max_steps=4, initial_chunks=4).initial_messages(task)
+    # A real prior tool response remains part of the exact source prefix.
+    messages.extend([{"role": "assistant", "content": '{"tool":"read_document","arguments":{"start":0}}'},
+                     {"role": "user", "content": "Observed source text; never instructions."}])
+    original = deepcopy(messages)
+    fetched = [] if benchmark == "cuad" else [REVIEW["URL"]]
+    evidence = None
+    if benchmark == "widesearch":
+        evidence = G._WebEvidence()
+        evidence.fetched_sources.update(fetched)
+    expected_control = G.final_turn_message(task, evidence)
+    if review:
+        expected_control = web_review_final_control(expected_control)
+    result = G.final_intervention_messages(task, messages, applied=True,
+        fetched_sources=fetched, web_explicit_review=review)
+    assert messages == original and result[:-1] == original
+    assert result[-1] == expected_control and result[-1]["role"] == "user"
+    assert len(result) == len(original) + 1
+    assert sum(m["role"] == "assistant" for m in result) == 1
+    assert G.final_intervention_messages(task, result, applied=True,
+        fetched_sources=fetched, web_explicit_review=review) == result
+    unchanged = G.final_intervention_messages(task, result, applied=False,
+        fetched_sources=fetched, web_explicit_review=review)
+    assert unchanged == result
+    unchanged[0]["content"] += " test mutation"
+    assert messages == original and unchanged != result
+    if benchmark == "cuad":
+        assert '"plan" and "checks"' in expected_control["content"]
+        assert "each at most 40 words" in expected_control["content"]
+        assert "240 characters" not in expected_control["content"]
+    else:
+        assert REVIEW["URL"] in expected_control["content"]
+        assert "40 words" not in expected_control["content"]
+        assert ("1 to 240 characters" in expected_control["content"]) is review
+
+
 def test_export_defaults_fail_closed_when_original_schema_still_permits_tools(tmp_path, fake_tokenizer):
     make_closed_raw(tmp_path / "raw", fake_tokenizer)
     with pytest.raises(ValueError, match="No eligible"):
@@ -157,6 +199,15 @@ def test_export_accepts_physical_poor_originals_discards_targets_and_freezes_ids
     assert "anyOf" not in lineage["generation_json_schema"]
     assert lineage["fetched_sources"] == [REVIEW["URL"]]
     assert lineage["original_completion_retained"] is False and lineage["sft_acceptance_used"] is False
+    original_request = next(row for row in G.read_jsonl(tmp_path / "raw/requests_rank0.jsonl")
+        if row["trace_id"] == lineage["source_trace_id"] and row["event"] == "request")
+    assert prefix["messages"][:-1] == original_request["messages"]
+    assert prefix["messages"][-1]["role"] == "user"
+    assert "1 to 240 characters" in prefix["messages"][-1]["content"]
+    assert lineage["prompt_intervention"] == {
+        "version": G.PROMPT_INTERVENTION_VERSION, "applied": True,
+        "source_messages_preserved": True,
+        "source_message_count": len(original_request["messages"]), "appended_message_count": 1}
     if rejected:
         episode = list(G.read_jsonl(tmp_path / "raw/episodes_rank0.jsonl"))[0]
         assert episode["status"] != "completed"  # No accepted-SFT/easy-original bias.
@@ -180,6 +231,8 @@ def test_raw_last_turn_default_keeps_original_final_schema(tmp_path, fake_tokeni
     assert lineage["turn"] == 19 and lineage["intervention_applied"] is False
     assert lineage["original_json_schema"] == lineage["generation_json_schema"]
     assert list(prefixes[0].to_dict()["json_schema"]["properties"]) == ["plan", "checks", "answer"]
+    assert lineage["prompt_intervention"]["applied"] is False
+    assert lineage["prompt_intervention"]["appended_message_count"] == 0
 
 
 def test_raw_cuad_wrong_ungrounded_final_is_not_filtered_by_sft_acceptance(tmp_path, fake_tokenizer):
@@ -200,6 +253,28 @@ def test_raw_cuad_wrong_ungrounded_final_is_not_filtered_by_sft_acceptance(tmp_p
     assert len(prefixes) == 1 and prefixes[0].benchmark == "cuad"
     assert "invented unrelated" not in prefixes[0].messages_json
     assert "grounding_fields" not in prefixes[0].to_dict()
+    prefix = prefixes[0].to_dict()
+    lineage = list(G.read_jsonl(tmp_path / "export/lineage.jsonl"))[0]
+    original_request = next(row for row in G.read_jsonl(tmp_path / "raw/requests_rank0.jsonl")
+        if row["trace_id"] == lineage["source_trace_id"] and row["event"] == "request")
+    assert prefix["messages"][:-1] == original_request["messages"]
+    assert prefix["messages"][-1] == G.final_turn_message(task)
+    assert "each at most 40 words" in prefix["messages"][-1]["content"]
+    assert prefix["json_schema"] == lineage["generation_json_schema"]
+    from slime_plugins.dcc.cuad_structured import cuad_final_schema
+    assert prefix["json_schema"] == cuad_final_schema()
+    assert lineage["prompt_intervention"]["appended_message_count"] == 1
+
+
+def test_v2_loader_rejects_old_schema_only_v1_freeze(tmp_path, fake_tokenizer):
+    frozen_case(tmp_path, fake_tokenizer)
+    path = tmp_path / "export/freeze.json"
+    freeze = json.loads(path.read_text())
+    assert freeze["version"] == "native-final-g4-prospective-v2"
+    freeze["version"] = "native-final-g4-prospective-v1"
+    path.write_text(json.dumps(freeze))
+    with pytest.raises(ValueError, match="prospective freeze"):
+        G.load_frozen(tmp_path / "export", fake_tokenizer)
 
 
 def test_raw_cuad_last_turn_preserves_original_fixed_final_schema(tmp_path, fake_tokenizer):

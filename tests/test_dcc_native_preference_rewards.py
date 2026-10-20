@@ -86,6 +86,17 @@ def closed_domains(tmp_path, monkeypatch):
 def test_real_closed_original_and_g4_rewards_roundtrip_to_original_pair_loader(closed_domains, tmp_path):
     tokenizer, manifest = closed_domains
     prepared = S.prepare_collections(manifest, tokenizer)
+    for item in prepared:
+        lineage = list(S.read_jsonl(Path(item.specification["approved_freeze"]) / "lineage.jsonl"))[0]
+        assert lineage["intervention_applied"] is True
+        assert lineage["prompt_intervention"]["appended_message_count"] == 1
+        messages = json.loads(item.prefixes[0].messages_json)
+        assert len(messages) == lineage["prompt_intervention"]["source_message_count"] + 1
+        assert messages[-1]["role"] == "user"
+        if item.prefixes[0].benchmark == "cuad":
+            assert "each at most 40 words" in messages[-1]["content"]
+        else:
+            assert URL in messages[-1]["content"] and "1 to 240 characters" in messages[-1]["content"]
     result = S.score_prepared_collections(prepared)
     assert [[row["value"] for row in rows] for _, rows, _, _ in result] == [[1., 0., 0., 1.], [1., 0., 0., 1.]]
     profiles = S.publish_rewards(result, tmp_path / "rewards")
@@ -106,7 +117,48 @@ def test_real_closed_original_and_g4_rewards_roundtrip_to_original_pair_loader(c
     with pytest.raises(FileExistsError): S.publish_rewards(result, tmp_path / "rewards")
 
 
-@pytest.mark.parametrize("damage", ["g4closure", "originalclosure", "publictask", "lineage", "phase", "rewardversion"])
+@pytest.mark.parametrize("benchmark", ["cuad", "widesearch"])
+@pytest.mark.parametrize("damage", ["control_content", "control_role", "control_missing", "control_extra", "source_history"])
+def test_original_binding_rejects_changed_control_or_original_public_history(closed_domains, benchmark, damage):
+    tokenizer, manifest = closed_domains
+    row = next(row for row in manifest["collections"] if row["collection_id"] == benchmark + "-synthetic")
+    freeze, prefixes, _ = F.G.load_frozen(row["approved_freeze"], tokenizer)
+    value = prefixes[0].to_dict()
+    if damage == "control_content": value["messages"][-1]["content"] += " Altered final instruction."
+    elif damage == "control_role": value["messages"][-1]["role"] = "system"
+    elif damage == "control_missing": value["messages"].pop()
+    elif damage == "control_extra": value["messages"].append(deepcopy(value["messages"][-1]))
+    else: value["messages"][1]["content"] += " Altered original public history."
+    prefixes[0] = type(prefixes[0]).from_dict(value)
+    with pytest.raises(ValueError, match="actual original closed request and final control"):
+        S._original_binding(row, freeze, prefixes, source_cache={}, public_cache={})
+
+
+@pytest.mark.parametrize("damage", ["missing", "version", "applied", "preserved", "source_count",
+                                    "appended_count", "appended_count_bool", "intervention", "extra_field"])
+def test_original_binding_requires_exact_v2_prompt_intervention_lineage(closed_domains, damage):
+    tokenizer, manifest = closed_domains
+    row = manifest["collections"][1]
+    freeze, prefixes, _ = F.G.load_frozen(row["approved_freeze"], tokenizer)
+    path = Path(row["approved_freeze"]) / "lineage.jsonl"
+    lineage = list(S.read_jsonl(path))
+    prompt = lineage[0]["prompt_intervention"]
+    if damage == "missing": del lineage[0]["prompt_intervention"]
+    elif damage == "version": prompt["version"] = "unapproved"
+    elif damage == "applied": prompt["applied"] = 1
+    elif damage == "preserved": prompt["source_messages_preserved"] = 1
+    elif damage == "source_count": prompt["source_message_count"] += 1
+    elif damage == "appended_count": prompt["appended_message_count"] = 0
+    elif damage == "appended_count_bool": prompt["appended_message_count"] = True
+    elif damage == "intervention": lineage[0]["intervention_applied"] = False
+    else: prompt["unapproved"] = True
+    write_jsonl(path, lineage)
+    with pytest.raises(ValueError, match="intervention lineage differs"):
+        S._original_binding(row, freeze, prefixes, source_cache={}, public_cache={})
+
+
+@pytest.mark.parametrize("damage", ["g4closure", "originalclosure", "publictask", "lineage", "promptlineage",
+                                    "phase", "rewardversion", "v1approval", "v1freeze"])
 def test_all_domains_and_original_public_binding_precede_any_label_access(closed_domains, monkeypatch, damage):
     tokenizer, manifest = closed_domains
     row = manifest["collections"][1]
@@ -119,6 +171,13 @@ def test_all_domains_and_original_public_binding_precede_any_label_access(closed
     elif damage == "lineage":
         path = Path(row["approved_freeze"]) / "lineage.jsonl"; rows = [json.loads(line) for line in path.read_text().splitlines()]
         rows[0]["original_reward_used"] = True; write_jsonl(path, rows)
+    elif damage == "promptlineage":
+        path = Path(row["approved_freeze"]) / "lineage.jsonl"; rows = list(S.read_jsonl(path))
+        rows[0]["prompt_intervention"]["appended_message_count"] = 0; write_jsonl(path, rows)
+    elif damage in {"v1approval", "v1freeze"}:
+        path = Path(row["approved_freeze"]) / ("export_source_approval.json" if damage == "v1approval" else "freeze.json")
+        value = json.loads(path.read_text()); value["version"] = "native-final-g4-prospective-v1"
+        path.write_text(json.dumps(value))
     elif damage == "rewardversion": row["reward_version"] = "unapproved"
     else:
         original = S.read_closed_g4

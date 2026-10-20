@@ -19,8 +19,9 @@ sys.path[:0] = [str(Path(__file__).resolve().parent),
                 str(Path(__file__).resolve().parents[1] / "slime")]
 
 from dcc_collect_native_preferences import (
-    OBSERVATION, VERSION as GENERATION_VERSION, load_frozen, public_request_schemas,
-    read_closed_g4, source_schema_profile,
+    FINAL_INTERVENTION, OBSERVATION, PROMPT_INTERVENTION_VERSION,
+    VERSION as GENERATION_VERSION, final_intervention_messages, load_frozen,
+    public_request_schemas, read_closed_g4, source_schema_profile,
 )
 from dcc_collect_native_train import (
     Journal, load_public_train, load_train_labels, read_closed, read_jsonl,
@@ -90,22 +91,42 @@ def _original_binding(row, freeze, prefixes, *, source_cache, public_cache):
             "Public TRAIN task differs from the actual original closed collection task")
         request, _ = requests[item["source_trace_id"]]
         messages = _strict_json(prefix.messages_json)
-        require(request["messages"] == messages and request["turn_index"] == item["turn"],
-            "Frozen public history differs from its actual original closed request")
-        original, final, fetched = public_request_schemas(task, messages, turn=item["turn"], schemas=schemas)
+        source_messages = request["messages"]
+        require(request["turn_index"] == item["turn"], "Original source turn lineage differs")
+        original, final, fetched = public_request_schemas(task, source_messages,
+            turn=item["turn"], schemas=schemas)
         require(original == request["options"]["json_schema"] == item["original_json_schema"]
             and final == item["generation_json_schema"] == _strict_json(prefix.schema_json)
             and fetched == item["fetched_sources"], "Original public schema/evidence lineage differs")
+        intervention = original != final
+        require(item.get("intervention_applied") is intervention
+            and (not intervention or freeze["schema_policy"] == FINAL_INTERVENTION),
+            "Original source final intervention lineage differs")
+        expected_messages = final_intervention_messages(task, source_messages,
+            applied=intervention, fetched_sources=fetched,
+            web_explicit_review=schemas.web.explicit_review)
+        prompt_intervention = item.get("prompt_intervention")
+        require(isinstance(prompt_intervention, dict) and prompt_intervention == {
+            "version": PROMPT_INTERVENTION_VERSION, "applied": intervention,
+            "source_messages_preserved": True, "source_message_count": len(source_messages),
+            "appended_message_count": len(expected_messages) - len(source_messages)}
+            and prompt_intervention["applied"] is intervention
+            and prompt_intervention["source_messages_preserved"] is True
+            and type(prompt_intervention["source_message_count"]) is int
+            and type(prompt_intervention["appended_message_count"]) is int,
+            "Original source final prompt intervention lineage differs")
+        require(messages == expected_messages,
+            "Frozen public history differs from its actual original closed request and final control")
         tasks[prefix.task_id] = task
         if task.benchmark == "widesearch":
             guard = _WebEvidence()
             # public_request_schemas already proves exact paired action/observation
             # serialization, turn counters, allowed tools and absence of old finals.
-            for index, message in enumerate(messages):
+            for index, message in enumerate(source_messages):
                 if message["role"] != "assistant":
                     continue
                 action = _strict_json(message["content"])
-                observed = messages[index + 1]["content"]
+                observed = source_messages[index + 1]["content"]
                 payload = observed[len(OBSERVATION):].rsplit("\nRemaining turns: ", 1)[0]
                 guard.observe(action["tool"], _strict_json(payload))
             require(sorted(guard.fetched_sources) == fetched, "Actual historical evidence replay differs")
