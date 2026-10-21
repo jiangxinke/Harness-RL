@@ -329,13 +329,20 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
                      asynchronous=False, evaluation_sampling=None, web_structured_final=False,
                      web_structured_actions=False, web_explicit_review=False,
                      web_bounded_whitespace=False, web_navigation_ledger=False, web_research_checkpoints=False, web_data_discovery_guidance=False, web_multi_citation=False, web_cached_rows=False,
-                     quantization="none", fp8_validation_dir=None):
+                     quantization="none", fp8_validation_dir=None,
+                     bf16_attention_only_lora=False, bf16_lora_validation_dir=None):
     """Load BF16 or explicit FP8 vLLM inference without changing the HF trainer.
 
     Save ``policy.provenance`` alongside prediction manifests in a new external
     output directory. A backend change must never resume an existing HF run.
     GPU ownership and CUDA_VISIBLE_DEVICES are managed by the caller.
     """
+    if type(bf16_attention_only_lora) is not bool:
+        raise TypeError("bf16_attention_only_lora must be a bool")
+    if bf16_attention_only_lora and (quantization != "none" or adapter is None or tensor_parallel_size != 1):
+        raise ValueError("BF16 attention-only LoRA requires quantization=none, an adapter and TP=1")
+    if not bf16_attention_only_lora and bf16_lora_validation_dir is not None:
+        raise ValueError("bf16_lora_validation_dir requires explicit bf16_attention_only_lora=True")
     if quantization not in {"none", "fp8"}:
         raise ValueError("The vLLM backend supports quantization='none' or 'fp8'")
     if quantization == "fp8" and tensor_parallel_size != 1:
@@ -437,6 +444,11 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
         engine_kwargs["worker_cls"] = WORKER_CLASS
         binding = worker_binding(adapter=metadata["path"] if metadata else None,
                                  model_config=config.to_dict(), audit_dir=fp8_validation_dir)
+    if bf16_attention_only_lora:
+        from .bf16_attention_guard import WORKER_CLASS, worker_binding
+        engine_kwargs["worker_cls"] = WORKER_CLASS
+        binding = worker_binding(adapter=metadata["path"], model_config=config.to_dict(),
+                                 audit_dir=bf16_lora_validation_dir)
     with binding, _engine_environment():
         if asynchronous:
             from vllm.engine.arg_utils import AsyncEngineArgs
@@ -474,6 +486,10 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
         from .fp8_attention_guard import QUANTIZATION, VALIDATION_LAYOUT
         from .fp8_runtime import runtime_identity
         provenance.update(fp8_contract=dict(QUANTIZATION), fp8_validation=dict(VALIDATION_LAYOUT),
+                          runtime_code_identity=runtime_identity())
+    if bf16_attention_only_lora:
+        from .bf16_attention_guard import VALIDATION_LAYOUT, runtime_identity
+        provenance.update(bf16_attention_only_lora=True, bf16_lora_validation=dict(VALIDATION_LAYOUT),
                           runtime_code_identity=runtime_identity())
     if evaluation_sampling != EvaluationSampling():
         provenance["sampling"] = "explicit evaluation sampling; explicit EOS; generation_config=vllm"
