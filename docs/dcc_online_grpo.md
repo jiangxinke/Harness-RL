@@ -28,6 +28,18 @@ python scripts/dcc_online_grpo.py \
   --cpu-preflight --plan-world-size 1
 ```
 
+CPU preflight actually imports xgrammar, builds its native tokenizer/compiler
+from the local tokenizer and checkpoint vocabulary/EOS metadata, and compiles
+the existing public CUAD final schema through the runtime's original backend
+schema path. Missing dependencies, binary import failures and compiler errors
+fail preflight. An absent `generation_config.json` uses the installed HF loader's
+model-config fallback (TF4's model config, or TF5's original `config.json`);
+a present corrupt generation config fails admission. Padding falls back to the
+primary EOS and must then have a token ID, as required by the native runtime.
+This check reads no model weights and does not initialize CUDA;
+its output includes a `native_grammar_preflight` receipt. It does not establish
+GPU execution, distributed training correctness or benchmark improvement.
+
 After CPU preflight, omit its last two options for a single GPU, or use
 `torchrun` and specify the intended world size during preflight. The source
 must be its actual clean commit or an explicitly identified Git export. The

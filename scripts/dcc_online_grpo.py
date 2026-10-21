@@ -277,11 +277,59 @@ def configuration(args, plan, tasks, world_size):
     return config
 
 
+def native_grammar_cpu_preflight(model_name, tokenizer):
+    """Exercise the native compiler using checkpoint metadata, without weights."""
+    import xgrammar as xgr
+    from packaging.version import Version
+    from transformers import AutoConfig, GenerationConfig, __version__
+    from transformers.utils import GENERATION_CONFIG_NAME
+    from transformers.utils.hub import cached_file
+    from slime_plugins.dcc.cuad_structured import cuad_final_schema
+    from slime_plugins.dcc.hf_native_policy import END_THINK
+    from slime_plugins.dcc.hf_native_structured import compile_native_structured_schema
+
+    config = AutoConfig.from_pretrained(model_name, local_files_only=True)
+    # Only a genuinely absent file permits a fallback. HF wraps malformed JSON
+    # and invalid UTF-8 in OSError too, so catching that error hides bad metadata.
+    generation_file = cached_file(model_name, GENERATION_CONFIG_NAME,
+        local_files_only=True, _raise_exceptions_for_missing_entries=False)
+    if generation_file is not None:
+        generation = GenerationConfig.from_pretrained(model_name, local_files_only=True)
+        generation_source = "generation_config.json"
+    else:
+        # Match each loader's model-config fallback. TF5 removes generation
+        # parameters from AutoConfig, so its loader rereads the original JSON.
+        if Version(__version__).major >= 5:
+            generation = GenerationConfig.from_pretrained(model_name,
+                config_file_name="config.json", _from_model_config=True,
+                local_files_only=True)
+        else:
+            generation = GenerationConfig.from_model_config(config)
+        generation_source = "model_config"
+    eos = generation.eos_token_id
+    eos_ids = [eos] if type(eos) is int else list(eos or [])
+    if not eos_ids or END_THINK in eos_ids or tokenizer.eos_token_id not in eos_ids:
+        raise ValueError("Non-thinking EOS IDs including tokenizer primary EOS required")
+    # The runtime loader supplies the primary EOS as padding when absent.
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    if tokenizer.pad_token_id is None:
+        raise ValueError("An explicit padding token is required")
+    compiler = xgr.GrammarCompiler(xgr.TokenizerInfo.from_huggingface(
+        tokenizer, vocab_size=config.vocab_size, stop_token_ids=eos_ids), max_threads=1)
+    compile_native_structured_schema(compiler, cuad_final_schema())
+    return dict(xgrammar_imported=True, tokenizer_info_created=True,
+                grammar_compiler_created=True, public_schema="cuad_final",
+                schema_compiled=True, vocab_size=config.vocab_size,
+                stop_token_ids=eos_ids, generation_config_source=generation_source)
+
+
 def cpu_preflight(args, tasks, plan, world_size):
     from transformers import AutoTokenizer
     from slime_plugins.dcc.hf_native_policy import NativeHFPolicy
     tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=True)
     NativeHFPolicy.validate_tokenizer(tokenizer)
+    grammar = native_grammar_cpu_preflight(args.model, tokenizer)
     runner = make_runner(args)
     lengths = []
     for index in sorted({index for row in plan for index in row}):
@@ -295,6 +343,7 @@ def cpu_preflight(args, tasks, plan, world_size):
         lengths.append(len(encode_messages(tokenizer, messages, args.max_prompt_tokens,
                                           allow_truncation=False)))
     return dict(cpu_preflight_only=True, CUDA_initialized=torch.cuda.is_initialized(),
+                native_grammar_preflight=grammar,
                 unique_planned_tasks=len(lengths), max_initial_final_prompt=max(lengths),
                 training_config=configuration(args, plan, tasks, world_size))
 
