@@ -15,6 +15,7 @@ from pathlib import Path
 import uuid
 
 from .episode import ModelProtocolFailure, PolicyCompletion
+from .durable_journal import OrderedDurableJSONLWriter, close_durable_journals
 from .cuad_structured import (cuad_action_schema, cuad_final_schema,
     cuad_structured_configuration, cuad_structured_options, is_cuad_structured_schema,
     preflight_cuad_structured)
@@ -430,12 +431,14 @@ class NativeThinkingPolicy:
         return NativeEpisodePolicy(self, task_id, rank)
 
     async def close(self):
+        failure = None
         try:
             await self.base.close()
+        except BaseException as error:
+            failure = error
+            raise
         finally:
-            close = getattr(self.trace_sink, "close", None)
-            if close is not None:
-                close()
+            close_durable_journals((self.trace_sink,), failure=failure)
 
 
 def native_configuration(source_receipt, *, budget=None):
@@ -531,23 +534,11 @@ def native_options(args, tasks, sampling, source_root):
     return native_configuration(receipt, budget=budget)
 
 
-class NativeTraceJournal:
+class NativeTraceJournal(OrderedDurableJSONLWriter):
     """One fresh durable output journal per rank, never a home/tmp cache."""
 
-    def __init__(self, path):
-        self.stream = Path(path).open("x", encoding="utf-8")
-
     def __call__(self, trace):
-        self.stream.write(json.dumps(trace, ensure_ascii=False, allow_nan=False) + "\n")
-        self.stream.flush()
-        os.fsync(self.stream.fileno())
-
-    def close(self):
-        if not self.stream.closed:
-            self.stream.flush()
-            os.fsync(self.stream.fileno())
-            self.stream.close()
-
+        self.write_line(json.dumps(trace, ensure_ascii=False, allow_nan=False) + "\n")
 
 class NativeEpisodePolicy:
     """Task-local ownership, sharing only the native engine with other tasks."""

@@ -138,9 +138,9 @@ def run_cuad(tmp_path, *, values=None, scripts=None, max_steps=3, review=False, 
         result = await runner.run(cuad_task(), bound, evaluation=True)
         record = result.to_dict(); record["native_thinking_traces"] = bound.references
         manifest, runtime = declarations(max_steps, review=review, budget=policy.budget)
+        await policy.close()
         audit = validate_native_sidecars(tmp_path, {"contract": record}, manifest, runtime,
                                          {"contract": 0}, [cuad_task()], tokenizer=tokenizer)
-        await policy.close()
         return tokenizer, engine, policy, result, record, manifest, runtime, audit
     return asyncio.run(run())
 

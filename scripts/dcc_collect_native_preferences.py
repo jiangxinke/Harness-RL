@@ -21,7 +21,7 @@ sys.path[:0] = [str(Path(__file__).resolve().parent),
 
 from jsonschema import Draft202012Validator, ValidationError
 from dcc_collect_native_train import (
-    Journal, check_public_task, json_text, read_closed, read_jsonl, require, write_fresh_json,
+    Journal, _finish_collection, close_durable_journals, check_public_task, json_text, read_closed, read_jsonl, require, write_fresh_json,
 )
 from dcc_native_dpo_data import (
     PREFERENCE_CONTRACT, PublicFinalPrefix, validate_final_only_schema,
@@ -417,13 +417,12 @@ def export_prefixes(closed_source, destination, *, source_profile, source_receip
                 if filename == "prefixes.jsonl":
                     # The Web review decoder enforces official property order.
                     # Preserve the trusted schema order across the public wire.
-                    journal.stream.write(json.dumps(value, ensure_ascii=False,
+                    journal.write_line(json.dumps(value, ensure_ascii=False,
                         allow_nan=False, separators=(",", ":")) + "\n")
-                    journal.count += 1
                 else:
                     journal.write(value)
         finally:
-            journal.close()
+            close_durable_journals((journal,), failure=sys.exc_info()[1])
     write_fresh_json(destination / "export_source_approval.json", {
         "version": VERSION, "source_profile": copy.deepcopy(source_profile),
         "source_receipt": copy.deepcopy(source_receipt), "source_world_size": world_size,
@@ -579,11 +578,15 @@ async def generate_g4(prefixes, native, output, *, freeze, identity,
     owned = prefixes[rank::world_size]
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
-    requests = Journal(output / f"requests_rank{rank}.jsonl")
-    candidates = Journal(output / f"candidates_rank{rank}.jsonl")
-    audit = Journal(output / f"audit_rank{rank}.jsonl")
-    attempted, complete = [], False
+    journals, workers = [], []
+    attempted, complete, failure = [], False, None
     try:
+        requests = Journal(output / f"requests_rank{rank}.jsonl")
+        journals.append(requests)
+        candidates = Journal(output / f"candidates_rank{rank}.jsonl")
+        journals.append(candidates)
+        audit = Journal(output / f"audit_rank{rank}.jsonl")
+        journals.append(audit)
         semaphore = asyncio.Semaphore(concurrency)
         for seed in freeze["seeds"]:
             native.base.seed = seed
@@ -630,12 +633,15 @@ async def generate_g4(prefixes, native, output, *, freeze, identity,
                         audit.write({key: request[key] for key in (
                             "trace_id", "task_id", "rank", "turn_index", "episode_id", "prefix_id", "generation_seed")}
                             | {"candidate_valid": valid, "exception_type": error, "retried": False})
-            await asyncio.gather(*(one(prefix) for prefix in owned))
+            workers = [asyncio.create_task(one(prefix)) for prefix in owned]
+            await asyncio.gather(*workers)
             # Every call's thought AND JSON is now terminal before seed changes.
         complete = True
+    except BaseException as error:
+        failure = error
+        raise
     finally:
-        requests.close(); candidates.close(); audit.close()
-        await native.close()  # Owns durable native trace journal closure.
+        await _finish_collection(native, journals, workers, failure)
     if complete:
         write_fresh_json(output / f"generation_closed_rank{rank}.json", {
             "version": VERSION, "freeze": copy.deepcopy(freeze), "rank": rank,

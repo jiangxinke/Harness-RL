@@ -38,9 +38,9 @@ async def episode(tmp_path, native, *, timeout=10):
     manifest, runtime = declarations(1, budget=native.budget)
     if native.phase_timing:
         manifest["native_phase_timing"] = runtime["native_phase_timing"] = timing.configuration(True)
+    await native.close()
     audit = validate_native_sidecars(tmp_path, {"contract": record}, manifest, runtime,
                                     {"contract": 0}, [cuad_task()], tokenizer=native.base.tokenizer)
-    await native.close()
     return result, record, audit
 
 

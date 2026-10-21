@@ -231,9 +231,9 @@ def run_fake(tmp_path, *, adapter=None, approval=None):
         if adapter:
             manifest.update(adapter=str(adapter), adapter_identity=metadata,
                 native_lora_derivative_id=DERIVATIVE, corrected_training_approval=approval)
+        await policy.close()
         audit = native.validate_native_sidecars(tmp_path, {'contract':record}, manifest,
             runtime, {'contract':0}, [fixture.cuad_task()], tokenizer=tokenizer)
-        await policy.close()
         return engine, policy, record, manifest, runtime, audit
     return asyncio.run(execute())
 

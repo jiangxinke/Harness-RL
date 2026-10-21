@@ -208,9 +208,9 @@ def run_cuad_native(tmp_path, values, *, document, max_steps=3, limit=7500):
             value["prompt_history"] = native.prompt_history_config.to_dict()
         manifest["inference_parameters"]["max_model_len"] = limit + native.budget.total_tokens
         runtime["max_model_len"] = limit + native.budget.total_tokens
+        await native.close()
         audit = validate_native_sidecars(tmp_path, {task.id: record}, manifest, runtime,
                                          {task.id: 0}, [task], tokenizer=tokenizer)
-        await native.close()
         return result, record, manifest, runtime, audit
     result, record, manifest, runtime, audit = asyncio.run(run())
     return tokenizer, engine, native, task, result, record, manifest, runtime, audit

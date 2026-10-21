@@ -26,6 +26,7 @@ from dcc_native_sft import (
 )
 from jsonschema import ValidationError
 from slime_plugins.dcc.data import Task
+from slime_plugins.dcc.durable_journal import OrderedDurableJSONLWriter, close_durable_journals
 from slime_plugins.dcc.episode import EpisodeRunner, ModelProtocolFailure, PolicyCompletion
 from slime_plugins.dcc.eval_sampling import EvaluationSampling
 from slime_plugins.dcc.native_thinking_eval import NativeThinkingPolicy, NativeTraceJournal
@@ -48,22 +49,39 @@ def json_text(value):
     return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True)
 
 
-class Journal:
-    def __init__(self, path):
-        self.stream = Path(path).open("x", encoding="utf-8")
-        self.count = 0
-
+class Journal(OrderedDurableJSONLWriter):
     def write(self, value):
-        self.stream.write(json_text(value) + "\n")
-        self.stream.flush()
-        os.fsync(self.stream.fileno())
-        self.count += 1
+        self.write_line(json_text(value) + "\n")
 
-    def close(self):
-        if not self.stream.closed:
-            self.stream.flush()
-            os.fsync(self.stream.fileno())
-            self.stream.close()
+
+async def _finish_collection(native, journals, workers, failure):
+    # gather() may raise before its other episodes finish cancellation handlers.
+    # Never block their event loop on storage while those episodes are active.
+    for worker in workers:
+        if not worker.done():
+            worker.cancel()
+    errors = []
+    if workers:
+        try:
+            await asyncio.gather(*workers, return_exceptions=True)
+        except BaseException as error:
+            errors.append(error)
+    # Release the engine before draining the remaining durable output queues.
+    try:
+        await native.close()
+    except BaseException as error:
+        errors.append(error)
+    if errors:
+        primary = failure if failure is not None else errors.pop(0)
+        for error in errors:
+            primary.add_note(f"Collection cleanup also failed: {type(error).__name__}: {error}")
+            for note in getattr(error, "__notes__", ()):
+                primary.add_note(note)
+        close_durable_journals(journals, failure=primary)
+        if failure is None:
+            raise primary
+    else:
+        close_durable_journals(journals, failure=failure)
 
 
 def write_fresh_json(path, value):
@@ -291,12 +309,17 @@ async def generate(tasks, native, output, *, collection_id, profile, schema_prof
     require(isinstance(collection_id, str) and collection_id.strip(), "Explicit collection ID required")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
-    requests = Journal(output / f"requests_rank{rank}.jsonl")
-    episodes = Journal(output / f"episodes_rank{rank}.jsonl")
-    cache_journal = (Journal(output / f"web_cached_sources_rank{rank}.jsonl")
-                     if cache_configuration is not None else None)
-    done = False
+    journals, workers = [], []
+    failure, done = None, False
     try:
+        requests = Journal(output / f"requests_rank{rank}.jsonl")
+        journals.append(requests)
+        episodes = Journal(output / f"episodes_rank{rank}.jsonl")
+        journals.append(episodes)
+        cache_journal = (Journal(output / f"web_cached_sources_rank{rank}.jsonl")
+                         if cache_configuration is not None else None)
+        if cache_journal is not None:
+            journals.append(cache_journal)
         semaphore = asyncio.Semaphore(concurrency)
         async def one(task):
             async with semaphore:
@@ -333,14 +356,14 @@ async def generate(tasks, native, output, *, collection_id, profile, schema_prof
                     "public_task": task.to_dict(), "status": result.status if result else "collector_error",
                     "answer": result.answer if result else [], "exception_type": error,
                     "detail": result.detail if result else "", "gold_visible_to_policy": False})
-        await asyncio.gather(*(one(task) for task in tasks))
+        workers = [asyncio.create_task(one(task)) for task in tasks]
+        await asyncio.gather(*workers)
         done = True
+    except BaseException as error:
+        failure = error
+        raise
     finally:
-        requests.close()
-        episodes.close()
-        if cache_journal is not None:
-            cache_journal.close()
-        await native.close()  # Also durably closes the actual native trace sink.
+        await _finish_collection(native, journals, workers, failure)
     if done:
         write_fresh_json(output / f"generation_closed_rank{rank}.json", {
             "version": VERSION, "collection_id": collection_id, "rank": rank, "world_size": world_size,
@@ -603,14 +626,25 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
         validate_literal_train_reward_labels(episodes, labels, expected_protocol=web_train_reward_protocol)
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=False)
-    web, cuad = Journal(destination / "native_web_train.jsonl"), Journal(destination / "native_cuad_train.jsonl")
-    audit, decisions = Journal(destination / "audit.jsonl"), Journal(destination / "decisions.jsonl")
-    source_journal = Journal(destination / "native_web_cached_sources.jsonl") if cache_sources is not None else None
-    excluded_journal = Journal(destination / "excluded_public_rejected_finals.jsonl") if feedback_enabled else None
+    journals = []
     published_sources = set()
     accepted = rejected = 0
     accepted_segments, accepted_phase_requests = set(), set()
     try:
+        web = Journal(destination / "native_web_train.jsonl")
+        journals.append(web)
+        cuad = Journal(destination / "native_cuad_train.jsonl")
+        journals.append(cuad)
+        audit = Journal(destination / "audit.jsonl")
+        journals.append(audit)
+        decisions = Journal(destination / "decisions.jsonl")
+        journals.append(decisions)
+        source_journal = Journal(destination / "native_web_cached_sources.jsonl") if cache_sources is not None else None
+        if source_journal is not None:
+            journals.append(source_journal)
+        excluded_journal = Journal(destination / "excluded_public_rejected_finals.jsonl") if feedback_enabled else None
+        if excluded_journal is not None:
+            journals.append(excluded_journal)
         for episode in episodes:
             label, bundles, score = labels[episode["task_id"]], [], None
             try:
@@ -734,10 +768,7 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                              "episode": episode})
                 decisions.write({"task_id": episode["task_id"], "accepted": False, "reason": str(exc)})
     finally:
-        for journal in ((web, cuad, audit, decisions)
-                        + ((source_journal,) if source_journal is not None else ())
-                        + ((excluded_journal,) if excluded_journal is not None else ())):
-            journal.close()
+        close_durable_journals(journals, failure=sys.exc_info()[1])
     if web.count:
         load_native_training_data(destination / "native_web_train.jsonl", tokenizer,
             expected_identity=identity, source_receipt=receipt, schema_resolver=schema_profile.original_schema,

@@ -24,7 +24,7 @@ from dcc_collect_native_preferences import (
     public_request_schemas, read_closed_g4, source_schema_profile,
 )
 from dcc_collect_native_train import (
-    Journal, load_public_train, load_train_labels, read_closed, read_jsonl,
+    Journal, close_durable_journals, load_public_train, load_train_labels, read_closed, read_jsonl,
     require, web_train_evaluation, write_fresh_json,
 )
 from dcc_native_dpo_train import public_id, validate_prepared_collection_ownership
@@ -329,7 +329,7 @@ def publish_rewards(results, destination):
             try:
                 for row in rows: journal.write(row)
             finally:
-                journal.close()
+                close_durable_journals((journal,), failure=sys.exc_info()[1])
         profile = {"collection_id": item.specification["collection_id"],
             "reward_version": item.specification["reward_version"], "public_freeze": item.freeze,
             "generation_closed_before_scoring": True, "original_source_closed_before_scoring": True,
