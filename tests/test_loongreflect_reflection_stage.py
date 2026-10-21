@@ -289,13 +289,15 @@ def test_pending_stage_is_last_user_message_and_learner_reuses_exact_prompt():
     contexts = [tree.nodes[sample.metadata['tree_node_id']].metadata['generation_context'] for sample in samples]
     update = '<update>' + POST_SEARCH_REFLECTION_GUIDANCE + '</update>'
     expected = tokenizer.apply_chat_template([
-        {'role': 'system', 'content': adapter.actor_prompt_for_protocol('full')},
+        {'role': 'system', 'content': adapter.POST_SEARCH_REFLECTION_ACTOR_PROMPT},
         {'role': 'user', 'content': 'query'},
         {'role': 'assistant', 'content': contexts[1]},
         {'role': 'user', 'content': POST_SEARCH_REFLECTION_GUIDANCE},
     ]) + '<think>'
     assert contexts[1].endswith(update)
     assert actor.sent_prompts[1] == expected
+    assert adapter.POST_SEARCH_REFLECTION_ACTOR_PROMPT not in actor.sent_prompts[0]
+    assert adapter.POST_SEARCH_REFLECTION_ACTOR_PROMPT not in actor.sent_prompts[2]
     assert actor.sent_prompts[1].endswith('</assistant><user>' + POST_SEARCH_REFLECTION_GUIDANCE + '</user><assistant><think>')
     assert actor.sent_prompts[2] == actor.base_prompt + contexts[2] + '<think>'
     assert [sample.prompt for sample in samples] == actor.sent_prompts
