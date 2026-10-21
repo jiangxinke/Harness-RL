@@ -2,7 +2,7 @@
 
 The native HF LoRA trainer can mix its existing CUAD TRAIN groups with an
 independent, public-only Web TRAIN curriculum with the WideSearch task schema. The default remains
-CUAD-only. This path uses TRAIN literal row F1; it does not report a WideSearch
+CUAD-only. This path uses TRAIN-only exact row rewards; it does not report a WideSearch
 benchmark score or the published judge metric.
 
 Use `--enable-online-web` with all three independent inputs:
@@ -66,6 +66,40 @@ context failure retains every outcome and discards the whole gradient group.
 Timed-out native generations are drained and their actual late completions
 remain owned in the closed journals. No retry, sibling filtering or denominator
 change is performed.
+
+`--web-train-reward-variant` defaults to `table-grounded-exact-v1`, preserving
+the original whole-table grounding gate and scoring receipt. To opt into
+per-row grounding for online Web TRAIN, add
+`--web-train-reward-variant per-row-grounded-exact-v1` together with
+`--enable-online-web`. This option does not change benchmark evaluation, SFT,
+DPO, the strict literal scorer, or the original literal label format.
+
+In the per-row variant, the complete answer must first pass strict literal
+validation and the unchanged public schema/citation guard. Any malformed table
+still receives zero for the entire table. Each predicted row then passes through
+the same existing fetched-text and actual-final-prompt grounding function,
+using the original full tool history and actual decoded final prompt. Only
+eligible rows can be true positives, matched as complete required-column tuples
+against gold with strict multiset matching. The reward is
+`2 * true_positives / (all_predicted_rows + all_gold_rows)`: ineligible rows
+remain in the denominator, and excess duplicate predictions remain false
+positives. No cell normalization or numeric conversion is introduced. Empty
+tables remain rejected. Failed outcomes, unreliable-group discard, and label
+access only after the group's durable close retain their existing behavior.
+
+The selected composition is recorded in `online_web.online_train_reward`.
+Per-row receipts use their own protocol and the actual training metric
+`train_per_row_grounded_exact_f1`. Their `raw_literal_diagnostic` records the
+unchanged literal scorer before grounding; it is not the actual training
+reward. The labels continue to declare that original raw literal profile.
+Neither metric is a benchmark score.
+
+Grounding inherits the existing substring check across the fetched-text pool;
+it does not establish semantic entailment or connect each cell to its particular
+cited source. Equal rewards within a group can still produce zero advantages,
+even when those rewards are positive. Recomputed scores from old closed TRAIN
+outputs are diagnostics; fresh sampling, nonzero gradients and a matched
+base/adapter evaluation are needed to establish training improvement.
 
 `--native-batch-size N` sets the maximum queued requests per physical native
 rollout batch on each rank. It accepts a positive integer and defaults to `4`,

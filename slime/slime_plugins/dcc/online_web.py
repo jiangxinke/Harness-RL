@@ -31,6 +31,33 @@ HF_PROTOCOL = "hf-native-two-stage-thought-only-policy-v1"
 END_THINK = 151668
 GROUNDING = "native-sft-fetched-text-and-actual-final-prompt-v1"
 BEHAVIOR_SCORES = "streaming-generation-raw-logits-v1"
+TABLE_GROUNDED_REWARD = "table-grounded-exact-v1"
+ROW_GROUNDED_REWARD = "per-row-grounded-exact-v1"
+ONLINE_REWARD_VARIANTS = (TABLE_GROUNDED_REWARD, ROW_GROUNDED_REWARD)
+ROW_REWARD_PROTOCOL = "dcc-web-online-train-per-row-grounded-exact-v1"
+ROW_REWARD_WRAPPER = "dcc-hf-online-web-public-closed-per-row-grounded-v1"
+ROW_REWARD_METRIC = "train_per_row_grounded_exact_f1"
+
+
+def online_reward_configuration(variant=TABLE_GROUNDED_REWARD):
+    """Online-only composition; the original literal label contract is unchanged."""
+    if variant not in ONLINE_REWARD_VARIANTS:
+        raise ValueError("Unknown online Web TRAIN reward variant")
+    if variant == TABLE_GROUNDED_REWARD:
+        return dict(variant=variant, metric="train_exact_row_f1",
+                    grounding_scope="whole-table", train_reward=configuration())
+    return dict(version=ROW_REWARD_PROTOCOL, variant=variant, scope="widesearch-train-only",
+        metric=ROW_REWARD_METRIC, raw_literal_train_reward=configuration(),
+        grounding_protocol=GROUNDING, grounding_scope="per-predicted-row",
+        grounding_limitations="existing substring support across fetched-text pool; not semantic or citation-to-row entailment",
+        table_prerequisites="strict-literal-validity-and-unchanged-public-citation-guard",
+        true_positives="eligible-full-required-column-tuples; strict-multiset-gold-match",
+        denominator="all-predicted-rows-plus-all-gold-rows",
+        invalid_prediction="entire-table-zero; never-drop-malformed-rows",
+        prediction_duplicates="retain-all-occurrences; excess-is-false-positive",
+        empty_prediction="unchanged-native-nonempty-guard",
+        failed_outcomes="retained-with-zero-reward", unreliable_group="unchanged-discard",
+        label_access="after-own-durable-group-close", benchmark_score=False)
 
 
 def public_web_task(row):
@@ -514,8 +541,12 @@ async def collect_public_group(runner, task, policy, *, group_size, rank, iterat
             journals.abort(failure)
 
 
-def score_closed_group(group, *, inputs, tokenizer):
+def score_closed_group(group, *, inputs, tokenizer, reward_variant=TABLE_GROUNDED_REWARD):
     """Original literal scorer and original native SFT gates, after actual close."""
+    if reward_variant == ROW_GROUNDED_REWARD:
+        return _score_row_grounded_closed_group(group, inputs=inputs, tokenizer=tokenizer)
+    if reward_variant != TABLE_GROUNDED_REWARD:
+        raise ValueError("Unknown online Web TRAIN reward variant")
     from dcc_train_web_literal_reward import evaluate_train_literal_rows
     if not isinstance(group, ClosedPublicGroup) or not group.closure.get("journals_flushed"):
         raise ValueError("Closed public Web TRAIN group required before label access")
@@ -547,6 +578,79 @@ def score_closed_group(group, *, inputs, tokenizer):
         receipts.append(receipt)
         scored.append(replace(result, reward=value, metrics={**result.metrics, "train_literal": receipt}))
     return tuple(scored), dict(wrapper=WRAPPER, group_size=len(scored),
+        status_counts=dict(Counter(result.status for result in scored)),
+        all_outcomes_retained=True, model_failures_retained=True,
+        gradient_group_discarded=unreliable, receipts=receipts)
+
+
+def _row_grounded_components(task, result, label, decoded_final_prompt):
+    """Keep every row in the denominator; grounding limits TP eligibility only.
+
+    The existing guard checks substrings across the fetched-text pool, not
+    semantic entailment or a row's relation to its particular cited source.
+    Nonzero rewards can still be equal within a group and give zero advantage.
+    """
+    from dcc_train_web_literal_reward import evaluate_train_literal_rows, validate_label, _table
+    raw = evaluate_train_literal_rows(result.answer, label, task.to_dict(), expected_protocol=PROTOCOL)
+    grounding = dict(protocol=GROUNDING, scope="per-predicted-row", rows=[],
+        table_rejections=[], eligible_rows=0, true_positive_rows=0,
+        prediction_rows=raw["train_num_prediction_rows"], gold_rows=raw["train_num_gold_rows"])
+    if not raw["prediction_valid"]:
+        grounding["table_rejections"] = ["invalid_literal_prediction"]
+        return 0.0, raw, grounding
+    # Preserve the public schema/citation guard for the complete native answer.
+    # Only the additional fetched-cell/final-prompt gates become row-scoped.
+    guard = _WebEvidence()
+    for event in result.tool_events:
+        guard.observe(event.get("tool"), event.get("observation"))
+    grounding["table_rejections"] = guard.reject_reasons(task, result.answer)
+    if grounding["table_rejections"]:
+        return 0.0, raw, grounding
+    required, gold_keys = validate_label(label, task.to_dict(), expected_protocol=PROTOCOL)
+    pred_keys = _table(result.answer, required, gold=False)
+    eligible = Counter()
+    for index, (row, key) in enumerate(zip(result.answer, pred_keys, strict=True)):
+        reasons = unchanged_native_cell_grounding(task, replace(result, answer=[row]), decoded_final_prompt)
+        grounding["rows"].append(dict(row_index=index, eligible=not reasons, rejections=reasons))
+        if not reasons:
+            eligible[key] += 1
+    true = sum((eligible & Counter(gold_keys)).values())
+    grounding.update(eligible_rows=sum(eligible.values()), true_positive_rows=true)
+    # Do not score a filtered table: ineligible and duplicate rows still count.
+    return 2 * true / (len(pred_keys) + len(gold_keys)), raw, grounding
+
+
+def _score_row_grounded_closed_group(group, *, inputs, tokenizer):
+    """Explicit online TRAIN variant; no benchmark/SFT/DPO scorer is changed."""
+    if not isinstance(group, ClosedPublicGroup) or not group.closure.get("journals_flushed"):
+        raise ValueError("Closed public Web TRAIN group required before label access")
+    label = inputs.label_after_close(group)
+    unreliable = unreliable_context_or_environment_group(group.results)
+    allowed = {"completed", "max_steps", "invalid_answer", "evidence_failure",
+               "model_protocol_failure", "infrastructure_error", "context_budget_failure"}
+    profile = online_reward_configuration(ROW_GROUNDED_REWARD)
+    scored, receipts = [], []
+    for sample, result in enumerate(group.results):
+        if result.status not in allowed or result.reward != 0:
+            raise ValueError("All original unscored outcome statuses must remain in denominator")
+        value, raw, grounding = 0.0, None, None
+        if result.status == "completed" and not unreliable:
+            value, raw, grounding = _row_grounded_components(group.task, result, label,
+                tokenizer.decode(group.final_prompt_ids[sample], skip_special_tokens=False))
+        if not math.isfinite(value) or not 0 <= value <= 1:
+            raise ValueError("Finite bounded TRAIN row-grounded reward required")
+        receipt = dict(wrapper=ROW_REWARD_WRAPPER, sample=sample, task_id=group.task.id,
+            status=result.status, generation_closed_before_scoring=True,
+            reward_protocol=ROW_REWARD_PROTOCOL, reward_variant=ROW_GROUNDED_REWARD,
+            label_protocol=LABEL_PROTOCOL, train_reward=profile,
+            train_metric=dict(name=ROW_REWARD_METRIC, scope="widesearch-train-only",
+                              value=value, evaluated=raw is not None),
+            raw_literal_diagnostic=raw, per_row_grounding=grounding,
+            benchmark_score=False, gradient_group_discarded=unreliable)
+        receipts.append(receipt)
+        scored.append(replace(result, reward=value, metrics={**result.metrics, "train_literal": receipt}))
+    return tuple(scored), dict(wrapper=ROW_REWARD_WRAPPER, reward_variant=ROW_GROUNDED_REWARD,
+        train_reward=profile, group_size=len(scored),
         status_counts=dict(Counter(result.status for result in scored)),
         all_outcomes_retained=True, model_failures_retained=True,
         gradient_group_discarded=unreliable, receipts=receipts)

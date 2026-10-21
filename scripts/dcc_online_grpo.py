@@ -42,6 +42,8 @@ from slime_plugins.dcc.reference_kl import (VARIANT as REFERENCE_KL_VARIANT,
     frozen_base_logprobs, reference_kl_configuration, thought_reference_kl_loss,
     validate_base_reference_model, validate_reference_kl_beta)
 from slime_plugins.dcc.native_hf_context import context_handling_configuration
+from slime_plugins.dcc.online_web import (ONLINE_REWARD_VARIANTS, TABLE_GROUNDED_REWARD,
+    online_reward_configuration)
 from slime_plugins.dcc.retrieval import load_retrieval_profile
 from slime_plugins.dcc.tools import WebTools
 
@@ -310,6 +312,8 @@ def configuration(args, plan, tasks, world_size):
                        else "uniform-label-blind-CUAD-TRAIN-index-deck"),
             draws_per_cycle=dict(cuad=args.cuad_draws_per_cycle,
                                  widesearch=args.web_draws_per_cycle),
+            online_train_reward=online_reward_configuration(
+                getattr(args, "web_train_reward_variant", TABLE_GROUNDED_REWARD)),
             labels="deserialized-only-after-own-group-durable-close")
     return config
 
@@ -481,7 +485,8 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
                     group_size=args.group_size, rank=rank, iteration=iteration,
                     directory=args.output_dir / "web_groups" / f"iteration_{iteration:06d}_rank{rank}",
                     source_commit=args.source_commit)
-                results, web_reward = score_closed_group(closed, inputs=web_inputs, tokenizer=tokenizer)
+                results, web_reward = score_closed_group(closed, inputs=web_inputs, tokenizer=tokenizer,
+                    reward_variant=getattr(args, "web_train_reward_variant", TABLE_GROUNDED_REWARD))
                 record(event="web_group_scored", iteration=iteration, closure=closed.closure,
                        **web_reward)
             else:
@@ -587,6 +592,9 @@ def main(argv=None):
     parser.add_argument("--web-train-data", type=Path)
     parser.add_argument("--web-train-labels", type=Path)
     parser.add_argument("--web-binding", type=Path)
+    parser.add_argument("--web-train-reward-variant", choices=ONLINE_REWARD_VARIANTS,
+                        default=TABLE_GROUNDED_REWARD,
+                        help="Online Web TRAIN only: original whole-table grounding (default), or per-row TP eligibility with full prediction/gold denominators")
     parser.add_argument("--cuad-draws-per-cycle", type=int, default=1)
     parser.add_argument("--web-draws-per-cycle", type=int, default=1)
     parser.add_argument("--cuad-task-sampling", choices=("stratified-3to1", "uniform"),
@@ -639,6 +647,8 @@ def main(argv=None):
         validate_reference_kl_beta(args.reference_kl_beta)
     except ValueError as error:
         parser.error(str(error))
+    if args.web_train_reward_variant != TABLE_GROUNDED_REWARD and not args.enable_online_web:
+        parser.error("--web-train-reward-variant requires --enable-online-web")
     import re
     if not re.fullmatch(r"[0-9a-f]{40}", args.source_commit):
         parser.error("--source-commit requires actual complete committed runtime identity")
