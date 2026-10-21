@@ -210,10 +210,22 @@ def review_request_state(profile, record, collector=None, *, cached_sources=None
         schema = web_review_schema(web_action_schema(columns, evidence.fetched_sources,
             successful_search=bool(evidence.searches), cached_rows=profile.cached_rows, **schema_options))
         Draft202012Validator(schema).validate(action)
-        require(isinstance(action, dict) and "answer" not in action
-                and action.get("tool") in {"web_search", "fetch_url"},
-                "Historical actions must be exact reviewed tools, without earlier finals or feedback")
         observation_message = messages[index + 1]
+        if "answer" in action:
+            # A rejected final consumes a model turn but executes no tool. Replay
+            # only the runner's exact public feedback; this grants no native
+            # trace or accepted-SFT eligibility to a later failed request.
+            reasons = evidence.reject_reasons(task, action["answer"])
+            require(bool(reasons), "Historical final was not rejected by the public evidence guard")
+            require(observation_message == {"role": "user", "content":
+                    evidence.feedback(reasons, 20 - turn - 1, task)},
+                    "Rejected final feedback differs from exact public evidence replay")
+            evidence.rejections.append({"turn": turn, "reasons": reasons})
+            turn += 1
+            index += 2
+            continue
+        require(action.get("tool") in {"web_search", "fetch_url"},
+                "Historical actions must be exact reviewed tools or publicly rejected finals")
         require(observation_message["role"] == "user"
                 and observation_message["content"].startswith(observation_prefix), "Actual tool observation required")
         text = observation_message["content"][len(observation_prefix):]
