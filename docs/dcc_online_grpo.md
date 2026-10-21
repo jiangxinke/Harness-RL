@@ -34,6 +34,12 @@ budgets and evaluation sampling. Scores from older vLLM runs are not matched
 controls for this runtime. The matched CUAD evaluator rejects Web. The trainer offers separately reviewed
 Web TRAIN groups through the opt-in switch described in `dcc_online_web.md`.
 
+For Web groups, the separate default-off
+[`--web-concise-reasoning`](dcc_web_concise_reasoning.md) adds generic prompt
+guidance toward the next real action. It leaves CUAD and all generation,
+evidence and optimization rules unchanged; no performance improvement is
+established by enabling it.
+
 Install `configs/dcc/requirements-online-grpo.txt` in the separate quantized
 environment. Set paths locally; none is embedded in the code:
 

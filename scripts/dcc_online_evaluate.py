@@ -338,6 +338,8 @@ def parser():
     result.add_argument("--retrieval-task-bound-expansion", action="store_true")
     result.add_argument("--cuad-concise-reasoning", action="store_true",
                         help="Opt in to concise CUAD source-offset reasoning; must match base and adapter evaluation")
+    result.add_argument("--web-concise-reasoning", action="store_true",
+                        help="Web only: concise reasoning toward the next actual action; must match base and adapter Web evaluation")
     result.add_argument("--auto-read-sources", type=int, choices=(0, 1, 2), default=2)
     result.add_argument("--auto-read-follow-docs", action="store_true",
                         help="Prioritize one observed same-origin documentation link within existing automatic-read budgets; must match base and adapter")

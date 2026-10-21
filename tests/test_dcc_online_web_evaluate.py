@@ -273,6 +273,42 @@ def test_base_adapter_match_across_shards_and_actual_strict_proxy_semantics(eval
     assert len(evaluator.loads) == 3 and not torch.cuda.is_initialized()
 
 
+@pytest.mark.parametrize("base_enabled,adapter_enabled", [(False, False), (True, True), (False, True), (True, False)])
+def test_web_reasoning_flag_must_match_base_and_adapter(evaluator, tmp_path, base_enabled, adapter_enabled):
+    from slime_plugins.dcc.web_reasoning import web_concise_reasoning_configuration
+
+    tasks = references(("success",))
+    base = arguments(evaluator, tmp_path / "base", web_concise_reasoning=base_enabled)
+    public = generate(evaluator, base, tasks, tmp_path)
+    evaluator.score(base, tasks)
+    adapter = arguments(evaluator, tmp_path / "trained", web_concise_reasoning=adapter_enabled,
+        adapter=make_adapter(tmp_path / "adapter"), base_output_dir=base.output_dir)
+    asyncio.run(evaluator.generate(adapter, public))
+    for args, enabled in ((base, base_enabled), (adapter, adapter_enabled)):
+        harness = json.loads((args.output_dir / "config_rank0.json").read_text())["comparison"]["harness"]
+        if enabled:
+            assert harness["web_concise_reasoning"] == web_concise_reasoning_configuration(True)
+        else:
+            assert "web_concise_reasoning" not in harness
+    if base_enabled == adapter_enabled:
+        assert evaluator.score(adapter, tasks)["matched_base"]["f1_by_row_delta"] == 0
+    else:
+        with pytest.raises(ValueError, match="configuration, precision, runtime or closure differs"):
+            evaluator.score(adapter, tasks)
+    assert not torch.cuda.is_initialized()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_score_only_rejects_changed_web_reasoning_flag(evaluator, tmp_path, enabled):
+    tasks = references(("success",))
+    args = arguments(evaluator, tmp_path / "run", web_concise_reasoning=enabled)
+    generate(evaluator, args, tasks, tmp_path)
+    args.web_concise_reasoning = not enabled
+    with pytest.raises(ValueError, match="configuration, precision, runtime or closure differs"):
+        evaluator.score(args, tasks)
+    assert not evaluator.metric_calls and not torch.cuda.is_initialized()
+
+
 @pytest.mark.parametrize("package", ["pypdf", "trafilatura", "lxml"])
 @pytest.mark.parametrize("base_version,adapter_version", [
     ("CPU-present-v1", "CPU-present-v1"), (None, None),

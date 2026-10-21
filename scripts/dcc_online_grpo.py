@@ -144,6 +144,7 @@ def make_runner(args):
         retrieval_task_bound_expansion=args.retrieval_task_bound_expansion,
         cuad_structured_actions=True,
         cuad_concise_reasoning=getattr(args, "cuad_concise_reasoning", False),
+        web_concise_reasoning=getattr(args, "web_concise_reasoning", False),
         auto_read_sources=args.auto_read_sources,
         auto_read_follow_docs=getattr(args, "auto_read_follow_docs", False),
         web_tools_factory=partial(make_web_tools, args),
@@ -305,6 +306,7 @@ async def collect_group(runner, task, policy, *, group_size, rank):
 
 def configuration(args, plan, tasks, world_size):
     from slime_plugins.dcc.web_archive import web_zip_member_fallback_configuration
+    from slime_plugins.dcc.web_reasoning import web_concise_reasoning_configuration
 
     surrogate = getattr(args, "policy_surrogate", "token-grpo")
     validate_policy_surrogate(surrogate, getattr(args, "reference_kl_beta", 0))
@@ -315,13 +317,14 @@ def configuration(args, plan, tasks, world_size):
             getattr(args, "enable_online_web", False) or any(t.benchmark != "cuad" for t in tasks)):
         raise ValueError("Joint JSON policy currently supports CUAD only; online Web is unsupported")
     web = make_web_tools(args)
+    web_reasoning = web_concise_reasoning_configuration(getattr(args, "web_concise_reasoning", False))
     reference_kl = reference_kl_configuration(getattr(args, "reference_kl_beta", 0),
         base_model=args.model, source_commit=args.source_commit)
     config = dict(algorithm=ALGORITHM, runtime="independent-HF; not Slime/Megatron",
         source_commit=args.source_commit, world_size=world_size,
         arguments={key: str(value) if isinstance(value, Path) else value
                    for key, value in vars(args).items()
-                   if (key not in {"joint_json_policy", "web_zip_member_fallback"} or value)
+                   if (key not in {"joint_json_policy", "web_zip_member_fallback", "web_concise_reasoning"} or value)
                    and (key != "policy_surrogate" or value != "token-grpo")},
         compute_profile=compute_profile_configuration(getattr(args, "compute_profile", "legacy")),
         cuad_concise_reasoning=cuad_concise_reasoning_configuration(getattr(args, "cuad_concise_reasoning", False)),
@@ -370,6 +373,8 @@ def configuration(args, plan, tasks, world_size):
         config["policy_surrogate"] = gspo_configuration()
     if getattr(args, "enable_online_web", False):
         from slime_plugins.dcc.online_web import binding_protocols
+        if web_reasoning["enabled"]:
+            config["web_concise_reasoning"] = web_reasoning
         if web.web_zip_member_fallback:
             config["web_zip_member_fallback"] = web_zip_member_fallback_configuration(True)
         config["online_web"] = dict(enabled=True, protocols=binding_protocols(),
@@ -749,6 +754,8 @@ def main(argv=None):
     parser.add_argument("--retrieval-task-bound-expansion", action="store_true")
     parser.add_argument("--cuad-concise-reasoning", action="store_true",
                         help="Opt in to brief CUAD reasoning using only observed source identifiers/character ranges; answer spans and schema are unchanged")
+    parser.add_argument("--web-concise-reasoning", action="store_true",
+                        help="Opt in to concise Web reasoning focused on the next actual action; budgets, evidence and schemas are unchanged")
     parser.add_argument("--auto-read-sources", type=int, choices=(0, 1, 2), default=2)
     parser.add_argument("--auto-read-follow-docs", action="store_true",
                         help="Within existing automatic-read budgets, prioritize one observed same-origin Help/API/documentation link per search")

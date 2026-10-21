@@ -105,6 +105,7 @@ def web_tool_configuration(runner):
 def runner_configuration(args):
     """Read actual shared runner settings, including complete versioned guards."""
     from slime_plugins.dcc.cuad_reasoning import cuad_concise_reasoning_configuration
+    from slime_plugins.dcc.web_reasoning import web_concise_reasoning_configuration
     from slime_plugins.dcc.web_structured import (web_structured_actions_configuration,
         web_structured_configuration, web_multi_citation_configuration)
     from slime_plugins.dcc.web_review import web_explicit_review_configuration
@@ -119,7 +120,7 @@ def runner_configuration(args):
     scalar = ("max_steps", "max_new_tokens", "temperature", "evaluation_temperature", "initial_chunks",
               "timeout_seconds", "auto_read_sources", "retrieval_context_chars", "retrieval_max_context_chars",
               "retrieval_task_bound_expansion", "cuad_structured_actions")
-    return {"shared_factory": "dcc_online_grpo.make_runner", "episode_prompt": EPISODE_PROMPT_VERSION,
+    config = {"shared_factory": "dcc_online_grpo.make_runner", "episode_prompt": EPISODE_PROMPT_VERSION,
             "cuad_concise_reasoning": cuad_concise_reasoning_configuration(runner.cuad_concise_reasoning),
             "auto_read_follow_docs": auto_read_follow_docs_configuration(runner.auto_read_follow_docs),
             "prompt_encoding": PROMPT_ENCODING_VERSION, "evidence_guard": WIDESEARCH_EVIDENCE_GUARD_VERSION,
@@ -135,6 +136,9 @@ def runner_configuration(args):
             "web_cached_rows": web_cached_rows_configuration(runner.web_cached_rows),
             "web_bounded_whitespace": web_bounded_whitespace_configuration(False),
             "web_tools": web_tool_configuration(runner)}
+    if runner.web_concise_reasoning:
+        config["web_concise_reasoning"] = web_concise_reasoning_configuration(True)
+    return config
 
 
 def manifest(args, tasks):

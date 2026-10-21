@@ -115,3 +115,7 @@ improvement. A CPU test, runtime smoke or one favorable DEV comparison does not
 establish an official benchmark improvement or statistical confidence.
 
 The optional [`--web-zip-member-fallback`](dcc_web_zip_member_fallback.md) skips whole ZIP text members only at character caps; it defaults off, retains all byte and archive validation limits, and must match across compared policies.
+
+The optional [`--web-concise-reasoning`](dcc_web_concise_reasoning.md) adds
+generic guidance toward the next real action. It defaults off, preserves all
+generation and evidence rules, and must match across compared policies.
