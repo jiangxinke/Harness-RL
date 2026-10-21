@@ -157,8 +157,10 @@ def fixed_tasks(tasks, *, max_tasks_per_benchmark, rank, world_size):
 
 class RecordingPolicy:
     """Record exact caller requests; never rewrite messages or original schemas."""
-    def __init__(self, native, journal, *, task_id, rank, episode_id):
+    def __init__(self, native, journal, *, task_id, rank, episode_id, allow_evidence_feedback=False):
+        require(type(allow_evidence_feedback) is bool, "Evidence-feedback opt-in must be boolean")
         self.native, self.journal = native, journal
+        self.allow_evidence_feedback = allow_evidence_feedback
         self.task_id, self.rank, self.episode_id = task_id, rank, episode_id
         self.trace_ids = []
         self.cuad_retrieval = None
@@ -179,7 +181,7 @@ class RecordingPolicy:
                                if self.cuad_retrieval is not None else {})})
         error, completion = None, None
         try:
-            if any(message["role"] == "user" and message["content"].startswith(
+            if not self.allow_evidence_feedback and any(message["role"] == "user" and message["content"].startswith(
                     "Evidence check: final answer rejected.") for message in messages):
                 # Runner has no feedback-off option. Stop before another native
                 # request rather than remove feedback or train on another prompt.
@@ -299,7 +301,8 @@ async def generate(tasks, native, output, *, collection_id, profile, schema_prof
         async def one(task):
             async with semaphore:
                 episode_id = collection_id + ":" + task.id
-                recorder = RecordingPolicy(native, requests, task_id=task.id, rank=rank, episode_id=episode_id)
+                recorder = RecordingPolicy(native, requests, task_id=task.id, rank=rank, episode_id=episode_id,
+                    allow_evidence_feedback=(task.benchmark == "widesearch" and schema_profile.web.evidence_feedback))
                 result, error = None, None
                 try:
                     actual_web_factory = web_tools_factory
@@ -581,6 +584,11 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
             and maximum_episode_requests > 0, "Positive complete-trajectory request limit required")
     require(web_train_reward_protocol in {LEGACY_WEB_TRAIN_REWARD, LITERAL_WEB_TRAIN_REWARD},
             "Unsupported explicitly selected TRAIN Web reward protocol")
+    feedback_enabled = schema_profile is not None and schema_profile.web.evidence_feedback
+    if feedback_enabled:
+        from dcc_review_training import approved_web_profile
+        require(approved_web_profile(profile, WebSchemaProfile) == schema_profile.web,
+                "Evidence-feedback selection requires the exact independently approved profile")
     cache_sources = None
     if schema_profile is not None and schema_profile.web.cached_rows:
         cache_sources = {}
@@ -598,6 +606,7 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
     web, cuad = Journal(destination / "native_web_train.jsonl"), Journal(destination / "native_cuad_train.jsonl")
     audit, decisions = Journal(destination / "audit.jsonl"), Journal(destination / "decisions.jsonl")
     source_journal = Journal(destination / "native_web_cached_sources.jsonl") if cache_sources is not None else None
+    excluded_journal = Journal(destination / "excluded_public_rejected_finals.jsonl") if feedback_enabled else None
     published_sources = set()
     accepted = rejected = 0
     accepted_segments, accepted_phase_requests = set(), set()
@@ -625,6 +634,17 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                         score = evaluate_widesearch(episode["answer"], label["gold"], evaluation)
                         measure, score_protocol = score["f1_by_item"], "strict_exact_proxy"
                 require(measure >= minimum_score, "TRAIN correctness threshold not met")
+                rejected_actions, excluded, all_phase_requests = {}, [], []
+                if feedback_enabled and episode["benchmark"] == "widesearch":
+                    from dcc_review_training import rejected_final_actions
+                    last_request = requests[episode["trace_ids"][-1]][0]
+                    replay = {"source": "independent_curriculum", "split": "train",
+                              "task_id": episode["task_id"], "messages": last_request["messages"]}
+                    last_owner = {"turn": last_request["turn_index"], "episode_id": episode["episode_id"]}
+                    if cache_sources is not None:
+                        last_owner["web_cached_rows"] = last_request["web_cached_rows"]
+                    rejected_actions = rejected_final_actions(schema_profile.web, replay, last_owner,
+                                                              cached_sources=cache_sources)
                 for key in episode["trace_ids"]:
                     request, response = requests[key]
                     require(key in traces and response["exception_type"] is None
@@ -641,7 +661,17 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                     if episode["benchmark"] == "cuad" and schema_profile.cuad.retrieval is not None:
                         owner.update(cuad_retrieval=copy.deepcopy(schema_profile.cuad.retrieval),
                                      public_task=copy.deepcopy(episode["public_task"]))
-                    schema = schema_profile.original_schema(record, owner)
+                    publicly_rejected = request["turn_index"] in rejected_actions
+                    if publicly_rejected:
+                        from dcc_review_training import review_request_state
+                        require(record["stage"] == "final"
+                                and json_text(_strict_json(record["completion"]))
+                                    == json_text(rejected_actions[request["turn_index"]]),
+                                "Rejected public history differs from the actual original native action")
+                        schema, _ = review_request_state(schema_profile.web, record, owner,
+                                                         cached_sources=cache_sources)
+                    else:
+                        schema = schema_profile.original_schema(record, owner)
                     require(request["options"] == {"max_new_tokens": identity.budget.total_tokens, "temperature": 0.0,
                                                   "json_schema": schema}, "Recorded actual request schema/options differ")
                     bundle = {"contract": CONTRACT, "record": record, "identity": identity.manifest(tokenizer),
@@ -651,14 +681,24 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                             "turn": request["turn_index"], "rank": request["rank"], "trace_id": key,
                             **{name: value for name, value in owner.items() if name != "turn"}},
                         "native_trace": copy.deepcopy(trace)}
+                    all_phase_requests.extend(phase["request_id"] for phase in trace["phases"])
+                    if publicly_rejected:
+                        from dcc_native_physical import validate_native_physical
+                        validate_native_physical(bundle, tokenizer, expected_identity=identity, original_schema=schema)
+                        excluded.append({"task_id": episode["task_id"], "episode_id": episode["episode_id"],
+                            "trace_id": key, "turn": request["turn_index"],
+                            "reason": "exact_public_evidence_rejection", "physical_native_validated": True,
+                            "positive_SFT_target": False, "retained_in_original_request_history": True,
+                            "effective_prompt_uses_approved_history_policy": True})
+                        continue
                     validate_native_record(bundle, tokenizer, expected_identity=identity, original_schema=schema,
                                            web_schema_profile=schema_profile.web, cached_sources=cache_sources,
                                            cuad_schema_profile=schema_profile.cuad)
                     bundles.append(bundle)
                 require(bundles, "Completed episode has no actual requests")
                 segment_keys = [_segment_key(bundle["record"]) for bundle in bundles]
-                phase_requests = [phase["request_id"] for bundle in bundles
-                                  for phase in bundle["native_trace"]["phases"]]
+                # Include excluded rejected finals in phase ownership checks.
+                phase_requests = all_phase_requests
                 require(len(segment_keys) == len(set(segment_keys))
                         and not accepted_segments.intersection(segment_keys), "Repeated original TRAIN segment")
                 require(len(phase_requests) == len(set(phase_requests))
@@ -671,11 +711,17 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                             source_journal.write(source); published_sources.add(source_id)
                 for bundle in bundles:
                     (cuad if episode["benchmark"] == "cuad" else web).write(bundle)
+                for row in excluded:
+                    excluded_journal.write(row)
                 accepted_segments.update(segment_keys)
                 accepted_phase_requests.update(phase_requests)
                 accepted += 1
                 decisions.write({"task_id": episode["task_id"], "accepted": True,
                                  "segments": len(bundles), "score": measure, "score_protocol": score_protocol,
+                                 **({"excluded_public_rejected_finals": excluded,
+                                     "all_original_requests_physically_validated": True,
+                                     "supervision_policy": "native-actions-except-publicly-rejected-finals-v1"}
+                                    if feedback_enabled and episode["benchmark"] == "widesearch" else {}),
                                  **({"train_evaluation": evaluation} if episode["benchmark"] == "widesearch" else {}),
                                  **({"train_reward": score["train_reward"],
                                      "label_protocol": score["label_protocol"]}
@@ -688,7 +734,9 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                              "episode": episode})
                 decisions.write({"task_id": episode["task_id"], "accepted": False, "reason": str(exc)})
     finally:
-        for journal in (web, cuad, audit, decisions) + ((source_journal,) if source_journal is not None else ()):
+        for journal in ((web, cuad, audit, decisions)
+                        + ((source_journal,) if source_journal is not None else ())
+                        + ((excluded_journal,) if excluded_journal is not None else ())):
             journal.close()
     if web.count:
         load_native_training_data(destination / "native_web_train.jsonl", tokenizer,
@@ -701,6 +749,13 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                "nonempty_mixed_training_data": bool(web.count and cuad.count),
                "held_out_labels_read": False, "web_selection_score": "strict_exact_proxy",
                "web_required_only_default": "all-required-compound-key-exact-match-v1"}
+    if feedback_enabled:
+        summary.update(web_evidence_feedback=True,
+            web_supervision_policy="native-actions-except-publicly-rejected-finals-v1",
+            whole_trajectory_filter_only=False,
+            excluded_public_rejected_final_records=excluded_journal.count,
+            rejected_final_targets_receive_loss=False,
+            original_request_and_failure_denominator_retained=True)
     if web_train_reward_protocol == LITERAL_WEB_TRAIN_REWARD:
         from dcc_train_web_literal_reward import configuration, LABEL_PROTOCOL
         summary.update(version="native-train-collection-closed-journals-literal-reward-v1",
@@ -712,7 +767,7 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
         summary["web_cached_source_records"] = len(published_sources)
     if maximum_episode_requests is not None:
         summary["maximum_episode_requests"] = maximum_episode_requests
-        summary["whole_trajectory_filter_only"] = True
+        summary["whole_trajectory_filter_only"] = not feedback_enabled
     write_fresh_json(destination / "selection_summary.json", summary)
     write_fresh_json(destination / "native_train_profile.json", profile)
     return summary

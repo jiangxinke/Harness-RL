@@ -54,6 +54,29 @@ more than four citations remain invalid. Omitting this option preserves the
 original one-citation schema and profile JSON; it can be combined with discovery
 guidance for a separate, explicitly configured collection.
 
+Reviewed Web TRAIN profiles can set `"evidence_feedback": true` in their `web`
+object to collect recovery after a final answer fails the runner's public evidence
+check. This setting is read from the independently approved profile; no additional
+CLI flag is needed. Omission or `false` preserves the original stop and acceptance
+rules. Use a fresh collection ID and committed source for this experiment.
+
+With this option, the selector verifies each rejected answer and its exact public
+feedback against the preceding tool observations. Every original request still
+needs its own successful native response, physical token validation, and unique
+phase request IDs. Rejected finals are recorded in
+`excluded_public_rejected_finals.jsonl` and excluded from positive SFT targets.
+Their exact messages remain in the original request history; the approved
+whole-turn history policy still determines the effective model prompt. Subsequent
+targets retain the existing schema, source-grounding, encoded-prompt, and TRAIN
+correctness checks. The default minimum score remains `1.0`.
+
+This is explicitly a different supervision policy from exporting every action in
+a successful trajectory. Decisions and the selection summary record that policy,
+the exclusions, and the original request/failure denominator. A later correct
+answer never certifies an earlier missing or failed native trace. This option
+changes TRAIN collection and selection; it does not change evaluation feedback,
+benchmark scoring, sampling budgets, or existing frozen datasets.
+
 Prospective preference export replays the same approved source settings for both
 the original action schema and the final-only candidate schema. Enabled controls
 are explicitly frozen and must match the actual candidate engine provenance;

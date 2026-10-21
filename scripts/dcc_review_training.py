@@ -106,7 +106,7 @@ def approved_web_profile(profile, profile_class):
     keys = {"max_steps", "explicit_review", "cached_rows"}
     if version in {REVIEW20_PROFILE, WEB32K_PROFILE, WEB32K_CACHED_PROFILE, WEB32K_CACHED_8K_PROFILE}:
         keys.add("navigation_ledger")
-    optional_web_keys = ({"data_discovery_guidance", "multi_citation"} if version in {
+    optional_web_keys = ({"data_discovery_guidance", "multi_citation", "evidence_feedback"} if version in {
         REVIEW20_PROFILE, WEB32K_PROFILE, WEB32K_CACHED_PROFILE, WEB32K_CACHED_8K_PROFILE} else set())
     if version in CACHED_TRAIN_PROFILES:
         keys.add("cached_rows_configuration")
@@ -155,7 +155,7 @@ def bind_profile_source(profile, source_root):
 def review_request_state(profile, record, collector=None, *, cached_sources=None):
     """Rebuild exact runner messages/schema from public tool events, never targets.
 
-    Returns only the trusted schema and indices of exact terminal controls.
+    Returns the trusted schema and indices of exactly verified public controls.
     Original messages/targets stay intact for native token equality and training.
     """
     from slime_plugins.dcc.data import Task
@@ -203,6 +203,7 @@ def review_request_state(profile, record, collector=None, *, cached_sources=None
         from dcc_train_cached_rows import CachedReplay
         cached_replay = CachedReplay(collector, cached_sources, task_id=record["task_id"])
     evidence, events, turn, index = _WebEvidence(), [], 0, 2
+    rejected_controls = set()
     observation_prefix = "Tool observation (source material):\n"
     while index < len(messages) and messages[index]["role"] == "assistant":
         require(turn < 19 and index + 1 < len(messages), "Historical tool exceeds TRAIN20 budget")
@@ -221,6 +222,10 @@ def review_request_state(profile, record, collector=None, *, cached_sources=None
                     evidence.feedback(reasons, 20 - turn - 1, task)},
                     "Rejected final feedback differs from exact public evidence replay")
             evidence.rejections.append({"turn": turn, "reasons": reasons})
+            if profile.evidence_feedback:
+                # These remain exact masked prompt context. They are never
+                # positive SFT targets; the selector audits their native IDs.
+                rejected_controls.update((index, index + 1))
             turn += 1
             index += 2
             continue
@@ -258,4 +263,23 @@ def review_request_state(profile, record, collector=None, *, cached_sources=None
     schema = (web_final_schema(columns, evidence.fetched_sources, **schema_options) if turn == 19 else
               web_action_schema(columns, evidence.fetched_sources,
                                 successful_search=bool(evidence.searches), cached_rows=profile.cached_rows, **schema_options))
-    return web_review_schema(schema), set(range(index, len(messages)))
+    return web_review_schema(schema), rejected_controls | set(range(index, len(messages)))
+
+
+def rejected_final_actions(profile, record, collector, *, cached_sources=None):
+    """Return only early finals rejected by the exact public evidence replay.
+
+    This inspects public history, never labels. The caller must also match each
+    action to its original native response and validate the physical token IDs.
+    """
+    require(profile.evidence_feedback is True, "Explicit evidence-feedback profile required")
+    _, controls = review_request_state(profile, record, collector, cached_sources=cached_sources)
+    actions, turn = {}, 0
+    for index, message in enumerate(record["messages"][2:], 2):
+        if message["role"] == "assistant":
+            if index in controls:
+                action = strict_json(message["content"])
+                require("answer" in action, "Only rejected final actions may be masked history")
+                actions[turn] = action
+            turn += 1
+    return actions

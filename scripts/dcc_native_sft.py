@@ -342,6 +342,7 @@ class WebSchemaProfile:
     data_discovery_guidance: bool = False
     multi_citation: bool = False
     cached_rows_configuration: dict | None = None
+    evidence_feedback: bool = False
 
     def validate(self):
         _require(type(self.max_steps) is int and self.max_steps > 0,
@@ -354,6 +355,10 @@ class WebSchemaProfile:
                  "Trusted discovery guidance flag must be boolean")
         _require(type(self.multi_citation) is bool,
                  "Trusted multi-citation flag must be boolean")
+        _require(type(self.evidence_feedback) is bool,
+                 "Trusted evidence-feedback flag must be boolean")
+        _require(not self.evidence_feedback or self.explicit_review,
+                 "Evidence-feedback collection requires explicit public review replay")
         _require(not self.data_discovery_guidance or
                  self.profile_version in {REVIEW20_PROFILE, WEB32K_PROFILE, WEB32K_CACHED_PROFILE, WEB32K_CACHED_8K_PROFILE},
                  "Discovery guidance requires an explicit reviewed Web TRAIN profile")
