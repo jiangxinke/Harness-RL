@@ -35,6 +35,21 @@ checks still apply independently.
 The result is `train_exact_row_f1`, with precision, recall and table-match
 diagnostics. It is a TRAIN reward, not the official WideSearch item score or a
 benchmark result. The selector records the full new reward declaration and a
-separate summary version. The offline reward/DPO route does not yet support
-this protocol; do not send these labels through its legacy scorer or reuse old
-reward receipts.
+separate summary version.
+
+The offline reward scorer accepts this protocol only with the new manifest
+version `native-final-train-literal-row-reward-inputs-v1`. Each literal Web
+collection must declare its exact `reward_version` and full `train_reward`.
+All original and candidate generation journals and cross-collection ownership
+must close before labels are opened. The original evidence guard still applies.
+
+Literal reward receipts use
+`native-final-train-literal-row-reward-receipt-v1`, retaining the full reward
+configuration, label protocol, TRAIN-only metric and evidence-guard outcome.
+DPO requires the explicitly approved manifest version
+`native-final-dpo-literal-row-collections-v1` and the same complete declaration.
+It validates receipt metadata before constructing training pairs and retains
+each collection's configuration in checkpoint and adapter approval metadata.
+The strict reward-gap threshold and fresh LoRA/reference behavior are unchanged.
+This is offline DPO, not online RL. Legacy receipts, labels and manifest
+versions cannot implicitly select the new reward.

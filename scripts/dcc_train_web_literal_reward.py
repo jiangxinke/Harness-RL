@@ -9,53 +9,13 @@ from __future__ import annotations
 from collections import Counter
 import json
 
-PROTOCOL = "dcc-web-train-native-text-null-exact-v1"
-LABEL_PROTOCOL = "dcc-web-train-native-text-null-label-v1"
-TABLE_INPUT_PROTOCOL = "native-json-text-null-no-inference-v1"
-
-
-class RewardContractError(ValueError):
-    """The label, public task or caller approval is invalid; abort preparation."""
+from slime_plugins.dcc_train_literal_reward_contract import (
+    PROTOCOL, LABEL_PROTOCOL, TABLE_INPUT_PROTOCOL, RewardContractError, configuration, _same,
+)
 
 
 class _InvalidPrediction(ValueError):
     pass
-
-
-def configuration():
-    """Return a fresh complete declaration; callers cannot silently amend it."""
-    return {
-        "version": PROTOCOL,
-        "scope": "widesearch-train-only",
-        "label_protocol": LABEL_PROTOCOL,
-        "table_input_protocol": TABLE_INPUT_PROTOCOL,
-        "metric": "train_exact_row_f1",
-        "cells": "json-string-or-null-only; exact-unicode-codepoints-and-type",
-        "numeric_cells": "forbidden; exact-decimal-text-remains-json-string",
-        "string_normalization": "none",
-        "nulls": "null-only; distinct-from-empty-string-and-null-like-text",
-        "row_key": "all-required-columns-as-ordered-exact-tuple",
-        "row_order": "ignored",
-        "row_nonemptiness": "at-least-one-nonempty-text-cell; original-native-guard-unchanged",
-        "gold_duplicates": "reject-full-row-duplicates",
-        "prediction_duplicates": "retain-all-occurrences; excess-is-false-positive",
-        "columns": "exact-required-column-names; no-extra-or-missing-content-fields",
-        "citations": "optional-1-to-4-distinct-nonempty-strings; excluded-from-content; existing-grounding-required",
-        "empty_tables": "both-empty-f1=1; otherwise-2TP/(predicted+gold)",
-        "invalid_prediction": "entire-table-reward-zero; never-drop-malformed-rows",
-        "limits": {"rows": 4096, "columns": 32, "cell_chars": 65536,
-                   "total_text_chars": 1000000, "prediction_json_chars": 2000000},
-    }
-
-
-def _same(left, right):
-    if type(left) is not type(right):
-        return False
-    if type(left) is dict:
-        return left.keys() == right.keys() and all(_same(left[k], right[k]) for k in left)
-    if type(left) is list:
-        return len(left) == len(right) and all(_same(a, b) for a, b in zip(left, right))
-    return left == right
 
 
 def _text(value, fail, *, allow_empty=True):

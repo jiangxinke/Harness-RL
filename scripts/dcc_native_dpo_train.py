@@ -35,6 +35,11 @@ from dcc_training_io import TrainingJournal, finalize_training, prepare_training
 from slime_plugins.dcc.hf_policy import completion_logprobs, load_policy_model
 from slime_plugins.dcc.hf_chunked_logprobs import resolve_logprob_backend
 from slime_plugins.dcc.native_dpo_adapter import DPO_METHOD, PAIR_CONTRACT
+from slime_plugins.dcc.episode import WIDESEARCH_EVIDENCE_GUARD_VERSION
+from slime_plugins.dcc_train_literal_reward_contract import (
+    PROTOCOL as LITERAL_PROTOCOL, LITERAL_RECEIPT, LITERAL_DPO_COLLECTIONS, PER_COLLECTION_RECEIPTS,
+    configuration as literal_configuration, validate_approval, validate_literal_receipt,
+)
 
 ALGORITHM = "offline_native_final_DPO; not RL"
 QUANTIZATION_ID = "qwen3-moe-nf4-double-quant-bf16-compute-transformers-4.57.6-v1"
@@ -78,18 +83,28 @@ def training_source_identity(expected_source):
             "tracked_runtime_clean": True, "training_entrypoint": "dcc_native_dpo_train.py"}
 
 
-def read_train_rewards(path, *, reward_version):
+def read_train_rewards(path, *, reward_version, train_reward=None):
     """Call only after read_closed_g4 returned successfully on ALL ranks."""
+    literal = reward_version == LITERAL_PROTOCOL
+    if literal:
+        validate_approval(train_reward, expected_protocol=reward_version)
+    else:
+        require(train_reward is None, "Legacy reward receipts exclude new configuration metadata")
     indexed = {}
     with Path(path).open(encoding="utf-8") as stream:
         for line in stream:
             require(line.endswith("\n"), "Incomplete offline reward receipt journal")
             row = _strict_json(line)
-            require(isinstance(row, dict) and set(row) == {"contract", "task_id", "trace_id", "prefix_id",
-                "harness_id", "reward_version", "value", "generation_closed_before_scoring", "split"}
-                and row["contract"] == REWARD_CONTRACT and row["reward_version"] == reward_version,
-                "Explicit separately approved reward receipt version required")
-            receipt = TrainRewardReceipt(**{key: value for key, value in row.items() if key != "contract"})
+            if literal:
+                fields = validate_literal_receipt(row, reward_version=reward_version, train_reward=train_reward,
+                    evidence_guard_version=WIDESEARCH_EVIDENCE_GUARD_VERSION)
+                receipt = TrainRewardReceipt(**fields)
+            else:
+                require(isinstance(row, dict) and set(row) == {"contract", "task_id", "trace_id", "prefix_id",
+                    "harness_id", "reward_version", "value", "generation_closed_before_scoring", "split"}
+                    and row["contract"] == REWARD_CONTRACT and row["reward_version"] == reward_version,
+                    "Explicit separately approved reward receipt version required")
+                receipt = TrainRewardReceipt(**{key: value for key, value in row.items() if key != "contract"})
             require(receipt.trace_id not in indexed, "Duplicate offline reward receipt")
             indexed[receipt.trace_id] = receipt
     return indexed
@@ -111,7 +126,12 @@ def read_approved_collection(args, tokenizer):
 def pairs_from_closed_collection(args, tokenizer, prepared):
     """Called only after every approved collection has passed its closure."""
     freeze, prefixes, identity, closed = prepared
-    rewards = read_train_rewards(args.train_rewards, reward_version=args.reward_version)
+    if args.reward_version == LITERAL_PROTOCOL:
+        validate_approval(getattr(args, "train_reward", None), expected_protocol=args.reward_version)
+        require({prefix.benchmark for prefix in prefixes} == {"widesearch"},
+            "Literal TRAIN rewards require independently frozen WideSearch domain")
+    rewards = read_train_rewards(args.train_rewards, reward_version=args.reward_version,
+        train_reward=getattr(args, "train_reward", None))
     envelopes = closed["candidates"]
     actual_ids = [e["native_bundle"]["collector"]["trace_id"] for e in envelopes]
     require(len(set(actual_ids)) == len(actual_ids) and set(rewards) == set(actual_ids),
@@ -147,6 +167,9 @@ def pairs_from_closed_collection(args, tokenizer, prepared):
         "eligible_pairs": len(pairs), "omitted_prefixes": omitted,
         "pair_selection": "one-best-worst-per-frozen-prefix; reward-gap-strictly-greater-than-0.05",
         "training_sources": sorted({p.chosen.prefix.source for p in pairs})}
+    if args.reward_version == LITERAL_PROTOCOL:
+        metadata.update(reward_contract=LITERAL_RECEIPT, train_reward=literal_configuration(),
+            train_metric="train_exact_row_f1")
     metadata.update(frozen_prefix_ids=list(freeze["prefix_ids"]), frozen_task_ids=list(freeze["task_ids"]),
         public_freeze=freeze,
         attempt_trace_ids=[row["trace_id"] for row in closed["attempts"]],
@@ -216,7 +239,9 @@ def merge_training_collections(collections):
         profiles.append(dict(metadata, collection_id=collection_id))
         pairs.extend(local_pairs)
     require(len({p.key for p in pairs}) == len(pairs), "Duplicate exact pairs across approved collections")
-    return pairs, {"collection_merge_contract": COLLECTIONS_CONTRACT, "collections": profiles,
+    literal = any(p["reward_version"] == LITERAL_PROTOCOL for p in profiles)
+    return pairs, {"collection_merge_contract": LITERAL_DPO_COLLECTIONS if literal else COLLECTIONS_CONTRACT,
+        "collections": profiles,
         "generation_closed_before_scoring": True, "eligible_pairs": len(pairs),
         "valid_candidates": sum(p["valid_candidates"] for p in profiles),
         "attempt_count": sum(p["attempt_count"] for p in profiles),
@@ -238,28 +263,36 @@ def load_training_pairs(args, tokenizer):
         pairs, metadata = load_dpo_pairs(args, tokenizer)
         return merge_training_collections([("single-approved-collection", pairs, metadata)])
     require(all(getattr(args, field, None) is None for field in (
-        "approved_freeze", "generation_dir", "train_rewards", "reward_version", "expected_source")),
+        "approved_freeze", "generation_dir", "train_rewards", "reward_version", "expected_source", "train_reward")),
         "Multi-collection approval excludes single-collection runtime arguments")
     manifest = _strict_json(Path(args.approved_collections).read_text(encoding="utf-8"))
     require(isinstance(manifest, dict) and set(manifest) == {
         "version", "base_derivative_id", "tokenizer_id", "collections"}
-        and manifest["version"] == COLLECTIONS_CONTRACT
+        and manifest["version"] in {COLLECTIONS_CONTRACT, LITERAL_DPO_COLLECTIONS}
         and manifest["base_derivative_id"] == args.base_derivative_id
         and manifest["tokenizer_id"] == args.tokenizer_id
         and isinstance(manifest["collections"], list) and bool(manifest["collections"]),
         "Explicit independently approved multi-collection/base/tokenizer contract required")
     approved = []
+    literal_manifest = manifest["version"] == LITERAL_DPO_COLLECTIONS
+    literal_collections = 0
     for row in manifest["collections"]:
-        require(isinstance(row, dict) and set(row) == {"collection_id", "approved_freeze", "generation_dir",
-            "generation_world_size", "train_rewards", "expected_source", "reward_version"}
+        literal = isinstance(row, dict) and row.get("reward_version") == LITERAL_PROTOCOL
+        expected_fields = {"collection_id", "approved_freeze", "generation_dir", "generation_world_size",
+            "train_rewards", "expected_source", "reward_version"} | ({"train_reward"} if literal else set())
+        require(isinstance(row, dict) and set(row) == expected_fields and (not literal or literal_manifest)
             and type(row["generation_world_size"]) is int and row["generation_world_size"] > 0
             and isinstance(row["expected_source"], str) and re.fullmatch(r"[0-9a-f]{40}", row["expected_source"]),
             "Each collection needs its own explicit freeze/generation/reward/source approval")
         public_id(row["reward_version"])
+        if literal:
+            validate_approval(row["train_reward"], expected_protocol=row["reward_version"])
+            literal_collections += 1
         local_args = SimpleNamespace(**{key: value for key, value in row.items() if key != "collection_id"},
                                      base_derivative_id=args.base_derivative_id)
         prepared = read_approved_collection(local_args, tokenizer)
         approved.append((row["collection_id"], local_args, prepared))
+    require(not literal_manifest or literal_collections > 0, "New literal manifest must declare the new reward protocol")
     # Validate ALL closures AND cross-collection ownership before ANY reward access.
     validate_prepared_collection_ownership(approved)
     return merge_training_collections([(collection_id, *pairs_from_closed_collection(local_args, tokenizer, prepared))
@@ -380,7 +413,8 @@ def run_dpo_loop(model, tokenizer, pairs, reference_identity, *, output, steps,
         reference_models_loaded=0, warm_start=False, measured_KL=False,
         training_method=DPO_METHOD, pair_contract=PAIR_CONTRACT, minimum_reward_gap=0.05,
         candidate_contract="native-final-preference-candidate-v1",
-        reward_contract=REWARD_CONTRACT)
+        reward_contract=PER_COLLECTION_RECEIPTS if any(p.get("reward_version") == LITERAL_PROTOCOL
+            for p in public_config.get("collections", [])) else REWARD_CONTRACT)
     started = time.monotonic()
     with TrainingJournal(output, rank, sync=sync_artifacts) as journal:
         def record(**value):
@@ -468,6 +502,8 @@ def parser():
     result.add_argument("--generation-world-size", type=int, default=1)
     result.add_argument("--train-rewards", help="Separately approved offline TRAIN receipts")
     result.add_argument("--reward-version", type=public_id)
+    result.add_argument("--train-reward", type=_strict_json,
+        help="Complete JSON literal TRAIN reward configuration; requires explicit new reward version")
     result.add_argument("--expected-source")
     result.add_argument("--training-source-commit", required=True,
                         help="Separately approved actual committed clean training runtime")

@@ -11,6 +11,10 @@ import json
 import math
 from pathlib import Path
 import re
+from ..dcc_train_literal_reward_contract import (
+    PROTOCOL as LITERAL_PROTOCOL, LITERAL_RECEIPT, LITERAL_DPO_COLLECTIONS, PER_COLLECTION_RECEIPTS,
+    LITERAL_PROFILE_FIELDS, validate_approval,
+)
 
 DPO_APPROVAL = "native-final-dpo-adapter-approval-v1"
 DPO_METHOD = "offline native final-decision DPO; not accepted-trajectory SFT; not RL"
@@ -44,7 +48,7 @@ def validate_dpo_approval(value):
         and cfg.get("measured_KL") is False and cfg.get("gradient_weighting") == "global-equal-pair"
         and cfg.get("sequence_score") == "sum-all-actual-native-thought-close-JSON-EOS-token-logprobs"
         and cfg.get("candidate_contract") == "native-final-preference-candidate-v1"
-        and cfg.get("reward_contract") == "native-final-train-reward-receipt-v1"
+        and cfg.get("reward_contract") in {"native-final-train-reward-receipt-v1", PER_COLLECTION_RECEIPTS}
         and cfg.get("pair_contract") == PAIR_CONTRACT and cfg.get("minimum_reward_gap") == .05
         and cfg.get("pair_selection") == "one-best-worst-per-frozen-prefix; reward-gap-strictly-greater-than-0.05",
         "Saved configuration is not the approved fresh raw-sum native final DPO method")
@@ -66,14 +70,27 @@ def validate_dpo_approval(value):
         and 1 <= value["checkpoint_optimizer_steps"] <= cfg["steps"],
         "Explicit actual checkpoint optimizer steps within the configured total required")
     profiles = cfg.get("collections")
-    require(cfg.get("collection_merge_contract") == "native-final-dpo-collections-v1"
+    require(cfg.get("collection_merge_contract") in {"native-final-dpo-collections-v1", LITERAL_DPO_COLLECTIONS}
         and isinstance(profiles, list) and bool(profiles), "Explicit approved collection merge contract required")
+    literal_merge = cfg["collection_merge_contract"] == LITERAL_DPO_COLLECTIONS
+    require(cfg["reward_contract"] == (PER_COLLECTION_RECEIPTS if literal_merge
+        else "native-final-train-reward-receipt-v1"), "Reward receipt contract differs from approved collection mode")
+    literal_profiles = 0
     seen = {key: set() for key in ("collection_id", "frozen_prefix_ids", "frozen_task_ids", "attempt_trace_ids", "phase_request_ids")}
     common = None
     for profile in profiles:
-        require(isinstance(profile, dict) and set(profile) == COLLECTION_PROFILE_KEYS
+        literal = isinstance(profile, dict) and profile.get("reward_version") == LITERAL_PROTOCOL
+        require(isinstance(profile, dict) and set(profile) == (COLLECTION_PROFILE_KEYS | LITERAL_PROFILE_FIELDS
+            if literal else COLLECTION_PROFILE_KEYS) and (not literal or literal_merge)
             and isinstance(profile.get("collection_id"), str)
             and profile["collection_id"] not in seen["collection_id"], "Distinct approved collection identity required")
+        if literal:
+            validate_approval(profile["train_reward"], expected_protocol=profile["reward_version"])
+            require(profile["reward_contract"] == LITERAL_RECEIPT
+                and profile["train_metric"] == "train_exact_row_f1"
+                and profile["training_sources"] == ["independent_curriculum"],
+                "Explicit WideSearch TRAIN literal reward profile required")
+            literal_profiles += 1
         seen["collection_id"].add(profile["collection_id"])
         for field in ("frozen_prefix_ids", "frozen_task_ids", "attempt_trace_ids", "phase_request_ids"):
             values = profile.get(field)
@@ -108,6 +125,7 @@ def validate_dpo_approval(value):
             "Actual selected pair ownership differs from its approved collection")
         require(common is None or actual == common, "Merged collections differ in base/tokenizer/template/protocol")
         common = actual
+    require(not literal_merge or literal_profiles > 0, "New merge contract must retain complete new TRAIN reward profiles")
     require(cfg.get("generation_closed_before_scoring") is True
         and cfg.get("eligible_pairs") == sum(p["eligible_pairs"] for p in profiles)
         and cfg.get("valid_candidates") == sum(p["valid_candidates"] for p in profiles)

@@ -30,7 +30,12 @@ from dcc_collect_native_train import (
 from dcc_native_dpo_train import public_id, validate_prepared_collection_ownership
 from dcc_native_sft import _strict_json
 from slime_plugins.dcc.data import Task
-from slime_plugins.dcc.episode import _WebEvidence
+from slime_plugins.dcc.episode import _WebEvidence, WIDESEARCH_EVIDENCE_GUARD_VERSION
+from slime_plugins.dcc_train_literal_reward_contract import (
+    PROTOCOL as LITERAL_PROTOCOL, LABEL_PROTOCOL, LITERAL_RECEIPT, LITERAL_REWARD_INPUTS,
+    configuration as literal_configuration, validate_approval, validate_literal_receipt,
+)
+from dcc_train_web_literal_reward import validate_label, evaluate_train_literal_rows
 from slime_plugins.dcc.metrics import cuad_counts, cuad_predictions, cuad_task_metrics
 from slime_plugins.dcc.widesearch_metrics import evaluate_widesearch
 
@@ -142,27 +147,36 @@ def _original_binding(row, freeze, prefixes, *, source_cache, public_cache):
 def prepare_collections(manifest, tokenizer):
     """No label function/file access occurs until this whole function succeeds."""
     require(isinstance(manifest, dict) and set(manifest) == {"version", "base_derivative_id", "tokenizer_id", "collections"}
-        and manifest["version"] == VERSION and isinstance(manifest["collections"], list)
+        and manifest["version"] in {VERSION, LITERAL_REWARD_INPUTS} and isinstance(manifest["collections"], list)
         and bool(manifest["collections"]), "Explicit TRAIN reward collection manifest required")
     public_id(manifest["base_derivative_id"]); public_id(manifest["tokenizer_id"])
     prepared, source_cache, public_cache = [], {}, {}
+    literal_manifest = manifest["version"] == LITERAL_REWARD_INPUTS
+    literal_collections = 0
     for row in manifest["collections"]:
-        require(isinstance(row, dict) and set(row) == ROW_KEYS
+        literal = isinstance(row, dict) and row.get("reward_version") == LITERAL_PROTOCOL
+        require(isinstance(row, dict) and set(row) == (ROW_KEYS | {"train_reward"} if literal else ROW_KEYS)
+            and (not literal or literal_manifest)
             and type(row["generation_world_size"]) is int and row["generation_world_size"] > 0
             and isinstance(row["expected_source"], str) and re.fullmatch(r"[0-9a-f]{40}", row["expected_source"]),
             "Explicit separately approved original/G4/public/TRAIN-label inputs required")
         public_id(row["collection_id"])
+        if literal:
+            validate_approval(row["train_reward"], expected_protocol=row["reward_version"])
+            literal_collections += 1
         freeze, prefixes, identity = load_frozen(row["approved_freeze"], tokenizer)
         require(identity.derivative_id == manifest["base_derivative_id"], "Approved reward base differs from collection")
         domains = {prefix.benchmark for prefix in prefixes}
         require(len(domains) == 1 and isinstance(row["reward_version"], str)
-            and row["reward_version"] in ACCEPTED_REWARD_VERSIONS.get(next(iter(domains)), set()),
+            and ((literal and domains == {"widesearch"})
+                or (not literal and row["reward_version"] in ACCEPTED_REWARD_VERSIONS.get(next(iter(domains)), set()))),
             "Each separately frozen domain requires its explicit fixed reward version")
         closed = read_closed_g4(row["generation_dir"], freeze=freeze, prefixes=prefixes, tokenizer=tokenizer,
             world_size=row["generation_world_size"], expected_source=row["expected_source"])
         require(closed.get("generation_closed_before_scoring") is True, "Closed whole G4 generation required")
         tasks, evidence = _original_binding(row, freeze, prefixes, source_cache=source_cache, public_cache=public_cache)
         prepared.append(ClosedCollection(row, freeze, prefixes, identity, closed, tasks, evidence))
+    require(not literal_manifest or literal_collections > 0, "New literal manifest must explicitly contain new protocol collections")
     validate_prepared_collection_ownership([(item.specification["collection_id"], None,
         (item.freeze, item.prefixes, item.identity, item.generation)) for item in prepared])
     return prepared
@@ -212,10 +226,51 @@ def web_reward(task, label, answer, guard):
         **{key: score[key] for key in ("num_pred_rows", "num_gold_rows") if key in score}}
 
 
+def web_literal_reward(task, label, answer, guard, *, reward_version, train_reward):
+    """New explicit TRAIN reward only; never invoke or amend benchmark scoring."""
+    validate_approval(train_reward, expected_protocol=reward_version)
+    validate_label(label, task.to_dict(), expected_protocol=reward_version)
+    reasons = guard.reject_reasons(task, answer)
+    if reasons:
+        return 0.0, {"evidence_guard_rejections": reasons, "evaluation_protocol": LITERAL_PROTOCOL,
+            "train_reward": literal_configuration(), "label_protocol": LABEL_PROTOCOL,
+            "train_exact_row_f1": 0.0, "train_metric_evaluated": False}
+    components = evaluate_train_literal_rows(answer, label, task.to_dict(), expected_protocol=reward_version)
+    components.update(evidence_guard_rejections=[], train_metric_evaluated=True)
+    return components["train_exact_row_f1"], components
+
+
+def literal_receipt(base, components, *, train_reward):
+    row = dict(base, contract=LITERAL_RECEIPT, train_reward=literal_configuration(),
+        label_protocol=LABEL_PROTOCOL,
+        train_metric={"name": "train_exact_row_f1", "scope": "widesearch-train-only",
+            "value": components["train_exact_row_f1"], "evaluated": components["train_metric_evaluated"]},
+        evidence_guard={"version": WIDESEARCH_EVIDENCE_GUARD_VERSION,
+            "passed": not bool(components["evidence_guard_rejections"])})
+    validate_literal_receipt(row, reward_version=base["reward_version"], train_reward=train_reward,
+        evidence_guard_version=WIDESEARCH_EVIDENCE_GUARD_VERSION)
+    return row
+
+
 def score_prepared_collections(prepared):
     """This is the first possible TRAIN label access after all public validation."""
-    labels = [(item, load_train_labels(item.specification["train_labels"],
-        {prefix.task_id: prefix.benchmark for prefix in item.prefixes})) for item in prepared]
+    labels = []
+    for item in prepared:
+        selected = {prefix.task_id: prefix.benchmark for prefix in item.prefixes}
+        if item.specification["reward_version"] == LITERAL_PROTOCOL:
+            indexed = load_train_labels(item.specification["train_labels"], selected,
+                web_train_reward_protocol=LITERAL_PROTOCOL)
+        else:
+            indexed = load_train_labels(item.specification["train_labels"], selected)
+        labels.append((item, indexed))
+    # Validate complete new labels/config for ALL collections before any scoring.
+    # Existing closure/original-source/native/owner prerequisites already succeeded.
+    for item, indexed in labels:
+        if item.specification["reward_version"] == LITERAL_PROTOCOL:
+            validate_approval(item.specification["train_reward"], expected_protocol=LITERAL_PROTOCOL)
+            for prefix in item.prefixes:
+                validate_label(indexed[prefix.task_id], item.tasks[prefix.task_id].to_dict(),
+                    expected_protocol=LITERAL_PROTOCOL)
     results = []
     for item, indexed in labels:
         prefixes = {prefix.prefix_id: prefix for prefix in item.prefixes}
@@ -229,6 +284,9 @@ def score_prepared_collections(prepared):
             if prefix.benchmark == "cuad":
                 reward, components = cuad_reward(task, label, answer,
                     reward_version=item.specification["reward_version"])
+            elif item.specification["reward_version"] == LITERAL_PROTOCOL:
+                reward, components = web_literal_reward(task, label, answer, item.evidence[prefix.prefix_id],
+                    reward_version=item.specification["reward_version"], train_reward=item.specification["train_reward"])
             else:
                 reward, components = web_reward(task, label, answer, item.evidence[prefix.prefix_id])
             require(type(reward) in (float, int) and math.isfinite(reward) and 0 <= reward <= 1,
@@ -237,6 +295,8 @@ def score_prepared_collections(prepared):
                 "trace_id": bundle["collector"]["trace_id"], "prefix_id": prefix.prefix_id,
                 "harness_id": prefix.harness_id, "reward_version": item.specification["reward_version"],
                 "value": reward, "generation_closed_before_scoring": True, "split": "train"}
+            if item.specification["reward_version"] == LITERAL_PROTOCOL:
+                receipt = literal_receipt(receipt, components, train_reward=item.specification["train_reward"])
             receipts.append(receipt)
             audit.append({"task_id": prefix.task_id, "prefix_id": prefix.prefix_id,
                 "trace_id": receipt["trace_id"], "reward_version": receipt["reward_version"],
@@ -275,12 +335,15 @@ def publish_rewards(results, destination):
             "generation_closed_before_scoring": True, "original_source_closed_before_scoring": True,
             "all_collection_ownership_checked_before_labels": True, "counts": counts,
             "receipt_file": f"{output.name}/receipts.jsonl"}
+        if item.specification["reward_version"] == LITERAL_PROTOCOL:
+            profile.update(reward_contract=LITERAL_RECEIPT, train_reward=literal_configuration(),
+                train_metric="train_exact_row_f1")
         write_fresh_json(output / "reward_complete.json", dict(profile, complete=True))
         profiles.append(profile)
     totals = {key: sum(profile["counts"][key] for profile in profiles) for key in (
         "prefixes", "attempts", "valid_candidates", "failed_attempts", "rewarded_candidates", "zero_reward",
         "positive_reward", "reward_sum", "row_item_equal_candidates", "guard_rejected_candidates")}
-    write_fresh_json(destination / "reward_complete.json", {"version": VERSION, "complete": True,
+    write_fresh_json(destination / "reward_complete.json", {"version": LITERAL_REWARD_INPUTS if any(p["reward_version"] == LITERAL_PROTOCOL for p in profiles) else VERSION, "complete": True,
         "collections": profiles, "fullcounts": totals, "heldout_labels_loaded": False})
     return profiles
 
