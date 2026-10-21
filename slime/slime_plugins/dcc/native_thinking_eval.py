@@ -676,7 +676,7 @@ def validate_native_sidecars(output, saved, manifest, runtime, owners, tasks, *,
     traces = {}
     for rank in range(manifest["world_size"]):
         path = Path(output) / f"native_thinking_traces_rank{rank}.jsonl"
-        for line in path.read_text().splitlines():
+        for line in path.read_text().split("\n"):
             if not line.strip():
                 continue
             trace = _strict_json(line)

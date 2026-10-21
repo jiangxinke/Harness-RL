@@ -50,7 +50,7 @@ def download_sources(directory: Path) -> None:
         task_file.write_bytes(_get(base + "widesearch.jsonl"))
     tasks = [
         json.loads(line)
-        for line in task_file.read_text(encoding="utf-8").splitlines()
+        for line in task_file.read_text(encoding="utf-8").split("\n")
         if line.strip()
     ]
     gold_dir = wide_dir / "widesearch_gold"
@@ -173,7 +173,7 @@ def prepare_widesearch(source: Path, output: Path) -> dict:
         json.loads(line)
         for line in (source / "widesearch.jsonl")
         .read_text(encoding="utf-8")
-        .splitlines()
+        .split("\n")
         if line.strip()
     ]
     for task in tasks:

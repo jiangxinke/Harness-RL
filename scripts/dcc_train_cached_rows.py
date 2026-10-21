@@ -210,7 +210,7 @@ def validate_references(path, registry):
     """Reject unused/foreign sidecar records before any sampler-visible output."""
     from dcc_native_sft import _strict_json
     used = set()
-    for line in Path(path).read_text().splitlines():
+    for line in Path(path).read_text().split("\n"):
         if line.strip():
             bundle = _strict_json(line)
             rows = receipt_sources(bundle.get("collector"), registry, task_id=bundle["record"]["task_id"])

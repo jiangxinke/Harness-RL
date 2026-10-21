@@ -105,7 +105,7 @@ def _terminal_widesearch_rows(text: str) -> list[dict[str, Any]] | None:
             return None
         payload = fenced[1]
     rows = []
-    for line in payload.splitlines():
+    for line in payload.split("\n"):
         if not line.strip():
             continue
         try:

@@ -121,7 +121,7 @@ def _score_predictions(output, tasks, *, require_ownership=False):
     saved, owners = {}, {}
     for file in sorted(output.glob("predictions_rank*.jsonl")):
         rank = int(file.stem.removeprefix("predictions_rank"))
-        for line in file.read_text().splitlines():
+        for line in file.read_text().split("\n"):
             if line.strip():
                 record = json.loads(line)
                 task_id = record["task_id"]
@@ -590,7 +590,7 @@ async def _evaluate(args, *, browser_reader=None):
     file = output / f"predictions_rank{rank}.jsonl"
     done = {}
     if file.name in output_names:
-        for line in file.read_text().splitlines():
+        for line in file.read_text().split("\n"):
             if line.strip():
                 value = json.loads(line)
                 done[value["task_id"]] = value

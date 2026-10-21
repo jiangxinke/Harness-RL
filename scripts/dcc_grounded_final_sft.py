@@ -149,7 +149,8 @@ def load_reviewed_rows(dataset, approval, tokenizer, *, training_source_commit, 
             and tokenizer.chat_template == identity['chat_template']
             and tokenizer.eos_token_id == identity['primary_eos_token_id'],
             'Actual local tokenizer differs from original public collection identity')
-    rows = [strict_json(line) for line in payload.decode('utf-8').splitlines()]
+    # JSONL records end at LF; U+0085/U+2028/U+2029 may occur inside JSON strings.
+    rows = [strict_json(line) for line in payload.decode('utf-8').removesuffix('\n').split('\n')]
     require(len(rows) == manifest['rows'] and len({row['task_id'] for row in rows}) == len(rows),
             'One exact target per original task required')
     for row in rows:
