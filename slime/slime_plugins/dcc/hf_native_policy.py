@@ -14,7 +14,8 @@ import uuid
 
 import torch
 
-from .cuad_structured import cuad_backend_schema, is_cuad_structured_schema
+from .hf_native_structured import compile_native_structured_schema, native_structured_schema_kind
+from .web_whitespace import web_bounded_whitespace_configuration
 from .episode import ModelProtocolFailure, PolicyCompletion
 from .hf_policy import _chat_tokens, encode_messages
 from .prompt_history import PromptHistoryBudgetExceeded
@@ -59,7 +60,8 @@ class NativeHFPolicy:
 
     def __init__(self, model, tokenizer, *, thought_tokens=8192, json_tokens=4096,
                  max_prompt_tokens=16384, max_model_len=None, batch_size=4,
-                 sampling_profile="raw", allow_truncation=False, trace_sink=None):
+                 sampling_profile="raw", allow_truncation=False, trace_sink=None,
+                 web_bounded_whitespace=False):
         from transformers import GenerationConfig
         import xgrammar as xgr
 
@@ -73,6 +75,7 @@ class NativeHFPolicy:
         self.max_prompt_tokens, self.batch_size = max_prompt_tokens, batch_size
         self.sampling_profile, self.allow_truncation = sampling_profile, allow_truncation
         self.trace_sink = trace_sink
+        self.web_bounded_whitespace = web_bounded_whitespace_configuration(web_bounded_whitespace)["enabled"]
         self.max_model_len = max_model_len or model.config.max_position_embeddings
         if self.max_prompt_tokens + thought_tokens + json_tokens > self.max_model_len:
             raise ValueError("Reserve the full prompt plus both phase budgets")
@@ -94,15 +97,16 @@ class NativeHFPolicy:
             "json_sampling": "greedy-neutral-xgrammar-structural; public-schema-postvalidation",
             "policy_gradient": "real-stage-one-IDs-only; deterministic-JSON-mask-zero",
             "failure_policy": "retain-actual-thought-IDs-with-reward-zero; no-forced-close-or-retry",
-            "backend": "hf", "supported_benchmark": "cuad-only",
+            "backend": "hf", "supported_benchmark": "cuad-and-widesearch",
+            "web_bounded_whitespace": web_bounded_whitespace_configuration(web_bounded_whitespace),
+            "web_schema_policy": "existing-public-schema-and-review-decoder; original-schema-postvalidation",
             "separate_from_vllm_native_v3": True}
 
     async def __call__(self, *args, **kwargs):
         raise ValueError("HF native policy requires generate_structured and an explicit public schema")
 
     async def generate_structured(self, messages, *, json_schema, max_new_tokens, temperature, _task_id=None):
-        if not is_cuad_structured_schema(json_schema):
-            raise ValueError("Initial HF native runtime supports exact public CUAD schemas only")
+        native_structured_schema_kind(json_schema)
         if max_new_tokens != self.thought_tokens + self.json_tokens:
             raise ValueError("Runner must reserve exactly the two explicit phase budgets")
         if self.sampling_profile == "raw" and temperature != 1.0:
@@ -185,8 +189,7 @@ class NativeHFPolicy:
 
     @torch.inference_mode()
     def _generate_batch(self, messages_batch, json_schema, task_ids=None):
-        if not is_cuad_structured_schema(json_schema):
-            raise ValueError("Initial HF native runtime supports exact public CUAD schemas only")
+        native_structured_schema_kind(json_schema)
         prompts, selected, results = [], [], [None] * len(messages_batch)
         for i, messages in enumerate(messages_batch):
             full = _chat_tokens(self.tokenizer, messages)
@@ -216,10 +219,10 @@ class NativeHFPolicy:
                  and tokens.count(END_THINK) == 1 and not set(tokens).intersection(self.eos_ids)]
         finals = [[] for _ in prompts]
         if valid:
-            backend_schema = cuad_backend_schema(json_schema)
-            key = json.dumps(backend_schema, sort_keys=True)
+            key = json.dumps(json_schema, sort_keys=True)
             if key not in self.grammars:
-                self.grammars[key] = self.compiler.compile_json_schema(backend_schema)
+                self.grammars[key] = compile_native_structured_schema(self.compiler, json_schema,
+                    web_bounded_whitespace=self.web_bounded_whitespace)
             generated = self._phase([prompts[i] + thoughts[i] for i in valid], phase="json", grammar=self.grammars[key])
             for i, tokens in zip(valid, generated, strict=True):
                 finals[i] = tokens

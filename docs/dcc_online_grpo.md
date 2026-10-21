@@ -97,3 +97,12 @@ Evaluation and training source commits are recorded separately. An adapter
 with no actual online optimizer updates is never marked as having recorded
 policy-gradient updates. Reports retain failures and deltas; they do not
 automatically assert a capability gain or a statistically reliable improvement.
+
+The shared `NativeHFPolicy` also accepts the exact public WideSearch action,
+final-answer and review schemas, including dynamic read-source citations and
+cached-row arguments. It reuses the existing review and bounded-whitespace
+grammars and validates the original public schema after decoding. Unsupported
+quoted or backslash-containing column keys are rejected before sampling, as in
+the existing pinned backend. This backend support does not enable WideSearch
+in the online training or matched evaluation entry points; those entry points
+remain CUAD-only pending verification of the TRAIN reward contract.

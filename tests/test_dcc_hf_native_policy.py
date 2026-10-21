@@ -76,7 +76,7 @@ def tokenizer(monkeypatch):
     # Explicit raw character metadata for this invented tokenizer only. The
     # separate receipt exercises from_huggingface on the actual local tokenizer.
     vocab = [''] * 151670
-    for char in map(chr, range(128)):
+    for char in list(map(chr, range(128))) + list("中文名称指标值😀"):
         vocab[10000 + ord(char)] = char
     for text, index in tokenizer.tags.items():
         vocab[index] = text
@@ -276,6 +276,254 @@ def test_actual_transformers_generate_uses_xgrammar_processor_and_ignores_inheri
 
 def test_non_cuad_schema_is_rejected_before_model_access(tokenizer):
     value = policy(tokenizer)
-    with pytest.raises(ValueError, match='CUAD schemas only'):
+    with pytest.raises(ValueError, match='CUAD/Web schemas only'):
         value._generate_batch([messages()], {'type': 'object'})
     assert not value.model.calls
+
+# Web backend coverage exercises the public generators and the actual pinned
+# xgrammar compiler; no benchmark data, network or checkpoint is accessed.
+from copy import deepcopy
+from slime_plugins.dcc.hf_native_structured import (
+    compile_native_structured_schema, native_structured_schema_kind,
+)
+from slime_plugins.dcc.web_review import web_review_schema
+from slime_plugins.dcc.web_structured import web_action_schema, web_final_schema
+
+WEB_URL = 'https://example.org/source?name=%22'
+WEB_OTHER = 'https://example.org/other'
+
+
+def web_dump(value):
+    # Pinned xgrammar keeps property-key literals but escapes slash in enum
+    # values. Preserve exact public keys while spelling URL values as it does.
+    if isinstance(value, dict):
+        return '{' + ','.join(json.dumps(key, ensure_ascii=False) + ':' + web_dump(item)
+                              for key, item in value.items()) + '}'
+    if isinstance(value, list):
+        return '[' + ','.join(map(web_dump, value)) + ']'
+    return json.dumps(value, ensure_ascii=False, separators=(',', ':')).replace('/', '\\/')
+
+
+def web_wrap(schema, review):
+    return web_review_schema(schema) if review else schema
+
+
+def web_value(value, review):
+    return {'plan': 'Inspect public source', 'checks': 'Use read evidence', **value} if review else value
+
+
+@pytest.fixture(scope='module')
+def byte_compiler():
+    info = xgr.TokenizerInfo([bytes([i]) for i in range(256)] + [b'<eos>'], stop_token_ids=[256])
+    return xgr.GrammarCompiler(info, max_threads=1)
+
+
+def grammar_accepts(compiled, text):
+    matcher = xgr.GrammarMatcher(compiled, terminate_without_stop_token=True)
+    return matcher.accept_string(text) and matcher.is_terminated()
+
+
+@pytest.mark.parametrize('review', [False, True])
+@pytest.mark.parametrize('cached', [False, True])
+@pytest.mark.parametrize('multi', [False, True])
+def test_web_admission_roundtrips_every_public_state(review, cached, multi):
+    columns = ['中文', 'name/date']
+    for urls in ([], [WEB_URL, WEB_OTHER]):
+        schemas = [web_final_schema(columns, urls, multi_citation=multi)]
+        schemas.extend(web_action_schema(columns, urls, successful_search=searched,
+            cached_rows=cached, multi_citation=multi) for searched in (False, True))
+        for bare in schemas:
+            schema = web_wrap(bare, review)
+            snapshot = deepcopy(schema)
+            assert native_structured_schema_kind(schema) == ('web-review' if review else 'web')
+            assert schema == snapshot
+
+
+@pytest.mark.parametrize('review', [False, True])
+@pytest.mark.parametrize('bounded', [False, True])
+def test_actual_web_grammar_exact_escaped_columns_dynamic_read_urls_and_citations(byte_compiler, review, bounded):
+    columns = ['中文', 'name/date']
+    row = {columns[0]: '中😀', columns[1]: None, 'citations': [WEB_URL, WEB_OTHER]}
+    value = web_value({'answer': [row]}, review)
+    schema = web_wrap(web_final_schema(columns, [WEB_URL, WEB_OTHER], multi_citation=True), review)
+    compiled = compile_native_structured_schema(byte_compiler, schema, web_bounded_whitespace=bounded)
+    assert grammar_accepts(compiled, web_dump(value))
+    # The same source row cannot cite a URL that this episode has not read.
+    other_schema = web_wrap(web_final_schema(columns, [WEB_URL], multi_citation=True), review)
+    assert not grammar_accepts(compile_native_structured_schema(byte_compiler, other_schema,
+        web_bounded_whitespace=bounded), web_dump(value))
+    for damage in ('empty-cell', 'unread', 'five-citations', 'missing-column'):
+        bad = deepcopy(value)
+        row = bad['answer'][0]
+        if damage == 'empty-cell': row[columns[0]] = ''
+        elif damage == 'unread': row['citations'] = ['https://example.org/unread']
+        elif damage == 'five-citations': row['citations'] = [WEB_URL] * 5
+        else: del row[columns[1]]
+        assert not grammar_accepts(compiled, web_dump(bad))
+    no_read = compile_native_structured_schema(byte_compiler,
+        web_wrap(web_final_schema(columns, []), review), web_bounded_whitespace=bounded)
+    assert grammar_accepts(no_read, web_dump(web_value({'answer': []}, review)))
+    assert not grammar_accepts(no_read, web_dump(value))
+
+
+@pytest.mark.parametrize('review', [False, True])
+@pytest.mark.parametrize('bounded', [False, True])
+def test_actual_web_grammar_search_first_cached_rows_and_legacy_citation_cap(byte_compiler, review, bounded):
+    search = web_value({'tool': 'web_search', 'arguments': {'query': 'public source', 'count': 10}}, review)
+    fetch = web_value({'tool': 'fetch_url', 'arguments': {'url': WEB_URL, 'select_rows': {
+        'format': 'csv', 'columns': ['中文'], 'where': [{'column': '中文', 'op': 'eq', 'value': '中'}],
+        'numeric_source_policy': 'exclude_uncomparable',
+        'csv_trailing_empty_columns': 'verified_empty_padding', 'limit': 64}}}, review)
+    first = compile_native_structured_schema(byte_compiler, web_wrap(web_action_schema(
+        ['中文'], [], successful_search=False), review), web_bounded_whitespace=bounded)
+    assert grammar_accepts(first, web_dump(search))
+    assert not grammar_accepts(first, web_dump(fetch))
+    assert not grammar_accepts(first, web_dump(web_value({'answer': []}, review)))
+    ready = compile_native_structured_schema(byte_compiler, web_wrap(web_action_schema(
+        ['中文'], [WEB_URL], successful_search=True, cached_rows=True), review), web_bounded_whitespace=bounded)
+    assert grammar_accepts(ready, web_dump(search)) and grammar_accepts(ready, web_dump(fetch))
+    uncached = compile_native_structured_schema(byte_compiler, web_wrap(web_action_schema(
+        ['中文'], [WEB_URL], successful_search=True), review), web_bounded_whitespace=bounded)
+    assert not grammar_accepts(uncached, web_dump(fetch))
+    two = web_value({'answer': [{'中文': '中', 'citations': [WEB_URL, WEB_URL]}]}, review)
+    assert not grammar_accepts(ready, web_dump(two))
+
+
+@pytest.mark.parametrize('bounded', [False, True])
+def test_actual_web_review_grammar_preserves_character_and_escape_limits(byte_compiler, bounded):
+    schema = web_review_schema(web_final_schema(['name'], []))
+    compiled = compile_native_structured_schema(byte_compiler, schema, web_bounded_whitespace=bounded)
+    for length in (0, 1, 239, 240, 241):
+        value = {'plan': '中' * length, 'checks': 'c', 'answer': []}
+        assert grammar_accepts(compiled, web_dump(value)) is (1 <= length <= 240)
+    for plan in ('a"b', 'a\\b', 'a\nb'):
+        assert not grammar_accepts(compiled, web_dump({'plan': plan, 'checks': 'c', 'answer': []}))
+    for count in (8, 9):
+        text = '{"plan":"p","checks":"c",' + ' ' * count + '"answer":[]}'
+        assert grammar_accepts(compiled, text) is (not bounded or count <= 8)
+
+
+@pytest.mark.parametrize('damage', ['extra', 'review-bound', 'citation-cap', 'row', 'count', 'boolean-bound'])
+def test_modified_web_schemas_are_rejected_before_model_generation(tokenizer, damage):
+    schema = web_review_schema(web_action_schema(['name'], [WEB_URL], successful_search=True))
+    if damage == 'extra': schema['extra'] = True
+    elif damage == 'review-bound': schema['anyOf'][0]['properties']['plan']['maxLength'] = 241
+    elif damage == 'citation-cap': schema['anyOf'][-1]['properties']['answer']['items']['anyOf'][0]['properties']['citations']['maxItems'] = 2
+    elif damage == 'row': schema['anyOf'][-1]['properties']['answer']['items']['anyOf'][0]['additionalProperties'] = True
+    elif damage == 'count': schema['anyOf'][0]['properties']['arguments']['properties']['count']['maximum'] = 11
+    else: schema['anyOf'][0]['properties']['arguments']['properties']['count']['minimum'] = True
+    value = policy(tokenizer)
+    with pytest.raises(ValueError, match='exact public CUAD/Web'):
+        value._generate_batch([messages()], schema)
+    assert value.model.calls == []
+
+
+@pytest.mark.parametrize('text', [
+    '{"answer":[{"name":"Alpha","citations":["https://example.org/unread"]}]}',
+    '{"answer":[{"name":"Alpha","citations":[]}]}',
+    '{"answer":[],"answer":[]}',
+])
+def test_web_original_public_schema_postvalidation_keeps_failure_thoughts(tokenizer, text):
+    value = policy(tokenizer, finals=[final_ids(tokenizer, text=text)])
+    failure = value._generate_batch([messages()], web_final_schema(['name'], [WEB_URL]))[0]
+    assert isinstance(failure, ModelProtocolFailure)
+    assert failure.reason == 'json_not_complete_or_schema_valid'
+    assert failure.completion.completion_ids == [10065, END_THINK] + final_ids(tokenizer, text=text)
+
+
+def tiny_real_web_policy(tokenizer, values, *, thoughts=None, bounded=False):
+    """Actual tiny HF model/generate and xgrammar, with fixture LM-head logits.
+
+    This controls synthetic token preferences, not generation, EOS, grammar
+    matching or EpisodeRunner. It tests runtime plumbing, not model quality.
+    """
+    from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
+    config = Qwen3MoeConfig(vocab_size=151670, hidden_size=8, intermediate_size=12,
+        moe_intermediate_size=4, num_hidden_layers=1, num_attention_heads=2,
+        num_key_value_heads=1, head_dim=4, num_experts=4, num_experts_per_tok=2,
+        attention_dropout=0.0, max_position_embeddings=32768)
+    model = Qwen3MoeForCausalLM(config).eval()
+    model.generation_config = GenerationConfig(eos_token_id=[151645, 151643])
+    finals = iter(tokenizer.encode(web_dump(value)) + [tokenizer.eos_token_id] for value in values)
+    thought_rows = iter(thoughts) if thoughts is not None else None
+    state, calls = {}, []
+    original_generate = model.generate
+    def fixture_logits(module, args, output):
+        cursor = state['cursor']
+        target = state['tokens'][min(cursor, len(state['tokens']) - 1)]
+        state['cursor'] += 1
+        logits = torch.full_like(output, -10000.)
+        logits[..., target] = 10000.
+        return logits
+    model.lm_head.register_forward_hook(fixture_logits)
+    def generate(**kwargs):
+        thought = END_THINK in kwargs['generation_config'].eos_token_id
+        state['tokens'] = (next(thought_rows) if thought_rows is not None else [END_THINK]) if thought else next(finals)
+        state['cursor'] = 0
+        result = original_generate(**kwargs)
+        calls.append({'phase': 'thought' if thought else 'json', 'ids': result[:, kwargs['input_ids'].shape[1]:].tolist()})
+        return result
+    model.generate = generate
+    value = NativeHFPolicy(model, tokenizer, thought_tokens=4, json_tokens=1024,
+        max_prompt_tokens=24000, web_bounded_whitespace=bounded)
+    return value, calls
+
+
+@pytest.mark.parametrize('review,bounded', [(False, False), (True, True)])
+def test_actual_tiny_hf_web_generation_and_episode_runner_with_mock_tools(tokenizer, review, bounded):
+    row = {'中文': '中', 'citations': [WEB_URL, WEB_OTHER]}
+    actions = [
+        {'tool': 'web_search', 'arguments': {'query': 'synthetic source'}},
+        {'tool': 'fetch_url', 'arguments': {'url': WEB_URL}},
+        {'tool': 'fetch_url', 'arguments': {'url': WEB_OTHER, 'select_rows': {
+            'format': 'csv', 'columns': ['中文'], 'limit': 1}}},
+        {'answer': [row]},
+    ]
+    class Web:
+        async def web_search(self, query):
+            return {'results': [{'url': WEB_URL, 'title': 'Synthetic public source'}, {'url': WEB_OTHER, 'title': 'Other'}]}
+        async def fetch_url(self, url, **kwargs):
+            return {'url': url, 'text': 'Synthetic public source says 中', 'start': 0, 'end': 30}
+        def citation_validity(self, rows):
+            return 1.
+    value, calls = tiny_real_web_policy(tokenizer, [web_value(action, review) for action in actions], bounded=bounded)
+    task = Task('invented-web', 'widesearch', 'validation', 'Find the observed fixture name.',
+        metadata={'evaluation': {'required': ['中文']}})
+    async def run():
+        runner = EpisodeRunner(max_steps=4, max_new_tokens=1028, evaluation_temperature=1.,
+            web_tools_factory=Web, web_structured_final=True, web_structured_actions=True,
+            web_explicit_review=review, web_cached_rows=True, web_multi_citation=True)
+        try:
+            return await runner.run(task, value, evaluation=True)
+        finally:
+            await value.close()
+    result = asyncio.run(run())
+    assert result.status == 'completed', result.status
+    assert result.answer == [row] and len(result.steps) == 4 and len(result.tool_events) == 3
+    assert [call['phase'] for call in calls] == ['thought', 'json'] * 4
+    assert all(call['ids'] == [[END_THINK]] for call in calls[::2])
+    assert all(call['ids'][0][-1] == tokenizer.eos_token_id for call in calls[1::2])
+    assert all(step.thought_token_count == 1 for step in result.steps)
+    assert not torch.cuda.is_initialized()
+
+
+def test_actual_tiny_hf_web_thought_failure_is_retained(tokenizer):
+    observed = [10065, 10066, 10067, 10068]
+    value, calls = tiny_real_web_policy(tokenizer, [], thoughts=[observed])
+    failure = value._generate_batch([messages()], web_final_schema(['name'], []))[0]
+    assert isinstance(failure, ModelProtocolFailure)
+    assert failure.completion.completion_ids == observed
+    assert failure.completion.thought_token_count == 4
+    assert [call['phase'] for call in calls] == ['thought']
+    assert not torch.cuda.is_initialized()
+
+
+@pytest.mark.parametrize('column', ['quoted"column', 'back\\slash'])
+@pytest.mark.parametrize('review', [False, True])
+def test_pinned_web_backend_rejects_unsupported_escaped_keys_before_sampling(tokenizer, column, review):
+    schema = web_wrap(web_final_schema(['中文', column], [WEB_URL]), review)
+    snapshot = deepcopy(schema)
+    value = policy(tokenizer)
+    with pytest.raises(ValueError, match='public column keys and source URLs must remain exact'):
+        value._generate_batch([messages()], schema)
+    assert schema == snapshot and value.model.calls == []
