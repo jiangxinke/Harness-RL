@@ -8,11 +8,6 @@ import re
 import urllib.parse
 
 
-# Bare filenames are common search terms. Explicit site:/domain: operators and
-# absolute URLs do not need this ambiguity guard.
-_FILE_SUFFIXES = set("csv doc docx gz htm html ipynb jpeg jpg js json jsonl log md out parquet pdf png py rst sh sql tar tex ts tsv txt xls xlsx xml yaml yml zip".split())
-
-
 def _hostname(value):
     try:
         host = value.rstrip(".").encode("idna").decode("ascii").lower()
@@ -86,9 +81,10 @@ class SearchScope:
 def prepare_search_query(query):
     """Rewrite one unambiguous explicit host; leave complex provider syntax alone.
 
-    Ordinary text is returned byte-for-byte. OR/multiple positive scopes,
-    parentheses and quoted operators retain the provider's own semantics and
-    receive no local scope filter. No domain is inferred from an entity name.
+    Only site:/domain: operators and absolute HTTP(S) URLs request a scope.
+    Bare dotted text, including hostnames and technical identifiers, is kept
+    byte-for-byte. OR/multiple positive scopes, parentheses and quoted operators
+    retain the provider's semantics and receive no local scope filter.
     """
     if re.search(r"[()|]|\b(?:OR|AND|NOT)\b", query, re.IGNORECASE):
         return query, None
@@ -104,14 +100,10 @@ def prepare_search_query(query):
         operator = re.fullmatch(r"(-?)(?:site|domain):(.+)", value, re.IGNORECASE)
         excluded = bool(operator and operator[1])
         candidate = operator[2] if operator else value
-        absolute = candidate.startswith(("https://", "http://"))
-        bare = not operator and not absolute and "/" not in candidate and "@" not in candidate and ":" not in candidate
-        if not operator and not absolute and (not bare or candidate.rsplit(".", 1)[-1].lower() in _FILE_SUFFIXES):
-            continue
-        # Arbitrary dotted words can be version strings or filenames. Keep
-        # bare-host inference conservative; explicit operators/URLs support
-        # every valid IDNA suffix, including newer generic top-level domains.
-        if bare and not operator and not re.fullmatch(r"[a-z]{2}|com|org|net|edu|gov|int|mil", candidate.rsplit(".", 1)[-1], re.IGNORECASE):
+        absolute = candidate.lower().startswith(("https://", "http://"))
+        # Dotted tokens can be identifiers, filenames or literal domain names.
+        # A suffix cannot establish that the user requested a source filter.
+        if not operator and not absolute:
             continue
         site = _site(candidate)
         if site is None:

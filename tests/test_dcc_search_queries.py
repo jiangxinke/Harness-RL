@@ -21,18 +21,26 @@ def reset_search_cache(monkeypatch):
     "email researcher@example.org", "version 3.14 and 1.2.3", "report.pdf data.json table.csv archive.zip",
     "report.final numpy.ndarray source.py README.md", 'literal "example.org"',
     "https://user:secret@example.org/api", "site:localhost documentation",
+    "API docs example.org", "API docs www.example.org", "API docs example.org/api",
+    "  preserve  SP.URB.TOTL.IN.ZS\tspacing  ", "NY.GDP.MKTP.CD documentation",
+    "schema.FIELD.CD reference", "pkg.runtime.NET reference", "Record.Country.US reference",
+    "module.Class.IN reference", "bücher.de documentation", "//example.org/api documentation",
 ])
 def test_unscoped_or_ambiguous_query_is_byte_identical(query):
     assert prepare_search_query(query) == (query, None)
 
 
 @pytest.mark.parametrize(("query", "expected"), [
-    ("API docs example.org", "API docs site:example.org"),
+    ("API docs site:example.org", "API docs site:example.org"),
     ("API docs domain:EXAMPLE.ORG", "API docs site:example.org"),
     ("API docs https://example.org/api?format=json#docs", "API docs site:example.org/api"),
     ("site:https://example.org/api?format=json#docs reference", "site:example.org/api reference"),
     ("site:bücher.de reference", "site:xn--bcher-kva.de reference"),
     ("domain:example.dev reference", "site:example.dev reference"),
+    ("API docs HTTPS://example.org/api?format=json#docs", "API docs site:example.org/api"),
+    ("https://bücher.de/api reference", "site:xn--bcher-kva.de/api reference"),
+    ("schema.FIELD.CD domain:EXAMPLE.ORG", "schema.FIELD.CD site:example.org"),
+    ("SP.URB.TOTL.IN.ZS site:example.org example.net", "SP.URB.TOTL.IN.ZS site:example.org example.net"),
 ])
 def test_one_explicit_host_or_url_becomes_generic_site_operator(query, expected):
     actual, scope = prepare_search_query(query)
@@ -72,6 +80,15 @@ def test_negative_only_scope_excludes_without_requiring_an_included_host():
     assert query == "docs -site:example.org -site:example.net"
     hits = [{"url": "https://example.org/a"}, {"url": "https://example.net/a"}, {"url": "https://other.org/a"}]
     assert scope.filter(hits) == hits[2:]
+
+
+def test_bare_domain_with_explicit_exclusion_does_not_create_positive_scope():
+    query, scope = prepare_search_query("docs example.net -domain:example.org")
+    assert query == "docs example.net -site:example.org"
+    assert scope.metadata() == {"site": None, "excluded_sites": ["example.org"]}
+    hits = [{"url": "https://example.org/a"}, {"url": "https://example.net/a"},
+            {"url": "https://unrelated.net/a"}]
+    assert scope.filter(hits) == hits[1:]
 
 
 def test_public_fallback_does_not_accept_nonempty_out_of_scope_primary(monkeypatch):
@@ -120,3 +137,27 @@ def test_web_tool_ordinary_query_observation_stays_exactly_compatible(monkeypatc
     result = asyncio.run(WebTools(backend="seznam").web_search("ordinary documentation"))
     assert result == {"query": "ordinary documentation", "configured_backend": "seznam", "results": hits,
                       "backend": "seznam", "search_scope": "web", "fallback_reason": None}
+
+
+@pytest.mark.parametrize("identifier", ["SP.URB.TOTL.IN.ZS", "NY.GDP.MKTP.CD", "schema.FIELD.CD", "example.org"])
+@pytest.mark.parametrize("backend", ["seznam", "duckduckgo_wikipedia", "public_web"])
+def test_web_tool_bare_dotted_terms_keep_query_and_all_provider_results(monkeypatch, identifier, backend):
+    query = f"technical  identifier {identifier}\tdocumentation"
+    hits = [{"title": "Reference", "url": "https://reference.example.net/api", "snippet": "Reference"},
+            {"title": "Docs", "url": "https://docs.example.org/guide", "snippet": "Docs"}]
+    calls = []
+    def search(self, actual_query, count, **kwargs):
+        calls.append((actual_query, count))
+        return hits
+    def unexpected_fallback(*args, **kwargs):
+        pytest.fail("Nonempty unscoped primary results must not trigger fallback")
+    monkeypatch.setattr(WebTools, "_search", search)
+    monkeypatch.setattr(search_provider, "public_html_search", unexpected_fallback)
+    monkeypatch.setattr(search_provider, "wikipedia_search", unexpected_fallback)
+    tools = WebTools(backend=backend)
+    result = asyncio.run(tools.web_search(query, count=3))
+    assert calls == [(query, 3)]
+    assert result == {"query": query, "configured_backend": backend, "results": hits,
+                      "backend": "seznam" if backend == "seznam" else "duckduckgo_lite",
+                      "search_scope": "web", "fallback_reason": None}
+    assert tools.sources == {hit["url"]: hit for hit in hits}
