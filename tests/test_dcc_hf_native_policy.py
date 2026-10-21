@@ -196,6 +196,9 @@ def test_mixed_batch_continues_only_closed_thoughts_and_keeps_ownership(tokenize
     assert value.model.calls[1]['input_ids'].shape[0] == 1
     assert [trace['task_id'] for trace in traces] == ['A', 'B']
     assert traces[1]['thought_ids'] == [10066, 10067] and traces[1]['json_ids'] == []
+    assert traces[0]['batch_phase_elapsed_seconds']['thought'] >= 0
+    assert traces[0]['batch_phase_elapsed_seconds']['json'] >= 0
+    assert traces[1]['batch_phase_elapsed_seconds']['json'] is None
 
 
 def test_real_grammar_masks_illegal_tokens_and_accepts_eos_after_complete_json(tokenizer):
@@ -557,3 +560,44 @@ def test_pinned_web_backend_rejects_unsupported_escaped_keys_before_sampling(tok
     with pytest.raises(ValueError, match='public column keys and source URLs must remain exact'):
         value._generate_batch([messages()], schema)
     assert schema == snapshot and value.model.calls == []
+
+
+def test_actual_native_failed_thought_carries_behavior_scores_through_episode_and_group(tokenizer):
+    from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
+    from slime_plugins.dcc.native_behavior_logprobs import BEHAVIOR_LOGPROB_SOURCE
+    from slime_plugins.dcc.online_grpo import group_signal
+    from slime_plugins.dcc.episode import EpisodeResult
+    config = Qwen3MoeConfig(vocab_size=151670, hidden_size=8, intermediate_size=12,
+        moe_intermediate_size=4, num_hidden_layers=1, num_attention_heads=2,
+        num_key_value_heads=1, head_dim=4, num_experts=4, num_experts_per_tok=2,
+        attention_dropout=0., max_position_embeddings=4096)
+    model = Qwen3MoeForCausalLM(config).eval()
+    model.generation_config = GenerationConfig(eos_token_id=[151645, 151643])
+    with torch.no_grad():
+        model.lm_head.weight.zero_()
+    traces = []
+    value = NativeHFPolicy(model, tokenizer, thought_tokens=4, json_tokens=4,
+        max_prompt_tokens=2048, capture_thought_logprobs=True, trace_sink=traces.append)
+    torch.manual_seed(71)
+    with torch.inference_mode():
+        failure = value._generate_batch([messages()], cuad_final_schema(), ['task'])[0]
+    assert isinstance(failure, ModelProtocolFailure)
+    step = failure.completion
+    assert step.native_status == 'thought_did_not_stop_on_real_close'
+    assert len(step.thought_logprobs) == step.thought_token_count == 4
+    assert step.thought_logprobs == pytest.approx([-__import__('math').log(config.vocab_size)] * 4, abs=1e-6)
+    assert step.thought_logprobs_source == BEHAVIOR_LOGPROB_SOURCE
+    assert step.trace_id == traces[0]['trace_id'] == failure.trace_id
+    assert traces[0]['thought_logprobs'] == step.thought_logprobs
+    failed = EpisodeResult('task', 'cuad', 'train', [], 'model_protocol_failure', 0., {}, [step], [], [])
+    successful = EpisodeResult('task', 'cuad', 'train', [], 'completed', 1., {}, [step], [], [])
+    group = group_signal([successful, failed], group_size=2, max_steps=1, thought_tokens=4)
+    assert group.advantages[1] < 0 and group.segments[1][0].thought_logprobs == step.thought_logprobs
+    assert failed.to_dict()['steps'][0]['thought_logprobs'] == step.thought_logprobs
+    assert 'thought_logprobs' not in failed.to_dict(include_tokens=False)['steps'][0]
+
+
+@pytest.mark.parametrize('profile', ['thinking', 'greedy'])
+def test_behavior_capture_rejects_non_raw_thought_profile(tokenizer, profile):
+    with pytest.raises(ValueError, match='raw thought'):
+        policy(tokenizer, sampling_profile=profile, capture_thought_logprobs=True)

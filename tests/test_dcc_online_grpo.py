@@ -11,13 +11,15 @@ import pytest
 import torch
 
 from slime_plugins.dcc.episode import EpisodeResult
+from slime_plugins.dcc.native_behavior_logprobs import BEHAVIOR_LOGPROB_SOURCE
 from slime_plugins.dcc.online_grpo import (apply_policy_update, group_signal,
                                           thought_policy_loss)
 
 
 def episode(reward, *, status="completed", thought=(6, 7), json_ids=(8, 9)):
     step = SimpleNamespace(prompt_ids=[3, 4, 5],
-        completion_ids=list(thought) + list(json_ids), thought_token_count=len(thought))
+        completion_ids=list(thought) + list(json_ids), thought_token_count=len(thought),
+        thought_logprobs=[-3.5] * len(thought), thought_logprobs_source=BEHAVIOR_LOGPROB_SOURCE)
     return EpisodeResult("task", "cuad", "train", [], status, reward, {},
                          [step], [], [])
 
@@ -138,14 +140,22 @@ def test_real_qwen3_moe_lora_replay_improves_rewarded_thought_odds():
             return (completion_logprobs(model, [3, 4, 5], [6])
                     - completion_logprobs(model, [3, 4, 5], [7])).item()
     before = odds()
-    group = signal([episode(1, thought=(6,)),
-                    episode(0, status="model_protocol_failure", thought=(7,), json_ids=())])
+    results = [episode(1, thought=(6,)),
+               episode(0, status="model_protocol_failure", thought=(7,), json_ids=())]
+    # This optimizer oracle uses a recorded synthetic behavior distribution;
+    # native cached-generation capture is tested separately against output_logits.
+    for result in results:
+        step = result.steps[0]
+        with torch.no_grad():
+            step.thought_logprobs = completion_logprobs(model, step.prompt_ids,
+                step.completion_ids[:step.thought_token_count]).tolist()
+    group = signal(results)
     report = trainer.replay_group(model, group, completion_logprobs,
         group_size=2, max_steps=2, thought_tokens=8, clip=0.2)
     norm, applied = apply_policy_update(parameters, optimizer)
     model.eval()
     assert report["scored_tokens"] == 2 and report["scored_segments"] == 2
-    assert report["maximum_old_current_logprob_difference"] < 1e-5
+    assert report["maximum_replay_current_logprob_difference"] < 1e-5
     assert applied and norm > 0
     assert odds() > before
     assert not torch.cuda.is_initialized()
@@ -259,7 +269,9 @@ def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration
             step = result.steps[0]
             result.steps = [native.NativeHFCompletion(
                 text="", prompt_ids=step.prompt_ids, completion_ids=step.completion_ids,
-                thought_token_count=1, phase_lengths=(1, 2))]
+                thought_token_count=1, phase_lengths=(1, 2),
+                thought_logprobs=step.thought_logprobs,
+                thought_logprobs_source=step.thought_logprobs_source)]
             return result
     for name, value in (("RANK", "0"), ("LOCAL_RANK", "0"), ("WORLD_SIZE", "1")):
         monkeypatch.setenv(name, value)
@@ -280,6 +292,13 @@ def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration
     assert complete["complete"] and complete["has_policy_gradient_updates"]
     assert complete["rollout_iterations"] == 2 and complete["optimizer_updates"] == 1
     records = [json.loads(line) for line in (args.output_dir / "train_rank0.jsonl").read_text().splitlines()]
+    for iteration in (1, 2):
+        phases = [r["event"] for r in records if r.get("iteration") == iteration]
+        ordered = ["collect_begin", "collect_end", "signal", "replay_begin", "replay_end", "apply_begin", "apply_end", "step"]
+        assert [event for event in phases if event in ordered] == ordered
+    saves = [r for r in records if r["event"] in {"save_begin", "save_end"}]
+    assert [r["event"] for r in saves] == ["save_begin", "save_end"] * 4
+    assert all(r.get("seconds", 0) >= 0 for r in records)
     steps = [r for r in records if r["event"] == "step"]
     assert [r["optimizer_step_applied"] for r in steps] == [True, False]
     assert [r["optimizer_updates"] for r in steps] == [1, 1]
@@ -290,3 +309,58 @@ def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration
     state = torch.load(args.output_dir / "final/training_state.pt", weights_only=False)
     assert state["optimizer_steps"] == 1 and state["rollout_iterations"] == 2
     assert not torch.cuda.is_initialized()
+
+
+@pytest.mark.parametrize("invalid", [None, (), [-2.0], [-2.0, float("nan")],
+    [-2.0, float("inf")], [-2.0, True], [-2.0, "-3"], [-2.0, .1]])
+def test_group_refuses_missing_malformed_or_nonfinite_actual_behavior_scores(invalid):
+    failed = episode(0, status="model_protocol_failure")
+    failed.steps[0].thought_logprobs = invalid
+    with pytest.raises(ValueError, match="actual sampled thought behavior"):
+        signal([episode(1), failed])
+
+
+def test_group_rejects_reconstructed_score_source_even_for_constant_rewards():
+    one = episode(0)
+    one.steps[0].thought_logprobs_source = "teacher-forced-old"
+    with pytest.raises(ValueError, match="actual sampled thought behavior"):
+        signal([one, episode(0)])
+
+
+def test_replay_uses_actual_behavior_denominator_and_reports_replay_discrepancy():
+    trainer = load_trainer()
+    model = torch.nn.Linear(1, 1, bias=False)
+    with torch.no_grad():
+        model.weight.fill_(-1.0)
+    segment = SimpleNamespace(prompt_ids=[1], completion_ids=[2], thought_logprobs=[-1.4])
+    group = SimpleNamespace(segments=[[segment]], advantages=[-1.0])
+    def scorer(model, prompt, completion):
+        return model.weight.reshape(1)
+    report = trainer.replay_group(model, group, scorer,
+        group_size=2, max_steps=1, thought_tokens=1, clip=.2)
+    # Negative advantage selects the unclipped exp(.4), not a reconstructed
+    # ratio of one. Its loss and derivative are both exp(.4)/2.
+    expected = torch.exp(torch.tensor(.4)) / 2
+    assert report["policy_loss"] == pytest.approx(expected.item())
+    assert model.weight.grad.item() == pytest.approx(expected.item())
+    assert report["old_logprob_source"] == "actual-sampled-thought-behavior"
+    assert report["maximum_behavior_replay_logprob_difference"] == pytest.approx(.4)
+    assert report["maximum_behavior_current_logprob_difference"] == pytest.approx(.4)
+    assert report["maximum_replay_current_logprob_difference"] == 0
+    assert report["importance_ratio_min"] == pytest.approx(2 * expected.item())
+    assert report["importance_ratio_max"] == pytest.approx(2 * expected.item())
+    assert report["importance_ratio_outside_clip_fraction"] == 1
+
+
+def test_constant_group_retains_behavior_segments_without_inventing_replay_evidence():
+    trainer = load_trainer()
+    group = signal([episode(0), episode(0, status="model_protocol_failure")])
+    assert len(group.segments) == 2 and all(segment for segment in group.segments)
+    model = torch.nn.Linear(1, 1)
+    def forbidden(*args):
+        raise AssertionError("An exact zero group must not replay")
+    report = trainer.replay_group(model, group, forbidden,
+        group_size=2, max_steps=2, thought_tokens=8, clip=.2)
+    assert report["scored_tokens"] == 0
+    assert report["maximum_behavior_replay_logprob_difference"] is None
+    assert report["importance_ratio_min"] is None

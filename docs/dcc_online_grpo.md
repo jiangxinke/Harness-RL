@@ -5,7 +5,7 @@ greedily with the structural xgrammar backend and then checked against the
 original public schema. Only the sampled thought tokens receive GRPO loss.
 There is no SFT auxiliary, offline preference pair, or DPO loss.
 
-This is an independent HF/NF4 LoRA runtime, separate from Slime/Megatron and the
+This is an independent HF LoRA runtime with optional NF4 loading, separate from Slime/Megatron and the
 existing BF16 vLLM native evaluation protocol. Start with a bounded pilot and
 compare base and trained adapters under this exact HF precision, harness, token
 budgets and evaluation sampling. Scores from older vLLM runs are not matched
@@ -36,8 +36,16 @@ configured durable storage. The default four-step pilot is a runtime check;
 it is not evidence of benchmark improvement.
 
 Thought sampling uses raw softmax at temperature 1, without nucleus/top-k or
-inherited penalties. Old scores are fixed before one replay and one possible
-optimizer update. Group advantages retain reward-standard-deviation
+inherited penalties. The old-policy denominator is recorded directly from the
+raw generation scores for each actually sampled thought token. A streaming
+processor retains one vocabulary score matrix and token-level history, without
+changing scores or consuming RNG. Missing, nonfinite or misaligned behavior
+scores reject the group; teacher-forced replay is never a fallback. The replay
+is diagnostic because cached sampling and full-sequence replay can differ
+numerically even before an update. Logs distinguish behavior-versus-replay,
+behavior-versus-current and replay-versus-current differences, plus actual
+importance-ratio ranges and clip fractions. Unscored groups record null
+diagnostics. Each group receives one replay and at most one optimizer update. Group advantages retain reward-standard-deviation
 normalization; the token loss uses a fixed group/turn/thought-budget denominator
 instead of dividing by observed response lengths. This is fixed-budget GRPO,
 not the complete Dr.GRPO algorithm.
@@ -54,7 +62,7 @@ never reported as effective learning.
 CPU checks include real tiny Qwen3MoE LoRA replay, an analytic categorical
 gradient oracle, failure coverage, and real Gloo synchronization. The policy
 checks include actual Hugging Face generation and xgrammar. These checks do
-not establish NF4 GPU correctness or benchmark improvement; both require the
+not establish GPU correctness or benchmark improvement; both require the
 actual pilot and a matched base comparison.
 
 The optional `--compute-profile bf16-autocast-v1` applies the same BF16
@@ -133,3 +141,10 @@ quoted or backslash-containing column keys are rejected before sampling, as in
 the existing pinned backend. This backend support does not enable WideSearch
 in the online training or matched evaluation entry points; those entry points
 remain CUAD-only pending verification of the TRAIN reward contract.
+
+TRAIN task selection retains the original seeded positive/negative decks with
+a three-to-one positive-to-negative schedule when both exist. This uses TRAIN
+gold labels for stratification and is recorded explicitly; it is not public-only
+selection or outcome-based resampling. Phase events separately record collection,
+reward signal, replay, optimizer application and checkpoint publication. Closed
+native traces include batch thought/JSON elapsed time; absent JSON is null.

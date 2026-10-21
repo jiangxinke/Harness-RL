@@ -11,6 +11,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 import inspect
 import json
+import time
 import uuid
 
 import torch
@@ -21,6 +22,7 @@ from .episode import ModelProtocolFailure, PolicyCompletion
 from .hf_policy import _chat_tokens, encode_messages
 from .hf_compute import compute_context, model_compute_profile
 from .prompt_history import PromptHistoryBudgetExceeded
+from .native_behavior_logprobs import BEHAVIOR_LOGPROB_SOURCE, StreamingRawThoughtLogprobs
 
 PROTOCOL = "hf-native-two-stage-thought-only-policy-v1"
 OPEN_THINK, END_THINK = 151667, 151668
@@ -48,6 +50,9 @@ class NativeHFCompletion(PolicyCompletion):
     thought_token_count: int = 0
     phase_lengths: tuple[int, int] = (0, 0)
     native_status: str = "completed"
+    thought_logprobs: list[float] | None = None
+    thought_logprobs_source: str | None = None
+    trace_id: str | None = None
 
 
 def _strict_json(text):
@@ -79,7 +84,7 @@ class NativeHFPolicy:
     def __init__(self, model, tokenizer, *, thought_tokens=8192, json_tokens=4096,
                  max_prompt_tokens=16384, max_model_len=None, batch_size=4,
                  sampling_profile="raw", allow_truncation=False, trace_sink=None,
-                 web_bounded_whitespace=False):
+                 web_bounded_whitespace=False, capture_thought_logprobs=False):
         from transformers import GenerationConfig
         import xgrammar as xgr
 
@@ -88,6 +93,10 @@ class NativeHFPolicy:
         if any(type(value) is not int or value <= 0
                for value in (thought_tokens, json_tokens, max_prompt_tokens, batch_size)):
             raise ValueError("Positive integer token and batch budgets required")
+        if type(capture_thought_logprobs) is not bool or (capture_thought_logprobs and sampling_profile != "raw"):
+            raise ValueError("Actual behavior scores require explicit raw thought sampling")
+        self.capture_thought_logprobs = capture_thought_logprobs
+        self._last_thought_logprobs = None
         self.model, self.tokenizer = model, tokenizer
         self.thought_tokens, self.json_tokens = thought_tokens, json_tokens
         self.max_prompt_tokens, self.batch_size = max_prompt_tokens, batch_size
@@ -112,6 +121,7 @@ class NativeHFPolicy:
         self.worker = None
         self.provenance = {"protocol": PROTOCOL, "thought_sampling_profile": sampling_profile,
             "thought_tokens": thought_tokens, "json_tokens": json_tokens,
+            "thought_logprobs_source": BEHAVIOR_LOGPROB_SOURCE if capture_thought_logprobs else None,
             "json_sampling": "greedy-neutral-xgrammar-structural; public-schema-postvalidation",
             "policy_gradient": "real-stage-one-IDs-only; deterministic-JSON-mask-zero",
             "failure_policy": "retain-actual-thought-IDs-with-reward-zero; no-forced-close-or-retry",
@@ -202,14 +212,22 @@ class NativeHFPolicy:
             output_attentions=False, output_hidden_states=False, output_scores=False,
             disable_compile=False,
             use_cache=True, return_dict_in_generate=False)
+        tracker = StreamingRawThoughtLogprobs() if raw and self.capture_thought_logprobs else None
+        processors = [LogitsProcessor(grammar)] if grammar is not None else []
+        if tracker is not None:
+            if processors:
+                raise ValueError("Raw behavior tracking cannot include grammar processors")
+            processors.append(tracker)
         with compute_context(self.model):
             output = self.model.generate(input_ids=ids, attention_mask=attention,
                 **_explicit_generation_kwargs(config),
-                logits_processor=LogitsProcessorList([LogitsProcessor(grammar)] if grammar is not None else []))
+                logits_processor=LogitsProcessorList(processors))
         rows = []
         for row in output[:, width:].tolist():
             end = next((i + 1 for i, value in enumerate(row) if value in stop_ids), len(row))
             rows.append(row[:end])
+        if phase == "thought":
+            self._last_thought_logprobs = tracker.finish(rows) if tracker is not None else None
         return rows
 
     @torch.inference_mode()
@@ -239,16 +257,22 @@ class NativeHFPolicy:
     def _generate_encoded_batch(self, prompts, json_schema, task_ids):
         from jsonschema import Draft202012Validator
         self.model.eval()
+        thought_started = time.monotonic()
         thoughts = self._phase(prompts, phase="thought")
+        thought_seconds = time.monotonic() - thought_started
+        thought_logprobs = self._last_thought_logprobs
         valid = [i for i, tokens in enumerate(thoughts) if tokens and tokens[-1] == END_THINK
                  and tokens.count(END_THINK) == 1 and not set(tokens).intersection(self.eos_ids)]
         finals = [[] for _ in prompts]
+        json_seconds = None
         if valid:
             key = json.dumps(json_schema, sort_keys=True)
             if key not in self.grammars:
                 self.grammars[key] = compile_native_structured_schema(self.compiler, json_schema,
                     web_bounded_whitespace=self.web_bounded_whitespace)
+            json_started = time.monotonic()
             generated = self._phase([prompts[i] + thoughts[i] for i in valid], phase="json", grammar=self.grammars[key])
+            json_seconds = time.monotonic() - json_started
             for i, tokens in zip(valid, generated, strict=True):
                 finals[i] = tokens
         results = []
@@ -269,13 +293,20 @@ class NativeHFPolicy:
             observed = final or thought
             completion = NativeHFCompletion(text=text, prompt_ids=list(prompt), completion_ids=thought + final,
                 finish_reason="stop" if observed and observed[-1] in terminal_ids else "length",
-                thought_token_count=len(thought), phase_lengths=(len(thought), len(final)), native_status=status)
+                thought_token_count=len(thought), phase_lengths=(len(thought), len(final)), native_status=status,
+                thought_logprobs=thought_logprobs[i] if thought_logprobs is not None else None,
+                thought_logprobs_source=BEHAVIOR_LOGPROB_SOURCE if thought_logprobs is not None else None)
             trace_id = uuid.uuid4().hex
+            completion.trace_id = trace_id
             if self.trace_sink is not None:
                 self.trace_sink({"protocol": PROTOCOL, "trace_id": trace_id,
                     "task_id": task_ids[i] if task_ids else None, "status": status,
                     "prompt_ids": list(prompt), "thought_ids": thought, "json_ids": final,
                     "thought_token_count": len(thought), "final_text": text,
+                    "thought_logprobs": completion.thought_logprobs,
+                    "thought_logprobs_source": completion.thought_logprobs_source,
+                    "batch_phase_elapsed_seconds": {"thought": thought_seconds,
+                        "json": json_seconds if i in valid else None},
                     "thought_sampling_profile": self.sampling_profile,
                     "json_public_schema": json_schema})
             results.append(ModelProtocolFailure(reason, completion=completion, protocol=PROTOCOL, trace_id=trace_id)

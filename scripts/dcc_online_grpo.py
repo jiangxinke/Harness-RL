@@ -103,7 +103,12 @@ def make_runner(args):
 
 
 def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens, clip):
-    """One old-policy snapshot and one replay, before any optimizer mutation."""
+    """Use actual cached-generation behavior as old; replay is diagnostic only.
+
+    Cached generation and teacher-forced replay may differ numerically even
+    before an update. Report that discrepancy; never reconstruct the behavior
+    denominator from a teacher-forced snapshot.
+    """
     scored = []
     model.eval()
     with torch.no_grad():
@@ -111,25 +116,41 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
             if advantage == 0:
                 continue
             for segment in segments:
-                old = scorer(model, segment.prompt_ids, segment.completion_ids).detach()
-                if not torch.isfinite(old).all():
-                    raise FloatingPointError("Non-finite old thought scores")
-                scored.append((segment, old, advantage))
+                replay = scorer(model, segment.prompt_ids, segment.completion_ids).detach()
+                old = torch.tensor(segment.thought_logprobs, device=replay.device, dtype=torch.float32)
+                if old.shape != replay.shape or not torch.isfinite(old).all() or not torch.isfinite(replay).all():
+                    raise FloatingPointError("Aligned finite behavior and diagnostic replay scores required")
+                scored.append((segment, old, replay, advantage))
     model.train()
-    loss_total, maximum_score_difference, tokens = 0.0, 0.0, 0
-    for segment, old, advantage in scored:
+    loss_total, tokens = 0.0, 0
+    behavior_replay, behavior_current, replay_current = 0.0, 0.0, 0.0
+    ratio_min, ratio_max, clipped_tokens = None, None, 0
+    for segment, old, replay, advantage in scored:
         current = scorer(model, segment.prompt_ids, segment.completion_ids)
         if not torch.isfinite(current).all():
             raise FloatingPointError("Non-finite current thought scores")
-        difference = (current.detach() - old).abs().max().item()
-        maximum_score_difference = max(maximum_score_difference, difference)
+        observed = current.detach()
+        behavior_replay = max(behavior_replay, (replay - old).abs().max().item())
+        behavior_current = max(behavior_current, (observed - old).abs().max().item())
+        replay_current = max(replay_current, (observed - replay).abs().max().item())
+        ratio = (observed - old).exp()
+        if not torch.isfinite(ratio).all():
+            raise FloatingPointError("Non-finite actual behavior importance ratio")
+        lo, hi = ratio.min().item(), ratio.max().item()
+        ratio_min, ratio_max = min(ratio_min if ratio_min is not None else lo, lo), max(ratio_max if ratio_max is not None else hi, hi)
+        clipped_tokens += ((ratio < 1 - clip) | (ratio > 1 + clip)).sum().item()
         loss = thought_policy_loss(current, old, advantage,
             group_size=group_size, max_steps=max_steps, thought_tokens=thought_tokens, clip=clip)
         loss.backward()
         loss_total += loss.item()
         tokens += len(segment.completion_ids)
     return dict(policy_loss=loss_total, scored_segments=len(scored), scored_tokens=tokens,
-                maximum_old_current_logprob_difference=maximum_score_difference)
+                old_logprob_source="actual-sampled-thought-behavior",
+                maximum_behavior_replay_logprob_difference=behavior_replay if tokens else None,
+                maximum_behavior_current_logprob_difference=behavior_current if tokens else None,
+                maximum_replay_current_logprob_difference=replay_current if tokens else None,
+                importance_ratio_min=ratio_min, importance_ratio_max=ratio_max,
+                importance_ratio_outside_clip_fraction=clipped_tokens / tokens if tokens else None)
 
 
 async def collect_group(runner, task, policy, *, group_size, rank):
@@ -162,7 +183,12 @@ def configuration(args, plan, tasks, world_size):
                    for key, value in vars(args).items()},
         compute_profile=compute_profile_configuration(getattr(args, "compute_profile", "legacy")),
         training_split_only=True, sft_auxiliary=False, offline_preferences=False,
-        behavior_policy=dict(thought="raw softmax T=1 top_p=1 top_k=0", json="greedy xgrammar"),
+        cuad_task_selection=dict(stratification="TRAIN gold-label negative-vs-positive",
+            negative_stride=4, positive_fallback_when_no_negatives=True,
+            seeded_independent_decks=True, outcome_based_resampling=False),
+        behavior_policy=dict(thought="raw softmax T=1 top_p=1 top_k=0", json="greedy xgrammar",
+            old_logprob_source="streaming-generation-raw-logits-v1",
+            teacher_forced_replay_is_behavior=False),
         policy_loss_tokens="sampled thought only, including actual closing token",
         json_policy_loss=False, model_failure_reward=0,
         objective_denominator=args.group_size * args.max_steps * args.thought_tokens,
@@ -238,11 +264,14 @@ async def train(args, tasks, plan, world_size):
         record(event="scorer", **score_recipe)
         policy = NativeHFPolicy(model, tokenizer, thought_tokens=args.thought_tokens,
             json_tokens=args.json_tokens, max_prompt_tokens=args.max_prompt_tokens,
-            sampling_profile="raw", trace_sink=lambda value: enqueue(traces, value))
+            sampling_profile="raw", trace_sink=lambda value: enqueue(traces, value),
+            capture_thought_logprobs=True)
         runner = make_runner(args)
         # Identical initial replicas; independent sampled trajectories afterwards.
         torch.manual_seed(args.seed + rank * 100003)
         def save(name, iteration):
+            save_started = time.monotonic()
+            record(event="save_begin", checkpoint_name=name, iteration=iteration, optimizer_updates=updates)
             if world_size > 1:
                 dist.barrier()
             status = [None]
@@ -265,21 +294,36 @@ async def train(args, tasks, plan, world_size):
                 dist.broadcast_object_list(status, src=0)
             if status[0] is not None:
                 raise RuntimeError(f"Checkpoint publication failed: {status[0]}")
+            record(event="save_end", checkpoint_name=name, iteration=iteration, optimizer_updates=updates,
+                   seconds=time.monotonic() - save_started)
         save("initial", 0)
         for iteration, indices in enumerate(plan, 1):
             task = tasks[indices[rank]]
             begin = time.monotonic()
             optimizer.zero_grad(set_to_none=True)
+            record(event="collect_begin", iteration=iteration, task_id=task.id, group_size=args.group_size)
             results = await collect_group(runner, task, policy, group_size=args.group_size, rank=rank)
+            record(event="collect_end", iteration=iteration, task_id=task.id, episodes=len(results),
+                   seconds=time.monotonic() - begin)
             for sample, result in enumerate(results):
                 enqueue(rollouts, dict(iteration=iteration, sample=sample,
                                        **result.to_dict(include_tokens=True)))
             signal = group_signal(results, group_size=args.group_size,
                                   max_steps=args.max_steps, thought_tokens=args.thought_tokens)
+            record(event="signal", iteration=iteration, rewards=signal.rewards, reward_std=signal.reward_std,
+                   advantages=signal.advantages, discarded_reason=signal.discarded_reason)
+            replay_started = time.monotonic()
+            record(event="replay_begin", iteration=iteration)
             report = replay_group(model, signal, scorer, group_size=args.group_size,
                 max_steps=args.max_steps, thought_tokens=args.thought_tokens, clip=args.clip)
+            record(event="replay_end", iteration=iteration, seconds=time.monotonic() - replay_started,
+                   scored_tokens=report["scored_tokens"], scored_segments=report["scored_segments"])
+            apply_started = time.monotonic()
+            record(event="apply_begin", iteration=iteration)
             norm, applied = apply_policy_update(parameters, optimizer, world_size=world_size,
                 distributed=dist, max_grad_norm=args.max_grad_norm)
+            record(event="apply_end", iteration=iteration, seconds=time.monotonic() - apply_started,
+                   optimizer_step_applied=applied, global_gradient_norm=norm)
             updates += int(applied)
             record(event="step", iteration=iteration, optimizer_updates=updates,
                 optimizer_step_applied=applied, global_gradient_norm=norm,

@@ -91,7 +91,7 @@ class EpisodeResult:
         result = dataclasses.asdict(self)
         if not include_tokens:
             for step in result["steps"]:
-                for name in ("prompt_ids", "completion_ids", "logprobs"):
+                for name in ("prompt_ids", "completion_ids", "logprobs", "thought_logprobs"):
                     step.pop(name, None)
         return result
 

@@ -110,9 +110,11 @@ def test_actual_bf16_old_current_replay_and_finite_fp32_lora_gradients(actual_pr
                 parameter.normal_(0, .02)
     scorer, _ = resolve_logprob_backend(backend, 3 if backend != 'original' else None)
     segment = SimpleNamespace(prompt_ids=[2, 7, 11], completion_ids=[31, 9, 71, 4, 18])
+    with torch.no_grad():
+        segment.thought_logprobs = scorer(model, segment.prompt_ids, segment.completion_ids).tolist()
     signal = SimpleNamespace(segments=[[segment]], advantages=[1.])
     report = replay_group(model, signal, scorer, group_size=2, max_steps=1, thought_tokens=8, clip=.2)
-    assert report['maximum_old_current_logprob_difference'] == 0
+    assert report['maximum_replay_current_logprob_difference'] == 0
     assert report['scored_tokens'] == 5
     gradients = [parameter.grad for name, parameter in model.named_parameters() if 'lora_' in name]
     assert gradients and all(gradient is not None and gradient.dtype == torch.float32

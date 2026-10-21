@@ -11,6 +11,8 @@ import math
 
 import torch
 
+from .native_behavior_logprobs import BEHAVIOR_LOGPROB_SOURCE
+
 
 ALGORITHM = "online-native-HF-thought-only-GRPO-v1"
 
@@ -19,6 +21,7 @@ ALGORITHM = "online-native-HF-thought-only-GRPO-v1"
 class ThoughtSegment:
     prompt_ids: list[int]
     completion_ids: list[int]
+    thought_logprobs: list[float]
 
 
 @dataclass(frozen=True)
@@ -68,8 +71,14 @@ def group_signal(results, *, group_size, max_steps, thought_tokens):
             thought = list(step.completion_ids[:count])
             if any(type(token) is not int or token < 0 for token in thought + step.prompt_ids):
                 raise ValueError("Actual nonnegative integer token IDs required")
+            behavior = getattr(step, "thought_logprobs", None)
+            if (not isinstance(behavior, list) or len(behavior) != count
+                    or getattr(step, "thought_logprobs_source", None) != BEHAVIOR_LOGPROB_SOURCE
+                    or any(type(value) not in (int, float) or not math.isfinite(value)
+                           or value > 1e-6 for value in behavior)):
+                raise ValueError("Finite aligned actual sampled thought behavior logprobs required")
             if thought:
-                segments.append(ThoughtSegment(list(step.prompt_ids), thought))
+                segments.append(ThoughtSegment(list(step.prompt_ids), thought, list(behavior)))
         if not segments:
             return GroupSignal([[] for _ in results], [0.0] * group_size, rewards, 0.0,
                                "missing_sampled_thought_group")
@@ -92,6 +101,8 @@ def thought_policy_loss(current, old, advantage, *, group_size, max_steps, thoug
     """
     if current.ndim != 1 or old.shape != current.shape or not current.numel():
         raise ValueError("Aligned nonempty one-dimensional thought logprobs required")
+    if not torch.isfinite(current).all() or not torch.isfinite(old).all():
+        raise FloatingPointError("Finite actual behavior and current thought scores required")
     if old.requires_grad or not math.isfinite(advantage) or not 0 < clip < 1:
         raise ValueError("Detached old scores, finite advantage and clip in (0,1) required")
     if any(type(v) is not int or v < 1 for v in (group_size, max_steps, thought_tokens)):
