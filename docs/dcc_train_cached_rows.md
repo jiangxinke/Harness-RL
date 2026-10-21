@@ -52,3 +52,29 @@ arm. The overlay's `explicit_training_profile` and every source sidecar's
 source publication, actual native closing/token validation, selector and loader
 gates remain the same. `--native-phase-timing` and `--timeout-seconds 1800` work
 with either explicitly selected static identity.
+
+## Separate joint Web/CUAD training profile
+
+`dcc-native-train-profile-web32k-cached-rows-cuad-retrieval-v3` combines already
+collected native Web and CUAD inputs for accepted-trajectory SFT. Set
+`web_profile_version` to `dcc-native-train-profile-web32k-cached-rows-v3` and
+preserve its complete `identity` and `web` objects. Supply the original complete
+CUAD `cuad` object, including its exact retrieval binding bytes, its original
+`cuad_identity`, and the exact sorted `cuad_identity_differences`. Both native
+files must be nonempty and pass the full existing loader. The required Web
+sidecar keeps its original underlying 16k Web profile version and source receipt.
+
+The new source overlay must declare the joint profile version, its own
+`collection_overlay_id`, `baseline_source_unchanged: false`, and the complete
+current `web_cached_rows` configuration. Original collection source identities,
+prompt/completion tokens and sidecars remain unchanged. Record the actual
+training implementation commit separately from these original collection
+receipts when staging a later training implementation.
+
+The allowed domain identity differences remain source commit, generation seed,
+prompt budget, model context, and prompt-history policy. Model/tokenizer/native
+protocol and the 16384-token thought budget must match across domains. The 8k
+profile cannot use this joint route. The collector and selector reject this
+training-only profile; collect and close the two domains separately under their
+original profiles. Prospective preference collection and DPO keep rejecting
+cached Web histories.

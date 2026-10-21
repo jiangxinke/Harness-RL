@@ -618,6 +618,10 @@ def prepare_native_training(args, *, source_root, tokenizer=None):
                                      cuad_path=args.cuad_tool_records, expected_cuad_identity=cuad_identity,
                                      approved_cuad_identity_differences=profile.get("cuad_identity_differences"),
                                      strict_training_budgets=web_profile.profile_version in {WEB32K_PROFILE, WEB32K_CACHED_PROFILE, WEB32K_CACHED_8K_PROFILE})
+    from dcc_review_training import JOINT_CACHED_CUAD_PROFILE
+    if profile["version"] == JOINT_CACHED_CUAD_PROFILE:
+        _require(bool(data.records) and bool(data.cuad_records),
+                 "Joint cached TRAIN requires nonempty separately collected Web and CUAD native inputs")
     data.configuration = {"enabled": True, "protocol": identity.budget.protocol, "source_receipt": receipt,
                           "derivative_id": identity.derivative_id, "model_revision": MODEL_REVISION,
                           "web": copy.deepcopy(web), "validated_records": len(data.records),

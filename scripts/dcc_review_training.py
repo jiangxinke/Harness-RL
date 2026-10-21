@@ -15,6 +15,7 @@ WEB32K_CACHED_PROFILE = "dcc-native-train-profile-web32k-cached-rows-v3"
 WEB32K_CACHED_8K_PROFILE = "dcc-native-train-profile-web32k-cached-rows-8k-thought-v3"
 CACHED_TRAIN_PROFILES = frozenset({WEB32K_CACHED_PROFILE, WEB32K_CACHED_8K_PROFILE})
 CUAD_RETRIEVAL_PROFILE = "dcc-native-train-profile-cuad-retrieval-v1"
+JOINT_CACHED_CUAD_PROFILE = "dcc-native-train-profile-web32k-cached-rows-cuad-retrieval-v3"
 WEB_STAGE_PROFILE = "final50-search25-fetch25"
 WEB_STAGE_CYCLE = ("final", "search", "final", "fetch")
 
@@ -38,11 +39,17 @@ def strict_json(text):
 def approved_web_profile(profile, profile_class):
     require(isinstance(profile, dict), "Trusted native TRAIN profile must be an object")
     version = profile.get("version")
-    if version == CUAD_RETRIEVAL_PROFILE:
+    if version in {CUAD_RETRIEVAL_PROFILE, JOINT_CACHED_CUAD_PROFILE}:
         # Reuse an explicitly declared, unchanged Web route. Retrieval belongs
         # to the CUAD harness and never alters the shared model identity.
         route = profile.get("web_profile_version")
-        require(route in {REVIEW20_PROFILE, WEB32K_PROFILE}, "Explicit existing Web profile version required")
+        if version == JOINT_CACHED_CUAD_PROFILE:
+            require(set(profile) == {"version", "web_profile_version", "collection_overlay_id", "identity", "web",
+                                     "cuad", "cuad_identity", "cuad_identity_differences"},
+                    "Joint cached TRAIN requires both complete original domain profiles")
+            require(route == WEB32K_CACHED_PROFILE, "Joint cached TRAIN requires the original static16k Web route")
+        else:
+            require(route in {REVIEW20_PROFILE, WEB32K_PROFILE}, "Explicit existing Web profile version required")
         require("cuad" in profile, "Explicit retrieval profile requires CUAD configuration")
         from dcc_native_sft import CuadSchemaProfile
         approved_cuad_profile(profile, CuadSchemaProfile)
@@ -109,7 +116,7 @@ def approved_web_profile(profile, profile_class):
 
 def approved_cuad_profile(profile, profile_class):
     value = profile.get("cuad")
-    bound = profile.get("version") == CUAD_RETRIEVAL_PROFILE
+    bound = profile.get("version") in {CUAD_RETRIEVAL_PROFILE, JOINT_CACHED_CUAD_PROFILE}
     if value is None:
         require(not bound, "Explicit retrieval profile requires CUAD configuration")
         return None
@@ -124,13 +131,13 @@ def approved_cuad_profile(profile, profile_class):
 
 
 def bind_profile_source(profile, source_root):
-    if profile["version"] in {REVIEW20_PROFILE, WEB32K_PROFILE, WEB32K_CACHED_PROFILE, WEB32K_CACHED_8K_PROFILE, CUAD_RETRIEVAL_PROFILE}:
+    if profile["version"] in {REVIEW20_PROFILE, WEB32K_PROFILE, WEB32K_CACHED_PROFILE, WEB32K_CACHED_8K_PROFILE, CUAD_RETRIEVAL_PROFILE, JOINT_CACHED_CUAD_PROFILE}:
         overlay = strict_json((Path(source_root) / ".dcc-training-code-overlay.json").read_text())
         require(overlay.get("overlay_id") == profile["collection_overlay_id"]
                 and overlay.get("explicit_training_profile") == profile["version"]
                 and overlay.get("baseline_source_unchanged") is False,
                 "Explicit TRAIN profile differs from actual collection/training source overlay")
-        if profile["version"] in CACHED_TRAIN_PROFILES:
+        if profile["version"] in CACHED_TRAIN_PROFILES or profile["version"] == JOINT_CACHED_CUAD_PROFILE:
             from dcc_train_cached_rows import configuration, equal
             require(equal(overlay.get("web_cached_rows"), configuration()),
                     "Cached TRAIN source overlay requires complete current v3 configuration")
