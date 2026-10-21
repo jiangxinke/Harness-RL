@@ -47,6 +47,7 @@ from slime_plugins.dcc.reference_kl import (VARIANT as REFERENCE_KL_VARIANT,
 from slime_plugins.dcc.native_hf_context import context_handling_configuration
 from slime_plugins.dcc.native_joint_grpo import (JSON_SURROGATE_VARIANT,
     json_surrogate_configuration, validate_json_surrogate_weight, weighted_joint_policy_loss)
+from slime_plugins.dcc.web_observation_budget import web_observation_budget_configuration
 from slime_plugins.dcc.online_web import (ONLINE_REWARD_VARIANTS, TABLE_GROUNDED_REWARD,
     online_reward_configuration)
 from slime_plugins.dcc.retrieval import load_retrieval_profile
@@ -164,6 +165,7 @@ def make_runner(args):
         cuad_structured_actions=True,
         cuad_concise_reasoning=getattr(args, "cuad_concise_reasoning", False),
         web_concise_reasoning=getattr(args, "web_concise_reasoning", False),
+        web_observation_token_budget=getattr(args, "web_observation_token_budget", None),
         auto_read_sources=args.auto_read_sources,
         auto_read_follow_docs=getattr(args, "auto_read_follow_docs", False),
         web_tools_factory=partial(make_web_tools, args),
@@ -342,6 +344,10 @@ def configuration(args, plan, tasks, world_size):
     surrogate = getattr(args, "policy_surrogate", "token-grpo")
     validate_policy_surrogate(surrogate, getattr(args, "reference_kl_beta", 0))
     weight = getattr(args, "json_surrogate_weight", 1)
+    observation_budget = getattr(args, "web_observation_token_budget", None)
+    web_observation_budget_configuration(observation_budget)
+    if observation_budget is not None and not getattr(args, "enable_online_web", False):
+        raise ValueError("Web observation token budget requires --enable-online-web")
     validate_json_surrogate_weight(weight, joint_json_policy=getattr(args, "joint_json_policy", False),
         policy_surrogate=surrogate, online_web=getattr(args, "enable_online_web", False),
         benchmarks=(t.benchmark for t in tasks))
@@ -361,7 +367,8 @@ def configuration(args, plan, tasks, world_size):
                    for key, value in vars(args).items()
                    if (key not in {"joint_json_policy", "web_zip_member_fallback", "web_concise_reasoning"} or value)
                    and (key != "policy_surrogate" or value != "token-grpo")
-                   and (key != "json_surrogate_weight" or value != 1)},
+                   and (key != "json_surrogate_weight" or value != 1)
+                   and (key != "web_observation_token_budget" or value is not None)},
         compute_profile=compute_profile_configuration(getattr(args, "compute_profile", "legacy")),
         cuad_concise_reasoning=cuad_concise_reasoning_configuration(getattr(args, "cuad_concise_reasoning", False)),
         auto_read_follow_docs=auto_read_follow_docs_configuration(getattr(args, "auto_read_follow_docs", False)),
@@ -414,6 +421,8 @@ def configuration(args, plan, tasks, world_size):
         config["json_surrogate"] = json_surrogate_configuration(weight)
     if getattr(args, "enable_online_web", False):
         from slime_plugins.dcc.online_web import binding_protocols
+        if observation_budget is not None:
+            config["web_observation_budget"] = web_observation_budget_configuration(observation_budget)
         if web_reasoning["enabled"]:
             config["web_concise_reasoning"] = web_reasoning
         if web.web_zip_member_fallback:
@@ -525,6 +534,10 @@ def cpu_preflight(args, tasks, plan, world_size):
 
 
 async def train(args, tasks, plan, world_size, *, web_inputs=None):
+    observation_budget = getattr(args, "web_observation_token_budget", None)
+    web_observation_budget_configuration(observation_budget)
+    if observation_budget is not None and not getattr(args, "enable_online_web", False):
+        raise ValueError("Web observation token budget requires --enable-online-web")
     validate_policy_surrogate(getattr(args, "policy_surrogate", "token-grpo"),
                               getattr(args, "reference_kl_beta", 0))
     validate_json_surrogate_weight(getattr(args, "json_surrogate_weight", 1),
@@ -600,6 +613,8 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
             mixed_schema_batching=getattr(args, "native_mixed_schema_batching", False),
             joint_json_policy=getattr(args, "joint_json_policy", False))
         runner = make_runner(args)
+        if observation_budget is not None:
+            runner.set_web_observation_tokenizer(tokenizer)
         # Identical initial replicas; independent sampled trajectories afterwards.
         torch.manual_seed(args.seed + rank * 100003)
         def save(name, iteration):
@@ -797,6 +812,8 @@ def main(argv=None):
                         help="CUAD only: fresh raw-thought and grammar-masked stochastic-JSON GRPO; old greedy JSON traces are unsupported")
     parser.add_argument("--json-surrogate-weight", type=float, default=1,
                         help="Default 1 preserves the original loss; nondefault CUAD joint token-GRPO weights JSON policy surrogates only, with the original fixed denominator")
+    parser.add_argument("--web-observation-token-budget", type=int, default=None,
+                        help="Opt-in Web tool observation JSON token cap, including all auto-reads and metadata; requires --enable-online-web")
     parser.add_argument("--thought-tokens", type=int, default=4096)
     parser.add_argument("--json-tokens", type=int, default=4096)
     parser.add_argument("--max-prompt-tokens", type=int, default=16384)
@@ -846,6 +863,9 @@ def main(argv=None):
         validate_json_surrogate_weight(args.json_surrogate_weight,
             joint_json_policy=args.joint_json_policy, policy_surrogate=args.policy_surrogate,
             online_web=args.enable_online_web)
+        web_observation_budget_configuration(args.web_observation_token_budget)
+        if args.web_observation_token_budget is not None and not args.enable_online_web:
+            raise ValueError("Web observation token budget requires --enable-online-web")
     except ValueError as error:
         parser.error(str(error))
     if args.web_train_reward_variant != TABLE_GROUNDED_REWARD and not args.enable_online_web:

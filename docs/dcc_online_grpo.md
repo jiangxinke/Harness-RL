@@ -56,6 +56,13 @@ guidance toward the next real action. It leaves CUAD and all generation,
 evidence and optimization rules unchanged; no performance improvement is
 established by enabling it.
 
+The optional [`--web-observation-token-budget 6144`](dcc_web_observation_budget.md)
+caps each complete Web tool observation JSON with the actual policy tokenizer,
+including automatic reads and metadata. It exposes literal source prefixes
+with character-offset continuation and writes only packed windows to evidence.
+It requires `--enable-online-web`; its default is off. Strict whole-prompt
+limits remain in force, and the same cap is available in matched Web evaluation.
+
 Install `configs/dcc/requirements-online-grpo.txt` in the separate quantized
 environment. Set paths locally; none is embedded in the code:
 

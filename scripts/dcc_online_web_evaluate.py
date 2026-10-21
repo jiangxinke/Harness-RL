@@ -40,6 +40,7 @@ from slime_plugins.dcc.hf_native_policy import (NativeHFPolicy, PROTOCOL,
 from slime_plugins.dcc.hf_policy import load_policy_model, PROMPT_ENCODING_VERSION
 from slime_plugins.dcc.prompt_history import add_prompt_history_arguments, prompt_history_from_arguments
 from slime_plugins.dcc.web_hf_prompt_history import native_web_history_configuration
+from slime_plugins.dcc.web_observation_budget import web_observation_budget_configuration
 from slime_plugins.dcc.tools import WEB_READER_VERSION
 from slime_plugins.dcc.web_hf_evaluation import (STATUSES, OwnedEvaluationPolicy, canonical,
     dataset_identity, identity, load_public_tasks, prediction_row, public_task, read_jsonl,
@@ -146,6 +147,9 @@ def runner_configuration(args):
     history = prompt_history_from_arguments(args)
     if history.enabled:
         config["native_web_prompt_history"] = native_web_history_configuration(history)
+    budget = getattr(args, "web_observation_token_budget", None)
+    if budget is not None:
+        config["web_observation_budget"] = web_observation_budget_configuration(budget)
     return config
 
 
@@ -254,6 +258,8 @@ async def generate(args, tasks):
                if prompt_history_from_arguments(args).enabled else {}))
         runtime = runtime_identity(model, tokenizer, policy)
         runner = make_runner(args)
+        if getattr(args, "web_observation_token_budget", None) is not None:
+            runner.set_web_observation_tokenizer(tokenizer)
         for task in assigned:
             seed = task_seed(args.seed, task.id)
             random.seed(seed)
@@ -430,6 +436,8 @@ def parser():
     result.set_defaults(max_steps=20)
     result.add_argument("--web-thought-budget-close", action="store_true",
         help="Experimental Web evaluation only: constrain the last in-budget thought token to the real closing token; JSON is unchanged")
+    result.add_argument("--web-observation-token-budget", type=int, default=None,
+        help="Opt in to an actual-tokenizer cap on complete Web tool observation JSON, including auto-reads and metadata; source windows remain literal character prefixes")
     add_prompt_history_arguments(result)
     next(action for action in result._actions if action.dest == "prompt_history_whole_turns").help = (
         "Experimental native HF Web evaluation only: evict earlier whole turns with complete request/tokenizer replay; CUAD and training capture are unsupported")
@@ -443,6 +451,7 @@ def main(argv=None):
     args = arguments.parse_args(argv)
     try:
         prompt_history_from_arguments(args)
+        web_observation_budget_configuration(args.web_observation_token_budget)
     except ValueError as error:
         arguments.error(str(error))
     if (not re.fullmatch(r"[0-9a-f]{40}", args.source_commit)

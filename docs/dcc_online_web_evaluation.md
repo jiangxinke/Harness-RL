@@ -2,8 +2,8 @@
 
 `scripts/dcc_online_web_evaluate.py` evaluates prepared Web task JSONL with the
 same `dcc_online_grpo.make_runner` used by online training. It is separate from
-the existing CUAD evaluator and vLLM benchmark protocol. It does not change
-public Web schemas, citation guards, review instructions or tool behavior.
+the existing CUAD evaluator and vLLM benchmark protocol. The default harness
+preserves public Web schemas, citation guards, review instructions and tool behavior.
 
 The score is a **strict row/item F1 proxy** using the existing table evaluator
 without a semantic judge. A column configured with `llm_judge` uses exact cell
@@ -19,6 +19,13 @@ Use validation data for harness decisions. Use the prepared original TEST only
 for a final base/adapter comparison. This command performs no training,
 automatic hyperparameter search, task selection or test-based checkpoint
 selection, and rejects TRAIN task inputs.
+
+The default-off [`--web-observation-token-budget 6144`](dcc_web_observation_budget.md)
+caps complete tool observation JSON with the actual policy tokenizer, including
+automatic reads and metadata. Set the same option for base and adapter. Source
+text remains literal character windows and the original strict whole-prompt
+checks remain. The same versioned option supports online Web training; this
+does not extend the evaluation-only whole-turn history option to training.
 
 ## Generate, close, then score
 

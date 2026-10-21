@@ -411,7 +411,7 @@ def final_turn_message(task: Task, evidence: _WebEvidence | None = None) -> dict
 
 
 class EpisodeRunner:
-    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900, retrieval_profile: RetrievalProfile | None = None, auto_read_sources: int = 0, auto_read_follow_docs: bool = False, retrieval_context_chars: int = 0, retrieval_max_context_chars: int = 16000, evaluation_temperature: float = 0.0, web_structured_final: bool = False, web_structured_actions: bool = False, web_explicit_review: bool = False, web_navigation_ledger: bool = False, web_research_checkpoints: bool = False, web_data_discovery_guidance: bool = False, web_multi_citation: bool = False, web_cached_rows: bool = False, cuad_structured_actions: bool = False, retrieval_task_bound_expansion: bool = False, cuad_concise_reasoning: bool = False, web_concise_reasoning: bool = False) -> None:
+    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900, retrieval_profile: RetrievalProfile | None = None, auto_read_sources: int = 0, auto_read_follow_docs: bool = False, retrieval_context_chars: int = 0, retrieval_max_context_chars: int = 16000, evaluation_temperature: float = 0.0, web_structured_final: bool = False, web_structured_actions: bool = False, web_explicit_review: bool = False, web_navigation_ledger: bool = False, web_research_checkpoints: bool = False, web_data_discovery_guidance: bool = False, web_multi_citation: bool = False, web_cached_rows: bool = False, cuad_structured_actions: bool = False, retrieval_task_bound_expansion: bool = False, cuad_concise_reasoning: bool = False, web_concise_reasoning: bool = False, web_observation_token_budget: int | None = None) -> None:
         from .web_structured import (web_structured_actions_configuration, web_structured_configuration,
                                      web_multi_citation_configuration)
 
@@ -482,6 +482,18 @@ class EpisodeRunner:
         self.auto_read_follow_docs = auto_read_follow_docs_configuration(auto_read_follow_docs)["enabled"]
         self.retrieval_context_chars = retrieval_context_chars
         self.retrieval_max_context_chars = retrieval_max_context_chars
+        # Native Web callers may install a tokenizer-measured tool-window
+        # budget. Default callers retain the original observation path.
+        from .web_observation_budget import web_observation_budget_configuration
+
+        web_observation_budget_configuration(web_observation_token_budget)
+        self.web_observation_token_budget = web_observation_token_budget
+        self.web_observation_budget = None
+
+    def set_web_observation_tokenizer(self, tokenizer):
+        from .web_observation_budget import WebObservationBudget
+
+        self.web_observation_budget = WebObservationBudget(tokenizer, self.web_observation_token_budget)
 
     def _search_document(self, document_tools: DocumentTools, query: str, top_k: int = 4, *, task: Task | None = None):
         if self.retrieval_task_bound_expansion and (task is None or task.benchmark != "cuad"
@@ -566,6 +578,9 @@ class EpisodeRunner:
     async def run(self, task: Task, policy: Policy, *, evaluation: bool = False, score_train: bool = True) -> EpisodeResult:
         if type(score_train) is not bool:
             raise ValueError("score_train must be a boolean")
+        if (self.web_observation_token_budget is not None and task.benchmark == "widesearch"
+                and self.web_observation_budget is None):
+            raise ValueError("Enabled Web observation windows require the actual policy tokenizer before rollout")
         messages = self.initial_messages(task)
         cached_rows_enabled = self.web_cached_rows and evaluation and task.benchmark == "widesearch"
         if cached_rows_enabled:
@@ -707,8 +722,30 @@ class EpisodeRunner:
                                     observation = {"error": "unknown or unavailable tool"}
                             except (TypeError, ValueError, OverflowError) as exc:
                                 observation = {"error": f"invalid tool arguments: {exc}"}
-                        events.append({"turn": index, "tool": tool, "arguments": arguments, "observation": observation})
-                        if evidence is not None:
+                        if evidence is not None and self.web_observation_budget is not None:
+                            # Stage raw auto-reads without marking them exposed.
+                            # Only final packed windows reach the real evidence
+                            # ledger, navigation events and next model request.
+                            staged_events = []
+                            if self.auto_read_sources and tool == "web_search" and index < self.max_steps - 1:
+                                from copy import deepcopy
+
+                                staged_evidence = deepcopy(evidence)
+                                staged_evidence.observe(tool, observation)
+                                operation = "auto_read_sources"
+                                observation = await self._read_search_sources(observation, web_tools,
+                                    staged_evidence, staged_events, auto_attempted, index)
+                            observation = self.web_observation_budget.pack(observation)
+                            events.append({"turn": index, "tool": tool, "arguments": arguments,
+                                "observation": observation})
+                            evidence.observe(tool, observation)
+                            sources = observation.get("auto_read_sources", [])
+                            for event, source in zip(staged_events, sources):
+                                events.append({**event, "observation": source})
+                                evidence.observe("fetch_url", source)
+                        else:
+                            events.append({"turn": index, "tool": tool, "arguments": arguments, "observation": observation})
+                        if evidence is not None and self.web_observation_budget is None:
                             evidence.observe(tool, observation)
                             if self.auto_read_sources and tool == "web_search" and index < self.max_steps - 1:
                                 operation = "auto_read_sources"
