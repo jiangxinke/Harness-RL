@@ -1,13 +1,15 @@
-"""Opt-in HF native thought sampling plus deterministic structural JSON.
+"""Opt-in HF native thought sampling plus structural JSON.
 
 This is a separate HF/NF4 on-policy runtime. It is not the existing vLLM native
-evaluation protocol. Only real stage-one token IDs receive a policy gradient;
-stage-two greedy grammar decisions carry zero policy-loss weight.
+evaluation protocol. By default only actual thoughts receive a policy gradient
+and JSON is greedy. Joint CUAD mode samples JSON too and retains its actual
+post-grammar behavior scores; it requires grammar-normalized replay.
 """
 from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from copy import deepcopy
 from dataclasses import dataclass
 import inspect
 import json
@@ -25,6 +27,7 @@ from .native_hf_context import NativeHFPromptBudgetExceeded
 from .native_behavior_logprobs import BEHAVIOR_LOGPROB_SOURCE, StreamingRawThoughtLogprobs
 
 PROTOCOL = "hf-native-two-stage-thought-only-policy-v1"
+JOINT_PROTOCOL = "hf-native-two-stage-joint-masked-JSON-policy-v1"
 OPEN_THINK, END_THINK = 151667, 151668
 NATIVE_SUFFIX = "<|im_start|>assistant\n<think>\n"
 
@@ -55,6 +58,15 @@ class NativeHFCompletion(PolicyCompletion):
     trace_id: str | None = None
 
 
+@dataclass(slots=True)
+class JointNativeHFCompletion(NativeHFCompletion):
+    """Only the opt-in policy adds JSON sampling fields to serialized outputs."""
+    json_logprobs: list[float] | None = None
+    json_logprobs_source: str | None = None
+    json_public_schema: dict | None = None
+    json_stop_ids: list[int] | None = None
+
+
 def _strict_json(text):
     def reject_constant(value):
         raise ValueError("Non-finite JSON constant: " + value)
@@ -71,6 +83,11 @@ def _strict_json(text):
 
 
 class NativeHFPolicy:
+    # Preserve lightweight legacy decoder seams that bypass __init__. Real
+    # joint runtimes always override both values explicitly in __init__.
+    joint_json_policy = False
+    protocol = PROTOCOL
+
     @staticmethod
     def validate_tokenizer(tokenizer):
         if tokenizer.encode('<think>', add_special_tokens=False) != [OPEN_THINK] or \
@@ -85,7 +102,7 @@ class NativeHFPolicy:
                  max_prompt_tokens=16384, max_model_len=None, batch_size=4,
                  sampling_profile="raw", allow_truncation=False, trace_sink=None,
                  web_bounded_whitespace=False, capture_thought_logprobs=False,
-                 mixed_schema_batching=False):
+                 mixed_schema_batching=False, joint_json_policy=False):
         from transformers import GenerationConfig
         import xgrammar as xgr
 
@@ -98,9 +115,15 @@ class NativeHFPolicy:
             raise ValueError("Actual behavior scores require explicit raw thought sampling")
         if type(mixed_schema_batching) is not bool:
             raise ValueError("Mixed-schema batching must be an explicit boolean")
+        if type(joint_json_policy) is not bool or (joint_json_policy and
+                (sampling_profile != "raw" or not capture_thought_logprobs or web_bounded_whitespace)):
+            raise ValueError("Joint CUAD JSON policy requires captured raw thoughts and unchanged CUAD grammar")
+        self.joint_json_policy = joint_json_policy
+        self.protocol = JOINT_PROTOCOL if joint_json_policy else PROTOCOL
         self.capture_thought_logprobs = capture_thought_logprobs
         self.mixed_schema_batching = mixed_schema_batching
         self._last_thought_logprobs = None
+        self._last_json_logprobs = None
         self.model, self.tokenizer = model, tokenizer
         self.thought_tokens, self.json_tokens = thought_tokens, json_tokens
         self.max_prompt_tokens, self.batch_size = max_prompt_tokens, batch_size
@@ -123,7 +146,7 @@ class NativeHFPolicy:
         self.grammars = {}
         self.queue = asyncio.Queue()
         self.worker = None
-        self.provenance = {"protocol": PROTOCOL, "thought_sampling_profile": sampling_profile,
+        self.provenance = {"protocol": self.protocol, "thought_sampling_profile": sampling_profile,
             "thought_tokens": thought_tokens, "json_tokens": json_tokens,
             "thought_logprobs_source": BEHAVIOR_LOGPROB_SOURCE if capture_thought_logprobs else None,
             "json_sampling": "greedy-neutral-xgrammar-structural; public-schema-postvalidation",
@@ -135,12 +158,21 @@ class NativeHFPolicy:
             "web_schema_policy": "existing-public-schema-and-review-decoder; original-schema-postvalidation",
             "compute_profile": model_compute_profile(model),
             "separate_from_vllm_native_v3": True}
+        if joint_json_policy:
+            from .native_joint_grpo import JSON_BEHAVIOR_SOURCE
+            self.provenance.update(json_sampling="multinomial-T1-top_p1-top_k0-xgrammar",
+                json_logprobs_source=JSON_BEHAVIOR_SOURCE,
+                policy_gradient="sampled-raw-thought-and-grammar-normalized-JSON",
+                failure_policy="retain-actual-sampled-thought-and-JSON-IDs-with-reward-zero; no-forced-close-or-retry",
+                supported_benchmark="cuad")
 
     async def __call__(self, *args, **kwargs):
         raise ValueError("HF native policy requires generate_structured and an explicit public schema")
 
     async def generate_structured(self, messages, *, json_schema, max_new_tokens, temperature, _task_id=None):
-        native_structured_schema_kind(json_schema)
+        kind = native_structured_schema_kind(json_schema)
+        if self.joint_json_policy and kind != "cuad":
+            raise ValueError("Joint JSON policy currently supports CUAD only")
         if max_new_tokens != self.thought_tokens + self.json_tokens:
             raise ValueError("Runner must reserve exactly the two explicit phase budgets")
         if self.sampling_profile == "raw" and temperature != 1.0:
@@ -212,8 +244,9 @@ class NativeHFPolicy:
         attention = torch.tensor([[0] * (width - len(p)) + [1] * len(p) for p in prompts], device=ids.device)
         raw = phase == "thought" and self.sampling_profile == "raw"
         thinking = phase == "thought" and self.sampling_profile == "thinking"
+        sampled_json = phase == "json" and self.joint_json_policy
         stop_ids = list(self.eos_ids) + ([END_THINK] if phase == "thought" else [])
-        config = self.generation_config(do_sample=raw or thinking,
+        config = self.generation_config(do_sample=raw or thinking or sampled_json,
             temperature=0.6 if thinking else 1.0, top_p=0.95 if thinking else 1.0,
             top_k=20 if thinking else 0, eos_token_id=stop_ids, pad_token_id=pad,
             max_new_tokens=self.thought_tokens if phase == "thought" else self.json_tokens,
@@ -227,10 +260,17 @@ class NativeHFPolicy:
             use_cache=True, return_dict_in_generate=False)
         tracker = StreamingRawThoughtLogprobs() if raw and self.capture_thought_logprobs else None
         processors = [LogitsProcessor(grammar)] if grammar is not None else []
-        if tracker is not None:
-            if processors:
-                raise ValueError("Raw behavior tracking cannot include grammar processors")
+        if sampled_json:
+            from .native_joint_grpo import StreamingMaskedJSONLogprobs
+            if grammar is None:
+                raise ValueError("Sampled JSON requires its exact compiled public schema")
+            tracker = StreamingMaskedJSONLogprobs()
             processors.append(tracker)
+        if tracker is not None:
+            if processors and not sampled_json:
+                raise ValueError("Raw behavior tracking cannot include grammar processors")
+            if not sampled_json:
+                processors.append(tracker)
         with compute_context(self.model):
             output = self.model.generate(input_ids=ids, attention_mask=attention,
                 **_explicit_generation_kwargs(config),
@@ -241,6 +281,8 @@ class NativeHFPolicy:
             rows.append(row[:end])
         if phase == "thought":
             self._last_thought_logprobs = tracker.finish(rows) if tracker is not None else None
+        elif sampled_json:
+            self._last_json_logprobs = tracker.finish(rows)
         return rows
 
     @torch.inference_mode()
@@ -283,7 +325,9 @@ class NativeHFPolicy:
         else:
             schemas = [json_schema] * count
         for schema in schemas:
-            native_structured_schema_kind(schema)
+            kind = native_structured_schema_kind(schema)
+            if self.joint_json_policy and kind != "cuad":
+                raise ValueError("Joint JSON policy currently supports CUAD only")
         return schemas
 
     def _generate_encoded_batch(self, prompts, json_schema, task_ids):
@@ -297,6 +341,7 @@ class NativeHFPolicy:
         valid = [i for i, tokens in enumerate(thoughts) if tokens and tokens[-1] == END_THINK
                  and tokens.count(END_THINK) == 1 and not set(tokens).intersection(self.eos_ids)]
         finals = [[] for _ in prompts]
+        json_logprobs = [[] for _ in prompts] if self.joint_json_policy else None
         json_seconds = None
         if valid:
             grammars = []
@@ -314,6 +359,9 @@ class NativeHFPolicy:
             json_seconds = time.monotonic() - json_started
             for i, tokens in zip(valid, generated, strict=True):
                 finals[i] = tokens
+            if self.joint_json_policy:
+                for i, values in zip(valid, self._last_json_logprobs, strict=True):
+                    json_logprobs[i] = values
         results = []
         for i, (prompt, thought, final) in enumerate(zip(prompts, thoughts, finals, strict=True)):
             reason, text = None, ""
@@ -330,15 +378,23 @@ class NativeHFPolicy:
             status = reason or "completed"
             terminal_ids = self.eos_ids if final else self.eos_ids + [END_THINK]
             observed = final or thought
-            completion = NativeHFCompletion(text=text, prompt_ids=list(prompt), completion_ids=thought + final,
+            extra = {}
+            completion_type = NativeHFCompletion
+            if self.joint_json_policy:
+                from .native_joint_grpo import JSON_BEHAVIOR_SOURCE
+                completion_type = JointNativeHFCompletion
+                extra = dict(json_logprobs=json_logprobs[i],
+                    json_logprobs_source=JSON_BEHAVIOR_SOURCE if final else None,
+                    json_public_schema=deepcopy(schemas[i]), json_stop_ids=list(self.eos_ids))
+            completion = completion_type(text=text, prompt_ids=list(prompt), completion_ids=thought + final,
                 finish_reason="stop" if observed and observed[-1] in terminal_ids else "length",
                 thought_token_count=len(thought), phase_lengths=(len(thought), len(final)), native_status=status,
                 thought_logprobs=thought_logprobs[i] if thought_logprobs is not None else None,
-                thought_logprobs_source=BEHAVIOR_LOGPROB_SOURCE if thought_logprobs is not None else None)
+                thought_logprobs_source=BEHAVIOR_LOGPROB_SOURCE if thought_logprobs is not None else None, **extra)
             trace_id = uuid.uuid4().hex
             completion.trace_id = trace_id
             if self.trace_sink is not None:
-                self.trace_sink({"protocol": PROTOCOL, "trace_id": trace_id,
+                trace = {"protocol": self.protocol, "trace_id": trace_id,
                     "task_id": task_ids[i] if task_ids else None, "status": status,
                     "prompt_ids": list(prompt), "thought_ids": thought, "json_ids": final,
                     "thought_token_count": len(thought), "final_text": text,
@@ -347,8 +403,14 @@ class NativeHFPolicy:
                     "batch_phase_elapsed_seconds": {"thought": thought_seconds,
                         "json": json_seconds if i in valid else None},
                     "thought_sampling_profile": self.sampling_profile,
-                    "json_public_schema": schemas[i]})
-            results.append(ModelProtocolFailure(reason, completion=completion, protocol=PROTOCOL, trace_id=trace_id)
+                    "json_public_schema": schemas[i]}
+                if self.joint_json_policy:
+                    trace.update(json_logprobs=completion.json_logprobs,
+                        json_logprobs_source=completion.json_logprobs_source,
+                        json_stop_ids=completion.json_stop_ids,
+                        json_sampling_profile="multinomial-T1-top_p1-top_k0-xgrammar")
+                self.trace_sink(trace)
+            results.append(ModelProtocolFailure(reason, completion=completion, protocol=self.protocol, trace_id=trace_id)
                            if reason is not None else completion)
         return results
 

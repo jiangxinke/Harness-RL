@@ -2,8 +2,30 @@ The optional online CUAD entrypoint samples a fresh group of thoughts from the
 current policy before every update. It uses the native opening/closing thinking
 tokens and the existing public CUAD action/final schemas. JSON is generated
 greedily with the structural xgrammar backend and then checked against the
-original public schema. Only the sampled thought tokens receive GRPO loss.
+original public schema. By default, only the sampled thought tokens receive GRPO loss.
 There is no SFT auxiliary, offline preference pair, or DPO loss.
+
+For an experimental CUAD-only joint objective, add `--joint-json-policy` to
+both CPU preflight and training. Thoughts keep raw temperature-one sampling;
+JSON uses multinomial sampling over the same public xgrammar schema, with
+temperature one, top-p one and top-k zero. The trainer captures actual JSON
+behavior logprobs after grammar masking and replays current and reference
+logprobs over the same schema and actual token-prefix support. It does not use
+old greedy JSON traces or teacher-forced scores as behavior probabilities.
+
+Joint mode trains both phases with the existing clipped objective and a fixed
+`group_size * max_steps * (thought_tokens + json_tokens)` denominator. Real
+stop tokens, truncated trajectories and failures remain in the recorded groups;
+a grammar position with one legal token has zero gradient. The optional
+reference-KL term uses the same legal support. Joint metadata identifies the
+two-phase objective separately, and online Web training is rejected in this
+mode. Omitting the switch retains the original thought-only policy.
+
+Use fresh rollouts, a fresh output directory and a matched base/adapter
+evaluation for this experiment. Joint replay includes JSON in the decoder
+sequence and retains packed grammar masks, increasing compute and memory.
+CPU generation, gradient and compatibility checks do not establish GPU
+feasibility or benchmark improvement.
 
 This is an independent HF LoRA runtime with optional NF4 loading, separate from Slime/Megatron and the
 existing BF16 vLLM native evaluation protocol. Start with a bounded pilot and

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Opt-in TRAIN-only online LoRA GRPO for the native two-stage HF harness.
 
-Sample raw-policy thoughts, execute greedy schema-constrained JSON, and train
-only the sampled thought tokens. This is an independent HF runtime, not the
-Slime/Megatron backend. There is no SFT auxiliary or offline preference loss.
+By default, sample raw-policy thoughts, execute greedy constrained JSON, and
+train only the thoughts. --joint-json-policy opts CUAD into fresh stochastic
+constrained JSON and a grammar-normalized two-phase objective. This is an
+independent HF runtime, not Slime/Megatron; there is no SFT auxiliary loss.
 """
 from __future__ import annotations
 
@@ -152,7 +153,8 @@ def make_runner(args):
 
 def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens, clip,
                  replay_diagnostic="full", reference_kl_beta=0, reference_base_model=None,
-                 reference_source_commit=None):
+                 reference_source_commit=None, joint_json_policy=False, json_tokens=None,
+                 grammar_compiler=None, logprob_backend="qwen3-moe-chunked", head_chunk_tokens=None):
     """Use actual cached-generation behavior as old; replay is diagnostic only.
 
     Cached generation and teacher-forced replay may differ numerically even
@@ -162,6 +164,19 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
     if replay_diagnostic not in {"full", "first", "off"}:
         raise ValueError("Replay diagnostic must be full, first or off")
     validate_reference_kl_beta(reference_kl_beta)
+    objective_tokens = thought_tokens
+    if joint_json_policy:
+        if type(json_tokens) is not int or json_tokens < 1 or grammar_compiler is None:
+            raise ValueError("Joint replay requires its actual grammar compiler and fixed JSON budget")
+        objective_tokens += json_tokens
+    def scorer_for(segment):
+        if joint_json_policy:
+            from slime_plugins.dcc.native_joint_grpo import segment_scorer
+            return segment_scorer(segment, grammar_compiler,
+                backend=logprob_backend, head_chunk_tokens=head_chunk_tokens)
+        return scorer
+    def old_values(segment):
+        return segment.behavior_logprobs if joint_json_policy else segment.thought_logprobs
     scored = [(segment, advantage)
               for segments, advantage in zip(signal.segments, signal.advantages, strict=True)
               if advantage != 0 for segment in segments]
@@ -173,8 +188,8 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
         with torch.no_grad():
             selected = scored if replay_diagnostic == "full" else scored[:1]
             for index, (segment, _) in enumerate(selected):
-                replay = scorer(model, segment.prompt_ids, segment.completion_ids).detach()
-                old = torch.tensor(segment.thought_logprobs, device=replay.device, dtype=torch.float32)
+                replay = scorer_for(segment)(model, segment.prompt_ids, segment.completion_ids).detach()
+                old = torch.tensor(old_values(segment), device=replay.device, dtype=torch.float32)
                 if old.shape != replay.shape or not torch.isfinite(old).all() or not torch.isfinite(replay).all():
                     raise FloatingPointError("Aligned finite behavior and diagnostic replay scores required")
                 diagnostics[index] = replay
@@ -185,12 +200,13 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
     behavior_current, diagnostic_tokens = 0.0, 0
     ratio_min, ratio_max, clipped_tokens = None, None, 0
     for index, (segment, advantage) in enumerate(scored):
+        active_scorer = scorer_for(segment)
         if reference_kl_beta > 0:
             # Finish and restore the adapter context BEFORE creating a current
             # graph. Backward below completes before the next reference read.
-            reference = frozen_base_logprobs(model, scorer, segment.prompt_ids, segment.completion_ids)
-        current = scorer(model, segment.prompt_ids, segment.completion_ids)
-        old = torch.tensor(segment.thought_logprobs, device=current.device, dtype=torch.float32)
+            reference = frozen_base_logprobs(model, active_scorer, segment.prompt_ids, segment.completion_ids)
+        current = active_scorer(model, segment.prompt_ids, segment.completion_ids)
+        old = torch.tensor(old_values(segment), device=current.device, dtype=torch.float32)
         if old.shape != current.shape or not torch.isfinite(old).all() or not torch.isfinite(current).all():
             raise FloatingPointError("Aligned finite actual behavior and current thought scores required")
         observed = current.detach()
@@ -211,10 +227,10 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
         ratio_min, ratio_max = min(ratio_min if ratio_min is not None else lo, lo), max(ratio_max if ratio_max is not None else hi, hi)
         clipped_tokens += ((ratio < 1 - clip) | (ratio > 1 + clip)).sum().item()
         loss = thought_policy_loss(current, old, advantage,
-            group_size=group_size, max_steps=max_steps, thought_tokens=thought_tokens, clip=clip)
+            group_size=group_size, max_steps=max_steps, thought_tokens=objective_tokens, clip=clip)
         if reference_kl_beta > 0:
             kl = thought_reference_kl_loss(current, reference,
-                group_size=group_size, max_steps=max_steps, thought_tokens=thought_tokens)
+                group_size=group_size, max_steps=max_steps, thought_tokens=objective_tokens)
             objective = loss + reference_kl_beta * kl
             if not torch.isfinite(objective):
                 raise FloatingPointError("Non-finite reference-KL online objective; refusing update")
@@ -236,6 +252,10 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
                 maximum_replay_current_logprob_difference=replay_current,
                 importance_ratio_min=ratio_min, importance_ratio_max=ratio_max,
                 importance_ratio_outside_clip_fraction=clipped_tokens / tokens if tokens else None)
+    if joint_json_policy:
+        report.update(old_logprob_source="actual-sampled-raw-thought-and-post-xgrammar-JSON-behavior",
+            thought_scored_tokens=sum(segment.thought_count for segment, _ in scored),
+            json_scored_tokens=sum(len(segment.json_logprobs) for segment, _ in scored))
     if reference_kl_beta > 0:
         report.update(algorithm_variant=REFERENCE_KL_VARIANT,
             reference_kl=reference_kl_configuration(reference_kl_beta, base_model=reference_base_model,
@@ -244,6 +264,9 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
             reference_kl_loss=reference_kl_beta * reference_kl_total,
             objective_loss=objective_total,
             reference_scored_segments=len(scored), reference_scored_tokens=tokens)
+        if joint_json_policy:
+            report["algorithm_variant"] = "frozen-base-reference-k3-nonzero-advantage-joint-v1"
+            report["reference_kl"] = joint_reference_configuration(report["reference_kl"])
     return report
 
 
@@ -271,13 +294,16 @@ async def collect_group(runner, task, policy, *, group_size, rank):
 
 
 def configuration(args, plan, tasks, world_size):
+    if getattr(args, "joint_json_policy", False) and (
+            getattr(args, "enable_online_web", False) or any(t.benchmark != "cuad" for t in tasks)):
+        raise ValueError("Joint JSON policy currently supports CUAD only; online Web is unsupported")
     web = make_web_tools(args)
     reference_kl = reference_kl_configuration(getattr(args, "reference_kl_beta", 0),
         base_model=args.model, source_commit=args.source_commit)
     config = dict(algorithm=ALGORITHM, runtime="independent-HF; not Slime/Megatron",
         source_commit=args.source_commit, world_size=world_size,
         arguments={key: str(value) if isinstance(value, Path) else value
-                   for key, value in vars(args).items()},
+                   for key, value in vars(args).items() if key != "joint_json_policy" or value},
         compute_profile=compute_profile_configuration(getattr(args, "compute_profile", "legacy")),
         cuad_concise_reasoning=cuad_concise_reasoning_configuration(getattr(args, "cuad_concise_reasoning", False)),
         auto_read_follow_docs=auto_read_follow_docs_configuration(getattr(args, "auto_read_follow_docs", False)),
@@ -303,6 +329,22 @@ def configuration(args, plan, tasks, world_size):
     if reference_kl["enabled"]:
         config["algorithm"] = ALGORITHM + "+" + REFERENCE_KL_VARIANT
         config["algorithm_variant"] = REFERENCE_KL_VARIANT
+    if getattr(args, "joint_json_policy", False):
+        from slime_plugins.dcc.native_joint_grpo import ALGORITHM as JOINT_ALGORITHM, JSON_BEHAVIOR_SOURCE
+        from slime_plugins.dcc.hf_native_policy import JOINT_PROTOCOL
+        config.update(algorithm=JOINT_ALGORITHM,
+            native_policy_protocol=JOINT_PROTOCOL,
+            behavior_policy=dict(thought="raw softmax T=1 top_p=1 top_k=0",
+                json="xgrammar-masked multinomial T=1 top_p=1 top_k=0",
+                old_logprob_source=dict(thought="streaming-generation-raw-logits-v1", json=JSON_BEHAVIOR_SOURCE),
+                teacher_forced_replay_is_behavior=False),
+            policy_loss_tokens="actual sampled thought and grammar-normalized JSON, including real stops",
+            json_policy_loss=True,
+            objective_denominator=args.group_size * args.max_steps * (args.thought_tokens + args.json_tokens),
+            reference_kl=joint_reference_configuration(reference_kl))
+        if reference_kl["enabled"]:
+            config["algorithm_variant"] = "frozen-base-reference-k3-nonzero-advantage-joint-v1"
+            config["algorithm"] += "+" + config["algorithm_variant"]
     if getattr(args, "enable_online_web", False):
         from slime_plugins.dcc.online_web import binding_protocols
         config["online_web"] = dict(enabled=True, protocols=binding_protocols(),
@@ -316,6 +358,15 @@ def configuration(args, plan, tasks, world_size):
                 getattr(args, "web_train_reward_variant", TABLE_GROUNDED_REWARD)),
             labels="deserialized-only-after-own-group-durable-close")
     return config
+
+
+def joint_reference_configuration(config):
+    result = dict(config)
+    result.update(json_tokens=True, denominator="group_size*max_steps*(thought_tokens+json_tokens)",
+        behavior_denominator="actual-sampled-thought-and-post-xgrammar-JSON-behavior-unchanged")
+    if result["enabled"]:
+        result["active_scope"] = "nonzero-advantage-sampled-thought-and-JSON-segments"
+    return result
 
 
 def native_grammar_cpu_preflight(model_name, tokenizer):
@@ -371,6 +422,17 @@ def cpu_preflight(args, tasks, plan, world_size):
     tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=True)
     NativeHFPolicy.validate_tokenizer(tokenizer)
     grammar = native_grammar_cpu_preflight(args.model, tokenizer)
+    if getattr(args, "joint_json_policy", False):
+        import xgrammar as xgr
+        from slime_plugins.dcc.cuad_structured import cuad_final_schema
+        from slime_plugins.dcc.native_joint_grpo import JSON_BEHAVIOR_SOURCE, json_prefix_bitmasks
+        compiler = xgr.GrammarCompiler(xgr.TokenizerInfo.from_huggingface(tokenizer,
+            vocab_size=grammar["vocab_size"], stop_token_ids=grammar["stop_token_ids"]), max_threads=1)
+        ids = tokenizer.encode('{"plan":"review","checks":"observed","answer":[]}', add_special_tokens=False)
+        ids.append(grammar["stop_token_ids"][0])
+        masks = json_prefix_bitmasks(compiler, cuad_final_schema(), ids, eos_ids=grammar["stop_token_ids"])
+        grammar["joint_json_support_preflight"] = dict(behavior_source=JSON_BEHAVIOR_SOURCE,
+            actual_model_sampling=False, legal_complete_JSON_and_EOS=True, positions=masks.shape[0])
     runner = make_runner(args)
     lengths = []
     for index in sorted({index for row in plan for index in row}):
@@ -390,6 +452,10 @@ def cpu_preflight(args, tasks, plan, world_size):
 
 
 async def train(args, tasks, plan, world_size, *, web_inputs=None):
+    if getattr(args, "joint_json_policy", False) and (
+            getattr(args, "enable_online_web", False) or web_inputs is not None
+            or any(t.benchmark != "cuad" for t in tasks)):
+        raise ValueError("Joint JSON policy currently supports CUAD only; online Web is unsupported")
     from slime_plugins.dcc.hf_native_policy import NativeHFPolicy
     rank, local = int(os.environ.get("RANK", "0")), int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local)
@@ -436,13 +502,19 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
             record(event="quantization", **model.dcc_quantization_report)
         optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, weight_decay=0.0)
         scorer, score_recipe = resolve_logprob_backend(args.logprob_backend, args.head_chunk_tokens)
+        if getattr(args, "joint_json_policy", False):
+            score_recipe = dict(score_recipe,
+                implementation_version="joint-raw-thought-packed-grammar-JSON-" + args.logprob_backend + "-v1",
+                json_support="actual-public-schema-and-sampled-prefix",
+                json_normalization="differentiable-legal-token-logsumexp")
         record(event="scorer", **score_recipe)
         policy = NativeHFPolicy(model, tokenizer, thought_tokens=args.thought_tokens,
             json_tokens=args.json_tokens, max_prompt_tokens=args.max_prompt_tokens,
             batch_size=getattr(args, "native_batch_size", 4),
             sampling_profile="raw", trace_sink=lambda value: enqueue(traces, value),
             capture_thought_logprobs=True,
-            mixed_schema_batching=getattr(args, "native_mixed_schema_batching", False))
+            mixed_schema_batching=getattr(args, "native_mixed_schema_batching", False),
+            joint_json_policy=getattr(args, "joint_json_policy", False))
         runner = make_runner(args)
         # Identical initial replicas; independent sampled trajectories afterwards.
         torch.manual_seed(args.seed + rank * 100003)
@@ -496,9 +568,15 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
             for sample, result in enumerate(results):
                 enqueue(rollouts, dict(iteration=iteration, sample=sample,
                                        **result.to_dict(include_tokens=True)))
-            signal = group_signal(results, group_size=args.group_size,
-                max_steps=args.max_steps, thought_tokens=args.thought_tokens,
-                advantage_normalization=config["advantage_normalization"])
+            if getattr(args, "joint_json_policy", False):
+                from slime_plugins.dcc.native_joint_grpo import joint_group_signal
+                signal = joint_group_signal(results, group_size=args.group_size,
+                    max_steps=args.max_steps, thought_tokens=args.thought_tokens, json_tokens=args.json_tokens,
+                    eos_ids=policy.eos_ids, advantage_normalization=config["advantage_normalization"])
+            else:
+                signal = group_signal(results, group_size=args.group_size,
+                    max_steps=args.max_steps, thought_tokens=args.thought_tokens,
+                    advantage_normalization=config["advantage_normalization"])
             record(event="signal", iteration=iteration, rewards=signal.rewards, reward_std=signal.reward_std,
                    advantages=signal.advantages, discarded_reason=signal.discarded_reason,
                    advantage_normalization=signal.advantage_normalization)
@@ -508,7 +586,11 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
                 max_steps=args.max_steps, thought_tokens=args.thought_tokens, clip=args.clip,
                 replay_diagnostic=getattr(args, "replay_diagnostic", "full"),
                 reference_kl_beta=getattr(args, "reference_kl_beta", 0), reference_base_model=args.model,
-                reference_source_commit=args.source_commit)
+                reference_source_commit=args.source_commit,
+                joint_json_policy=getattr(args, "joint_json_policy", False), json_tokens=args.json_tokens,
+                grammar_compiler=policy.compiler if getattr(args, "joint_json_policy", False) else None,
+                logprob_backend=args.logprob_backend,
+                head_chunk_tokens=args.head_chunk_tokens)
             record(event="replay_end", iteration=iteration, seconds=time.monotonic() - replay_started,
                    scored_tokens=report["scored_tokens"], scored_segments=report["scored_segments"])
             if world_size > 1:
@@ -525,14 +607,21 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
             record(event="apply_end", iteration=iteration, seconds=time.monotonic() - apply_started,
                    optimizer_step_applied=applied, global_gradient_norm=norm)
             updates += int(applied)
+            sampled_thought_tokens = sum(
+                (s.thought_count if getattr(args, "joint_json_policy", False) else len(s.completion_ids))
+                for group in signal.segments for s in group)
+            sampled_tokens = {}
+            if getattr(args, "joint_json_policy", False):
+                sampled_tokens["sampled_json_tokens"] = sum(
+                    len(s.json_logprobs) for group in signal.segments for s in group)
             record(event="step", iteration=iteration, optimizer_updates=updates,
                 optimizer_step_applied=applied, global_gradient_norm=norm,
                 task_id=task.id, statuses=[r.status for r in results], rewards=signal.rewards,
                 reward_std=signal.reward_std, advantages=signal.advantages,
                 advantage_normalization=signal.advantage_normalization,
                 discarded_reason=signal.discarded_reason,
-                sampled_thought_tokens=sum(len(s.completion_ids) for group in signal.segments for s in group),
-                seconds=time.monotonic() - begin, **report)
+                sampled_thought_tokens=sampled_thought_tokens,
+                seconds=time.monotonic() - begin, **sampled_tokens, **report)
             if args.save_every and iteration % args.save_every == 0:
                 save(f"iteration_{iteration:04d}", iteration)
         changed = sum(not torch.equal(parameter.detach(), before)
@@ -557,7 +646,8 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
                 has_policy_gradient_updates=updates > 0 and all(s["changed_adapter_tensors"] > 0 for s in summaries),
                 ranks=summaries, benchmark_improvement_claimed=False)
             if config["reference_kl"]["enabled"]:
-                complete.update(algorithm_variant=REFERENCE_KL_VARIANT, reference_kl=config["reference_kl"])
+                complete.update(algorithm_variant=config.get("algorithm_variant", REFERENCE_KL_VARIANT),
+                                reference_kl=config["reference_kl"])
             with (args.output_dir / "training_complete.json").open("x") as stream:
                 stream.write(json.dumps(complete, indent=2, allow_nan=False) + "\n")
     except BaseException as error:
@@ -608,6 +698,8 @@ def main(argv=None):
                         help="Maximum requests per physical native rollout batch on each rank; logical GRPO group size is unchanged")
     parser.add_argument("--native-mixed-schema-batching", action="store_true",
                         help="Batch native requests with distinct schemas using one grammar matcher per row")
+    parser.add_argument("--joint-json-policy", action="store_true",
+                        help="CUAD only: fresh raw-thought and grammar-masked stochastic-JSON GRPO; old greedy JSON traces are unsupported")
     parser.add_argument("--thought-tokens", type=int, default=4096)
     parser.add_argument("--json-tokens", type=int, default=4096)
     parser.add_argument("--max-prompt-tokens", type=int, default=16384)
@@ -643,6 +735,8 @@ def main(argv=None):
     parser.add_argument("--cpu-preflight", action="store_true")
     parser.add_argument("--plan-world-size", type=int, default=1)
     args = parser.parse_args(argv)
+    if args.joint_json_policy and args.enable_online_web:
+        parser.error("--joint-json-policy supports CUAD only and cannot be combined with --enable-online-web")
     try:
         validate_reference_kl_beta(args.reference_kl_beta)
     except ValueError as error:

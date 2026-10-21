@@ -167,7 +167,9 @@ def restore_verified_native_context(result, *, traces, tokenizer):
     for step in result.steps:
         count = getattr(step, "thought_token_count", None)
         row = index.get(getattr(step, "trace_id", None), {})
-        if (row.get("protocol") != HF_PROTOCOL or row.get("task_id") != result.task_id
+        from .hf_native_policy import JOINT_PROTOCOL, JointNativeHFCompletion
+        joint = isinstance(step, JointNativeHFCompletion)
+        if (row.get("protocol") != (JOINT_PROTOCOL if joint else HF_PROTOCOL) or row.get("task_id") != result.task_id
                 or row.get("thought_sampling_profile") != "raw"
                 or row.get("prompt_ids") != step.prompt_ids
                 or type(count) is not int or row.get("thought_token_count") != count
@@ -177,6 +179,11 @@ def restore_verified_native_context(result, *, traces, tokenizer):
                 or row.get("thought_logprobs_source") != step.thought_logprobs_source
                 or row.get("status") != step.native_status or row.get("final_text") != step.text):
             raise ValueError("Retained sampled step differs from actual native generation journal")
+        if joint and (row.get("json_logprobs") != step.json_logprobs
+                or row.get("json_logprobs_source") != step.json_logprobs_source
+                or row.get("json_public_schema") != step.json_public_schema
+                or row.get("json_stop_ids") != step.json_stop_ids):
+            raise ValueError("Retained sampled JSON differs from actual native generation journal")
     metrics = deepcopy(result.metrics)
     metrics["prompt_history_failure"]["native_hf_preflight"] = _VerifiedPreflight.issue(record)
     restored = replace(result, metrics=metrics)

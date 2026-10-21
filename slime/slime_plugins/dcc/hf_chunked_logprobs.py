@@ -1,22 +1,26 @@
-"""Optional Qwen3 MoE raw completion scores with bounded LM-head logits.
+"""Optional Qwen3 MoE completion scores with bounded LM-head logits.
 
 Not the default policy scorer. Preserves full prompt/completion tokens and raw
 SUM/mean semantics; chunking is over response head positions only. Requires
 standard attention LoRA or an unwrapped HF Qwen3 MoE model, without PEFT prompt
 learning/modules-to-save. Decoder checkpointing remains the caller's setting.
+The separate joint CUAD path can supply immutable packed JSON supports;
+without them the original raw-likelihood expression is unchanged.
 """
 import torch
 from torch.utils.checkpoint import checkpoint
 
 
-def completion_logprobs_chunked(model, prompt_ids, completion_ids, *, head_chunk_tokens=128):
+def completion_logprobs_chunked(model, prompt_ids, completion_ids, *, head_chunk_tokens=128,
+                                json_bitmasks=None, mask_start=None):
     from .hf_compute import compute_context
     with compute_context(model):
         return _completion_logprobs_chunked(model, prompt_ids, completion_ids,
-                                           head_chunk_tokens=head_chunk_tokens)
+            head_chunk_tokens=head_chunk_tokens, json_bitmasks=json_bitmasks, mask_start=mask_start)
 
 
-def _completion_logprobs_chunked(model, prompt_ids, completion_ids, *, head_chunk_tokens=128):
+def _completion_logprobs_chunked(model, prompt_ids, completion_ids, *, head_chunk_tokens=128,
+                                 json_bitmasks=None, mask_start=None):
     if type(head_chunk_tokens) is not int or head_chunk_tokens < 1:
         raise ValueError("Positive integer head chunk size required")
     if not prompt_ids or not completion_ids:
@@ -42,6 +46,11 @@ def _completion_logprobs_chunked(model, prompt_ids, completion_ids, *, head_chun
         raise ValueError("Chunked scorer is approved only for HF Qwen3 MoE")
     if getattr(base.config, "pretraining_tp", 1) != 1:
         raise ValueError("Tensor-parallel LM head is not supported")
+    if json_bitmasks is not None and (
+            type(mask_start) is not int or not 0 <= mask_start <= len(completion_ids)
+            or json_bitmasks.dtype != torch.int32 or json_bitmasks.ndim != 2
+            or json_bitmasks.shape != (len(completion_ids) - mask_start, (base.config.vocab_size + 31) // 32)):
+        raise ValueError("Packed JSON masks and actual phase boundary must align to completion tokens")
     ids = torch.tensor([list(prompt_ids) + list(completion_ids)], device=model.device)
     # Standard injected LoRA layers, including disable_adapter state, reside in
     # this actual decoder. No top-level prompt tuning or adapter_names routing.
@@ -53,15 +62,28 @@ def _completion_logprobs_chunked(model, prompt_ids, completion_ids, *, head_chun
     target = ids[:, -length:]
     head = base.get_output_embeddings()
 
-    def score_chunk(value, labels):
+    def score_chunk(value, labels, bitmasks=None):
         logits = head(value).float()
+        if bitmasks is not None:
+            from .native_joint_grpo import grammar_token_logprobs
+            return grammar_token_logprobs(logits, labels, bitmasks)
         return logits.gather(-1, labels.unsqueeze(-1)).squeeze(-1) - logits.logsumexp(-1)
 
     chunks = []
     for start in range(0, length, head_chunk_tokens):
         value, labels = response[:, start:start + head_chunk_tokens, :], target[:, start:start + head_chunk_tokens]
-        score = (checkpoint(score_chunk, value, labels, use_reentrant=False)
-                 if torch.is_grad_enabled() else score_chunk(value, labels))
+        bitmasks = None
+        if json_bitmasks is not None and start + labels.shape[1] > mask_start:
+            end = start + labels.shape[1]
+            bitmasks = torch.full((labels.shape[1], json_bitmasks.shape[1]), -1, dtype=torch.int32)
+            first = max(start, mask_start)
+            bitmasks[first - start:] = json_bitmasks[first - mask_start:end - mask_start]
+        if bitmasks is None:
+            score = (checkpoint(score_chunk, value, labels, use_reentrant=False)
+                     if torch.is_grad_enabled() else score_chunk(value, labels))
+        else:
+            score = (checkpoint(score_chunk, value, labels, bitmasks, use_reentrant=False)
+                     if torch.is_grad_enabled() else score_chunk(value, labels, bitmasks))
         chunks.append(score)
     return torch.cat(chunks, dim=1)[0]
 
