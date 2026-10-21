@@ -103,15 +103,47 @@ def test_exact_schema_prefix_support_and_eos(tiny):
         json_prefix_bitmasks(policy.compiler, cuad_final_schema(), ids, eos_ids=[0])
 
 
-def test_actual_sampling_current_scores_padding_and_chunked_gradients(tiny):
+@pytest.mark.parametrize("eos_ids", [[1, 0], [0, 1]])
+def test_multiple_eos_compiler_order_preserves_exact_support(tiny, eos_ids):
     model, tok = tiny
+    model.generation_config.eos_token_id = list(eos_ids)
+    policy = make_policy(tiny)
+    text = '{"plan":"review","checks":"observed","answer":[]}'
+    prefix = tok.encode(text, add_special_tokens=False)
+    for stop in eos_ids:
+        ids = prefix + [stop]
+        masks = json_prefix_bitmasks(policy.compiler, cuad_final_schema(), ids, eos_ids=eos_ids)
+        reordered = json_prefix_bitmasks(policy.compiler, cuad_final_schema(), ids,
+                                         eos_ids=list(reversed(eos_ids)))
+        assert torch.equal(masks, reordered)
+        # Both real stops become legal only after the complete JSON value.
+        for actual_stop in eos_ids:
+            assert not any((int(row[actual_stop // 32]) >> (actual_stop % 32)) & 1
+                           for row in masks[:-1])
+            assert (int(masks[-1, actual_stop // 32]) >> (actual_stop % 32)) & 1
+        for illegal in ([stop], prefix[:-1] + [stop], ids + [stop]):
+            with pytest.raises(ValueError):
+                json_prefix_bitmasks(policy.compiler, cuad_final_schema(), illegal, eos_ids=eos_ids)
+    for mismatched in ([1], [0], [1, 0, 4], [1, 0, 1]):
+        with pytest.raises(ValueError, match="stop IDs"):
+            json_prefix_bitmasks(policy.compiler, cuad_final_schema(), prefix + [1], eos_ids=mismatched)
+    assert model.generation_config.eos_token_id == eos_ids
+    assert policy.eos_ids == eos_ids
+
+
+@pytest.mark.parametrize("eos_ids", [[1], [1, 0]])
+def test_actual_sampling_current_scores_padding_and_chunked_gradients(tiny, eos_ids):
+    model, tok = tiny
+    model.generation_config.eos_token_id = list(eos_ids)
     policy = make_policy(tiny)
     torch.manual_seed(41)
     outputs = policy._generate_encoded_batch([[5], [5, 6, 7]], cuad_final_schema(), ["x", "y"])
     completions = [r.completion if isinstance(r, ModelProtocolFailure) else r for r in outputs]
     assert all(c.completion_ids[c.thought_token_count - 1] == 2 for c in completions)
     assert all(c.json_logprobs_source == JSON_BEHAVIOR_SOURCE for c in completions)
-    assert any(c.completion_ids[-1] == 1 for c in completions)
+    assert any(c.completion_ids[-1] in eos_ids for c in completions)
+    assert all(c.json_stop_ids == eos_ids for c in completions)
+    assert model.generation_config.eos_token_id == policy.eos_ids == eos_ids
     for completion in completions:
         segment = segment_from_completion(completion)
         actual_old = torch.tensor(segment.behavior_logprobs)

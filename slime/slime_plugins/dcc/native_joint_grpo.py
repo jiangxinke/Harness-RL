@@ -96,7 +96,8 @@ def json_prefix_bitmasks(compiler, schema, tokens, *, eos_ids):
     if native_structured_schema_kind(schema) != "cuad":
         raise ValueError("Joint JSON replay supports exact CUAD public schemas only")
     grammar = compile_native_structured_schema(compiler, schema)
-    if grammar.tokenizer_info.stop_token_ids != list(eos_ids):
+    # xgrammar normalizes stop-ID order; retain the original order in traces.
+    if sorted(grammar.tokenizer_info.stop_token_ids) != sorted(eos_ids):
         raise ValueError("Replay compiler stop IDs differ from the actual generation stop IDs")
     vocab_size = grammar.tokenizer_info.vocab_size
     bitmasks = xgr.allocate_token_bitmask(len(tokens), vocab_size)
