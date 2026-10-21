@@ -91,7 +91,9 @@ def load_approved(profile_path, source_root, expected_source, tokenizer):
     value = profile["identity"]
     identity = identity_from_manifest(value, expected_source)
     require(value == identity.manifest(tokenizer), "Approved identity differs from actual local tokenizer")
-    require(not web.cached_rows, "Initial collection does not enable cached-row histories")
+    from dcc_review_training import CACHED_TRAIN_PROFILES
+    require(not web.cached_rows or web.profile_version in CACHED_TRAIN_PROFILES,
+            "Initial collection does not enable cached-row histories")
     cuad = approved_cuad_profile(profile, CuadSchemaProfile)
     return profile, identity, NativeSchemaProfile(web, cuad), receipt
 
@@ -157,6 +159,7 @@ class RecordingPolicy:
         self.task_id, self.rank, self.episode_id = task_id, rank, episode_id
         self.trace_ids = []
         self.cuad_retrieval = None
+        self.web_cache_publisher = None
 
     async def generate_structured(self, messages, **kwargs):
         trace_id = uuid.uuid4().hex
@@ -164,8 +167,11 @@ class RecordingPolicy:
                     "rank": self.rank, "turn_index": len(self.trace_ids)}
         self.trace_ids.append(trace_id)
         snapshot, options = copy.deepcopy(messages), copy.deepcopy(kwargs)
+        cache_receipt = (self.web_cache_publisher.snapshot(metadata["turn_index"])
+                         if self.web_cache_publisher is not None else None)
         self.journal.write({"event": "request", "episode_id": self.episode_id,
                             **metadata, "messages": snapshot, "options": options,
+                            **({"web_cached_rows": cache_receipt} if cache_receipt is not None else {}),
                             **({"cuad_retrieval": copy.deepcopy(self.cuad_retrieval)}
                                if self.cuad_retrieval is not None else {})})
         error, completion = None, None
@@ -193,6 +199,7 @@ class RecordingPolicy:
 
 def make_runner(benchmark, schema_profile, *, timeout_seconds, web_tools_factory=None,
                 total_tokens=TOTAL_TOKENS):
+    from dcc_review_training import CACHED_TRAIN_PROFILES
     profile = schema_profile.web if benchmark == "widesearch" else schema_profile.cuad
     require(profile is not None, "CUAD tasks require the approved CUAD profile")
     kwargs = {} if web_tools_factory is None else {"web_tools_factory": web_tools_factory}
@@ -212,7 +219,9 @@ def make_runner(benchmark, schema_profile, *, timeout_seconds, web_tools_factory
         web_structured_final=True, web_structured_actions=True, cuad_structured_actions=True,
         web_explicit_review=(benchmark == "widesearch" and schema_profile.web.explicit_review),
         web_navigation_ledger=(benchmark == "widesearch" and schema_profile.web.navigation_ledger),
-        web_research_checkpoints=False, web_cached_rows=False, **kwargs)
+        web_research_checkpoints=False,
+        web_cached_rows=(benchmark == "widesearch" and schema_profile.web.cached_rows
+                         and schema_profile.web.profile_version in CACHED_TRAIN_PROFILES), **kwargs)
 
 
 async def generate(tasks, native, output, *, collection_id, profile, schema_profile,
@@ -248,6 +257,18 @@ async def generate(tasks, native, output, *, collection_id, profile, schema_prof
         require(json_text(native.base.provenance.get(name, configuration(False)))
                 == json_text(configuration(declared)),
                 "Actual optional Web harness provenance differs from approved collection: " + name)
+    cache_configuration = None
+    if schema_profile.web.cached_rows:
+        from dcc_review_training import CACHED_TRAIN_PROFILES
+        require(schema_profile.web.profile_version in CACHED_TRAIN_PROFILES,
+                "Cached TRAIN collection requires its separate explicit v3 profile")
+        from dcc_train_cached_rows import configuration
+        require(approved_web_profile(profile, WebSchemaProfile) == schema_profile.web,
+                "Cached TRAIN profile differs from actual runner schema")
+        cache_configuration = configuration()
+        require(json_text(native.base.provenance.get("web_cached_rows")) == json_text(cache_configuration),
+                "Actual cached TRAIN runtime differs from complete approved v3 configuration")
+        require(all(task.benchmark == "widesearch" for task in tasks), "Cached TRAIN collection is independent Web only")
     require(type(concurrency) is int and concurrency > 0, "Positive request concurrency required")
     for task in tasks:
         check_public_task(task)
@@ -264,6 +285,8 @@ async def generate(tasks, native, output, *, collection_id, profile, schema_prof
     output.mkdir(parents=True, exist_ok=True)
     requests = Journal(output / f"requests_rank{rank}.jsonl")
     episodes = Journal(output / f"episodes_rank{rank}.jsonl")
+    cache_journal = (Journal(output / f"web_cached_sources_rank{rank}.jsonl")
+                     if cache_configuration is not None else None)
     done = False
     try:
         semaphore = asyncio.Semaphore(concurrency)
@@ -273,8 +296,17 @@ async def generate(tasks, native, output, *, collection_id, profile, schema_prof
                 recorder = RecordingPolicy(native, requests, task_id=task.id, rank=rank, episode_id=episode_id)
                 result, error = None, None
                 try:
+                    actual_web_factory = web_tools_factory
+                    if cache_journal is not None:
+                        from dcc_train_cached_rows import CachePublisher
+                        from slime_plugins.dcc.tools import WebTools
+                        publisher = CachePublisher(cache_journal, task_id=task.id, episode_id=episode_id,
+                            source_receipt=native.source_receipt, profile_version=profile["version"])
+                        recorder.web_cache_publisher = publisher
+                        factory = web_tools_factory or WebTools
+                        actual_web_factory = lambda: publisher.attach(factory())
                     runner = make_runner(task.benchmark, schema_profile,
-                        timeout_seconds=timeout_seconds, web_tools_factory=web_tools_factory,
+                        timeout_seconds=timeout_seconds, web_tools_factory=actual_web_factory,
                         total_tokens=native.budget.total_tokens)
                     if task.benchmark == "cuad" and binding is not None:
                         from dcc_cuad_retrieval import retrieval_runner_kwargs
@@ -297,6 +329,8 @@ async def generate(tasks, native, output, *, collection_id, profile, schema_prof
     finally:
         requests.close()
         episodes.close()
+        if cache_journal is not None:
+            cache_journal.close()
         await native.close()  # Also durably closes the actual native trace sink.
     if done:
         write_fresh_json(output / f"generation_closed_rank{rank}.json", {
@@ -305,12 +339,14 @@ async def generate(tasks, native, output, *, collection_id, profile, schema_prof
             "task_ids": [task.id for task in tasks], "request_events": requests.count,
             "episodes": episodes.count, "native_traces": len(native.traces),
             "generation_journals_closed": True, "labels_loaded": False,
+            **({"web_cached_rows": copy.deepcopy(cache_configuration),
+                "web_cached_source_records": cache_journal.count} if cache_journal is not None else {}),
             **({"cuad_retrieval": copy.deepcopy(binding)} if binding is not None else {}),
             **({"native_phase_timing": copy.deepcopy(native.provenance["native_phase_timing"])}
                if "native_phase_timing" in native.provenance else {})})
 
 
-def read_closed(output, *, profile, receipt, world_size):
+def read_closed(output, *, profile, receipt, world_size, cached_source_registry=None):
     """Verify all rank closures/journal joins before selector can open labels."""
     output = Path(output)
     from dcc_review_training import approved_cuad_profile, approved_web_profile
@@ -318,6 +354,13 @@ def read_closed(output, *, profile, receipt, world_size):
     binding = cuad.retrieval if cuad is not None else None
     if binding is not None:
         approved_web_profile(profile, WebSchemaProfile)
+    from dcc_review_training import CACHED_TRAIN_PROFILES, review_request_state
+    cache_enabled = profile.get("version") in CACHED_TRAIN_PROFILES
+    cache_profile = approved_web_profile(profile, WebSchemaProfile) if cache_enabled else None
+    if cache_enabled:
+        from dcc_train_cached_rows import configuration, load_sources, receipt_sources
+        require(isinstance(cached_source_registry, dict) and not cached_source_registry,
+                "Fresh cached TRAIN source registry required")
     all_episodes, all_requests, all_traces, collection_id = [], {}, {}, None
     seen_tasks = set()
     for rank in range(world_size):
@@ -330,6 +373,19 @@ def read_closed(output, *, profile, receipt, world_size):
         require((json_text(closed.get("cuad_retrieval")) == json_text(binding) and "cuad_retrieval" in closed)
                 if binding is not None else "cuad_retrieval" not in closed,
                 "Generation closure CUAD retrieval differs from approved actual harness")
+        rank_sources = {}
+        if cache_enabled:
+            require(json_text(closed.get("web_cached_rows")) == json_text(configuration()),
+                    "Closed cache runtime differs from approved complete v3 configuration")
+            rank_sources = load_sources(output / f"web_cached_sources_rank{rank}.jsonl",
+                                       source_receipt=receipt, profile_version=profile["version"])
+            require(type(closed.get("web_cached_source_records")) is int
+                    and len(rank_sources) == closed["web_cached_source_records"]
+                    and not set(rank_sources) & set(cached_source_registry), "Closed cache source count/ownership differs")
+            cached_source_registry.update(rank_sources)
+        else:
+            require("web_cached_rows" not in closed and "web_cached_source_records" not in closed,
+                    "Old TRAIN closure cannot carry a new cache receipt")
         collection_id = closed["collection_id"] if collection_id is None else collection_id
         require(closed["collection_id"] == collection_id, "Collection ID differs across shards")
         episodes = list(read_jsonl(output / f"episodes_rank{rank}.jsonl"))
@@ -356,6 +412,7 @@ def read_closed(output, *, profile, receipt, world_size):
             all_traces[key] = trace
         require({key for key, response in responses.items() if response["native_trace_recorded"]}
                 == {trace["trace_id"] for trace in traces}, "Native trace coverage differs")
+        used_cache_sources = set()
         for episode in episodes:
             require(episode["task_id"] not in seen_tasks and episode["rank"] == rank
                     and episode["split"] == "train" and episode["gold_visible_to_policy"] is False,
@@ -370,6 +427,22 @@ def read_closed(output, *, profile, receipt, world_size):
             for index, key in enumerate(owned):
                 require(requests[key]["episode_id"] == responses[key]["episode_id"] == episode["episode_id"]
                         and requests[key]["turn_index"] == index, "Episode/turn ownership differs")
+                if cache_enabled:
+                    owner = {"episode_id": episode["episode_id"], "turn": index,
+                             "web_cached_rows": requests[key].get("web_cached_rows")}
+                    source_rows = receipt_sources(owner, rank_sources, task_id=public.id)
+                    used_cache_sources.update(row["source_id"] for row in source_rows)
+                    replay_record = {"source": "independent_curriculum", "split": "train",
+                                     "task_id": public.id, "messages": requests[key]["messages"]}
+                    schema, _ = review_request_state(cache_profile, replay_record, owner, cached_sources=rank_sources)
+                    require(public.benchmark == "widesearch"
+                            and requests[key]["messages"][1]["content"] == public.prompt
+                            and json.JSONDecoder().raw_decode(requests[key]["messages"][0]["content"].split(
+                                "Required answer columns: ", 1)[1])[0] == public.metadata["evaluation"]["required"]
+                            and json_text(requests[key]["options"]["json_schema"]) == json_text(schema),
+                            "Closed cached TRAIN request differs from original public replay")
+                else:
+                    require("web_cached_rows" not in requests[key], "Old TRAIN request cannot carry a new cache receipt")
                 if public.benchmark == "cuad" and binding is not None:
                     from dcc_cuad_retrieval import public_request_schema
                     require(json_text(requests[key].get("cuad_retrieval")) == json_text(binding),
@@ -382,6 +455,8 @@ def read_closed(output, *, profile, receipt, world_size):
                     require("cuad_retrieval" not in requests[key],
                             "Unapproved CUAD retrieval declaration in closed request")
             all_episodes.append(episode)
+        if cache_enabled:
+            require(used_cache_sources == set(rank_sources), "Closed cache source journal contains orphan records")
         require(not all_requests.keys() & requests.keys(), "Request ID reused across shards")
         all_requests.update({key: (request, responses[key]) for key, request in requests.items()})
     return all_episodes, all_requests, all_traces
@@ -497,7 +572,13 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
             and maximum_episode_requests > 0, "Positive complete-trajectory request limit required")
     require(web_train_reward_protocol in {LEGACY_WEB_TRAIN_REWARD, LITERAL_WEB_TRAIN_REWARD},
             "Unsupported explicitly selected TRAIN Web reward protocol")
-    episodes, requests, traces = read_closed(output, profile=profile, receipt=receipt, world_size=world_size)
+    cache_sources = None
+    if schema_profile is not None and schema_profile.web.cached_rows:
+        cache_sources = {}
+    closed_options = {"cached_source_registry": cache_sources} if cache_sources is not None else {}
+    episodes, requests, traces = read_closed(output, profile=profile, receipt=receipt, world_size=world_size, **closed_options)
+    if cache_sources is not None:
+        schema_profile = NativeSchemaProfile(schema_profile.web, schema_profile.cuad, cache_sources)
     # This is intentionally the first labels access, after every rank is closed.
     labels = load_train_labels(labels_path, {episode["task_id"]: episode["benchmark"] for episode in episodes},
                                web_train_reward_protocol=web_train_reward_protocol)
@@ -507,6 +588,8 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
     destination.mkdir(parents=True, exist_ok=False)
     web, cuad = Journal(destination / "native_web_train.jsonl"), Journal(destination / "native_cuad_train.jsonl")
     audit, decisions = Journal(destination / "audit.jsonl"), Journal(destination / "decisions.jsonl")
+    source_journal = Journal(destination / "native_web_cached_sources.jsonl") if cache_sources is not None else None
+    published_sources = set()
     accepted = rejected = 0
     accepted_segments, accepted_phase_requests = set(), set()
     try:
@@ -544,6 +627,8 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                             and completion["completion_ids"] == trace["completion_ids"], "Response/trace differs")
                     record = training_record(episode, request, trace, label)
                     owner = {"turn": request["turn_index"]}
+                    if cache_sources is not None:
+                        owner.update(episode_id=episode["episode_id"], web_cached_rows=copy.deepcopy(request["web_cached_rows"]))
                     if episode["benchmark"] == "cuad" and schema_profile.cuad.retrieval is not None:
                         owner.update(cuad_retrieval=copy.deepcopy(schema_profile.cuad.retrieval),
                                      public_task=copy.deepcopy(episode["public_task"]))
@@ -558,7 +643,7 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                             **{name: value for name, value in owner.items() if name != "turn"}},
                         "native_trace": copy.deepcopy(trace)}
                     validate_native_record(bundle, tokenizer, expected_identity=identity, original_schema=schema,
-                                           web_schema_profile=schema_profile.web)
+                                           web_schema_profile=schema_profile.web, cached_sources=cache_sources)
                     bundles.append(bundle)
                 require(bundles, "Completed episode has no actual requests")
                 segment_keys = [_segment_key(bundle["record"]) for bundle in bundles]
@@ -568,6 +653,12 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                         and not accepted_segments.intersection(segment_keys), "Repeated original TRAIN segment")
                 require(len(phase_requests) == len(set(phase_requests))
                         and not accepted_phase_requests.intersection(phase_requests), "Reused actual phase request")
+                if source_journal is not None:
+                    used_sources = {source_id for bundle in bundles
+                                    for source_id in bundle["collector"]["web_cached_rows"]["source_ids"]}
+                    for source_id, source in cache_sources.items():
+                        if source_id in used_sources and source_id not in published_sources:
+                            source_journal.write(source); published_sources.add(source_id)
                 for bundle in bundles:
                     (cuad if episode["benchmark"] == "cuad" else web).write(bundle)
                 accepted_segments.update(segment_keys)
@@ -587,7 +678,7 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                              "episode": episode})
                 decisions.write({"task_id": episode["task_id"], "accepted": False, "reason": str(exc)})
     finally:
-        for journal in (web, cuad, audit, decisions):
+        for journal in (web, cuad, audit, decisions) + ((source_journal,) if source_journal is not None else ()):
             journal.close()
     if web.count:
         load_native_training_data(destination / "native_web_train.jsonl", tokenizer,
@@ -606,6 +697,9 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                        web_selection_score=LITERAL_WEB_TRAIN_REWARD,
                        web_train_reward=configuration(), web_label_protocol=LABEL_PROTOCOL,
                        web_required_only_default="all-required-native-text-null-compound-key-v1")
+    if cache_sources is not None:
+        summary["web_cached_rows"] = copy.deepcopy(schema_profile.web.cached_rows_configuration)
+        summary["web_cached_source_records"] = len(published_sources)
     if maximum_episode_requests is not None:
         summary["maximum_episode_requests"] = maximum_episode_requests
         summary["whole_trajectory_filter_only"] = True
@@ -632,6 +726,8 @@ def main():
                               help="Opt in to discovery instructions; must match the approved Web TRAIN profile")
             part.add_argument("--web-multi-citation", action="store_true",
                               help="Allow up to four fetched citations per row; must match the approved Web TRAIN profile")
+            part.add_argument("--web-cached-rows", action="store_true",
+                              help="Opt in to new cached rows v3 TRAIN profile and exact source receipts")
             part.add_argument("--public-train-data", required=True)
             part.add_argument("--collection-id", required=True)
             part.add_argument("--max-tasks-per-benchmark", type=int, default=2, help="Fixed pilot default, selected by task ID only")
@@ -674,6 +770,8 @@ def main():
     require(args.web_multi_citation
             == profile.get("web", {}).get("multi_citation", False),
             "Multi-citation flag must exactly match the approved Web TRAIN profile")
+    require(args.web_cached_rows == profile.get("web", {}).get("cached_rows", False),
+            "Cached rows flag must exactly match the new approved Web TRAIN profile")
     tasks = fixed_tasks(load_public_train(args.public_train_data), max_tasks_per_benchmark=args.max_tasks_per_benchmark,
                         rank=args.rank, world_size=args.world_size)
     if history_configuration.enabled:
@@ -687,6 +785,8 @@ def main():
                       if args.web_data_discovery_guidance else {})
     if args.web_multi_citation:
         engine_options["web_multi_citation"] = True
+    if args.web_cached_rows:
+        engine_options["web_cached_rows"] = True
     base = load_vllm_policy(args.model, adapter=None, asynchronous=True,
         max_prompt_tokens=identity.max_prompt_tokens, max_model_len=identity.max_model_len,
         tensor_parallel_size=args.tensor_parallel_size, gpu_memory_utilization=args.gpu_memory_utilization,

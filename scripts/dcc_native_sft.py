@@ -150,11 +150,32 @@ def identity_from_manifest(value, expected_source):
 
 
 def validate_native_record(bundle, tokenizer, *, expected_identity: NativeIdentity,
-                           original_schema: dict, web_schema_profile=None):
+                           original_schema: dict, web_schema_profile=None, cached_sources=None):
     """Validate physical native IDs, then preserve all accepted-SFT gates."""
     # Local import lets the shared helper reuse the stable NativeIdentity API
     # without changing module-import order or introducing a circular import.
     from dcc_native_physical import validate_native_physical
+    collector = bundle.get("collector") if isinstance(bundle, dict) else None
+    if isinstance(collector, dict) and "web_cached_rows" in collector:
+        from dcc_review_training import CACHED_TRAIN_PROFILES
+        _require(isinstance(web_schema_profile, WebSchemaProfile)
+                 and web_schema_profile.profile_version in CACHED_TRAIN_PROFILES
+                 and web_schema_profile.cached_rows is True and isinstance(cached_sources, dict),
+                 "Cached TRAIN marker requires its explicit trusted Web profile and source registry")
+        web_schema_profile.validate()
+        from dcc_train_cached_rows import receipt_sources
+        receipt_sources(collector, cached_sources, task_id=bundle.get("record", {}).get("task_id"))
+        from dcc_review_training import WEB32K_CACHED_8K_PROFILE
+        from slime_plugins.dcc.prompt_history import PromptHistoryConfig
+        _require(isinstance(expected_identity, NativeIdentity), "Cached TRAIN requires an approved native identity")
+        thought_tokens = 8192 if web_schema_profile.profile_version == WEB32K_CACHED_8K_PROFILE else 16384
+        _require(type(expected_identity.thought_tokens) is int and expected_identity.thought_tokens == thought_tokens
+                 and expected_identity.thought_sampling_profile == "thinking"
+                 and type(expected_identity.max_prompt_tokens) is int and expected_identity.max_prompt_tokens == 32768
+                 and type(expected_identity.max_model_len) is int
+                 and expected_identity.max_model_len >= 32768 + thought_tokens + 4096
+                 and PromptHistoryConfig.from_dict(expected_identity.prompt_history).enabled,
+                 "Cached TRAIN trusted profile arm differs from its approved native identity budget/context")
     physical = validate_native_physical(bundle, tokenizer,
         expected_identity=expected_identity, original_schema=original_schema)
     record = bundle["record"]
@@ -167,7 +188,9 @@ def validate_native_record(bundle, tokenizer, *, expected_identity: NativeIdenti
         category = record["metadata"]["category"]
     else:
         if web_schema_profile is not None and web_schema_profile.explicit_review:
-            legacy.validate_record(record, _native_web_profile=web_schema_profile)
+            legacy.validate_record(record, _native_web_profile=web_schema_profile,
+                                   _native_web_collector=bundle["collector"],
+                                   _native_cached_sources=cached_sources)
         else:
             legacy.validate_record(record)
         domain, stage, category = "web", record["stage"], "independent_web"
@@ -232,6 +255,8 @@ def _iter_validated_native(path, tokenizer, *, expected_identity: NativeIdentity
                 example = validate_native_record(bundle, tokenizer, expected_identity=expected_identity,
                                                  original_schema=schema_resolver(record, bundle.get("collector")),
                                                  web_schema_profile=(getattr(schema_resolver.__self__, "web", None)
+                                                     if isinstance(getattr(schema_resolver, "__self__", None), NativeSchemaProfile) else None),
+                                                 cached_sources=(getattr(schema_resolver.__self__, "cached_sources", None)
                                                      if isinstance(getattr(schema_resolver, "__self__", None), NativeSchemaProfile) else None))
                 if record.get("source") == "cuad_train":
                     key = ("cuad", record["task_id"], record["metadata"].get("plan_id"),
@@ -287,32 +312,41 @@ class WebSchemaProfile:
     profile_version: str = "dcc-native-train-profile-v1"
     data_discovery_guidance: bool = False
     multi_citation: bool = False
+    cached_rows_configuration: dict | None = None
 
     def validate(self):
         _require(type(self.max_steps) is int and self.max_steps > 0,
                  "Trusted collection max_steps required")
         _require(type(self.explicit_review) is bool and type(self.cached_rows) is bool,
                  "Trusted Web schema flags must be booleans")
-        from dcc_review_training import LEGACY_PROFILE, REVIEW20_PROFILE, WEB32K_PROFILE
+        from dcc_review_training import LEGACY_PROFILE, REVIEW20_PROFILE, WEB32K_PROFILE, WEB32K_CACHED_PROFILE, WEB32K_CACHED_8K_PROFILE, CACHED_TRAIN_PROFILES
         _require(type(self.navigation_ledger) is bool, "Trusted navigation flag must be boolean")
         _require(type(self.data_discovery_guidance) is bool,
                  "Trusted discovery guidance flag must be boolean")
         _require(type(self.multi_citation) is bool,
                  "Trusted multi-citation flag must be boolean")
         _require(not self.data_discovery_guidance or
-                 self.profile_version in {REVIEW20_PROFILE, WEB32K_PROFILE},
+                 self.profile_version in {REVIEW20_PROFILE, WEB32K_PROFILE, WEB32K_CACHED_PROFILE, WEB32K_CACHED_8K_PROFILE},
                  "Discovery guidance requires an explicit reviewed Web TRAIN profile")
         _require(not self.multi_citation or
-                 self.profile_version in {REVIEW20_PROFILE, WEB32K_PROFILE},
+                 self.profile_version in {REVIEW20_PROFILE, WEB32K_PROFILE, WEB32K_CACHED_PROFILE, WEB32K_CACHED_8K_PROFILE},
                  "Multi-citation requires an explicit reviewed Web TRAIN profile")
-        if self.profile_version in {REVIEW20_PROFILE, WEB32K_PROFILE}:
+        if self.profile_version in CACHED_TRAIN_PROFILES:
+            from dcc_train_cached_rows import configuration, equal
+            _require(self.max_steps == 20 and self.explicit_review and self.navigation_ledger
+                     and self.cached_rows is True and equal(self.cached_rows_configuration, configuration()),
+                     "Cached TRAIN v3 requires review/navigation and complete cached rows configuration")
+        elif self.profile_version in {REVIEW20_PROFILE, WEB32K_PROFILE}:
             _require(self.max_steps == 20 and self.explicit_review and self.navigation_ledger
                      and not self.cached_rows, "Explicit TRAIN20 requires review/navigation on and cached rows off")
         else:
             _require(self.profile_version == LEGACY_PROFILE and not self.explicit_review
                      and not self.navigation_ledger, "Reviewed final controls require the separate explicit TRAIN20 profile")
 
-    def original_schema(self, record, collector):
+        if self.profile_version not in CACHED_TRAIN_PROFILES:
+            _require(self.cached_rows_configuration is None, "Old profiles cannot carry cached rows configuration")
+
+    def original_schema(self, record, collector, *, cached_sources=None):
         """Rebuild the actual early/last-turn Web schema from public history."""
         from slime_plugins.dcc.episode import Task, _WebEvidence, final_turn_message
         from slime_plugins.dcc.web_structured import web_action_schema, web_final_schema
@@ -320,8 +354,9 @@ class WebSchemaProfile:
         self.validate()
         if self.explicit_review:
             from dcc_review_training import review_request_state
-            schema, _ = review_request_state(self, record, collector)
-            legacy.validate_record(record, _native_web_profile=self)
+            schema, _ = review_request_state(self, record, collector, cached_sources=cached_sources)
+            legacy.validate_record(record, _native_web_profile=self, _native_web_collector=collector,
+                                   _native_cached_sources=cached_sources)
             return schema
         _require(record.get("source") == "independent_curriculum",
                  "Trusted Web profile requires independent_curriculum records")
@@ -419,12 +454,13 @@ class CuadSchemaProfile:
 class NativeSchemaProfile:
     web: WebSchemaProfile
     cuad: CuadSchemaProfile | None = None
+    cached_sources: dict | None = None
 
     def original_schema(self, record, collector):
         if record.get("source") == "cuad_train":
             _require(self.cuad is not None, "Trusted CUAD collection profile is required")
             return self.cuad.original_schema(record, collector)
-        return self.web.original_schema(record, collector)
+        return self.web.original_schema(record, collector, cached_sources=self.cached_sources)
 
 
 def _segment_key(record):
@@ -497,6 +533,16 @@ def load_native_training_data(web_path, tokenizer, *, expected_identity, source_
     else:
         _require(approved_cuad_identity_differences is None,
                  "CUAD identity differences require a separately approved identity")
+    from dcc_review_training import CACHED_TRAIN_PROFILES
+    owner = getattr(schema_resolver, "__self__", None)
+    if isinstance(owner, NativeSchemaProfile) and owner.web.profile_version in CACHED_TRAIN_PROFILES:
+        from dataclasses import replace
+        from dcc_train_cached_rows import load_sources, validate_references
+        registry = load_sources(Path(web_path).with_name("native_web_cached_sources.jsonl"),
+                                source_receipt=source_receipt, profile_version=owner.web.profile_version)
+        owner = replace(owner, cached_sources=registry)
+        schema_resolver = owner.original_schema
+        validate_references(web_path, registry)
     files = [(web_path, "independent_curriculum", expected_identity)]
     if cuad_path is not None:
         files.append((cuad_path, "cuad_train", expected_cuad_identity or expected_identity))
@@ -542,7 +588,7 @@ def prepare_native_training(args, *, source_root, tokenizer=None):
     profile_path = getattr(args, "native_train_profile", None)
     _require(profile_path is not None, "--native-train-profile is required")
     profile = _strict_json(Path(profile_path).read_text())
-    from dcc_review_training import approved_web_profile, approved_cuad_profile, bind_profile_source, WEB32K_PROFILE
+    from dcc_review_training import approved_web_profile, approved_cuad_profile, bind_profile_source, WEB32K_PROFILE, WEB32K_CACHED_PROFILE, WEB32K_CACHED_8K_PROFILE, CACHED_TRAIN_PROFILES
     web_profile = approved_web_profile(profile, WebSchemaProfile)
     bind_profile_source(profile, source_root)
     cuad = profile.get("cuad")
@@ -571,7 +617,7 @@ def prepare_native_training(args, *, source_root, tokenizer=None):
                                      source_receipt=receipt, schema_resolver=schema_profile.original_schema,
                                      cuad_path=args.cuad_tool_records, expected_cuad_identity=cuad_identity,
                                      approved_cuad_identity_differences=profile.get("cuad_identity_differences"),
-                                     strict_training_budgets=web_profile.profile_version == WEB32K_PROFILE)
+                                     strict_training_budgets=web_profile.profile_version in {WEB32K_PROFILE, WEB32K_CACHED_PROFILE, WEB32K_CACHED_8K_PROFILE})
     data.configuration = {"enabled": True, "protocol": identity.budget.protocol, "source_receipt": receipt,
                           "derivative_id": identity.derivative_id, "model_revision": MODEL_REVISION,
                           "web": copy.deepcopy(web), "validated_records": len(data.records),
@@ -588,7 +634,7 @@ def prepare_native_training(args, *, source_root, tokenizer=None):
         else:
             from slime_plugins.dcc.native_thinking_eval import native_configuration
             data.configuration["rollout_native_thinking"] = native_configuration(receipt, budget=identity.budget)
-    if web_profile.profile_version == WEB32K_PROFILE:
+    if web_profile.profile_version in {WEB32K_PROFILE, WEB32K_CACHED_PROFILE, WEB32K_CACHED_8K_PROFILE}:
         data.configuration["domain_identities"] = {"independent_curriculum": copy.deepcopy(approved),
             "cuad_train": copy.deepcopy(profile.get("cuad_identity", approved))}
         data.configuration["prompt_history"] = copy.deepcopy(identity.prompt_history)

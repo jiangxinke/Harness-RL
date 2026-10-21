@@ -106,7 +106,8 @@ def _is_final_control(value, messages, message, evidence=None):
     return message == {"role": "user", "content": legacy}
 
 
-def validate_record(value: dict, *, _native_web_profile=None) -> dict:
+def validate_record(value: dict, *, _native_web_profile=None, _native_web_collector=None,
+                    _native_cached_sources=None) -> dict:
     """Reject split leakage and replay real tool observations for finals."""
     if not isinstance(value, dict) or value.get("source") != "independent_curriculum" or value.get("split") != "train":
         raise ValueError("Web records must be independent_curriculum train rows")
@@ -123,7 +124,8 @@ def validate_record(value: dict, *, _native_web_profile=None) -> dict:
     control_indices = set()
     if _native_web_profile is not None:
         from dcc_review_training import review_request_state
-        _, control_indices = review_request_state(_native_web_profile, value)
+        _, control_indices = review_request_state(_native_web_profile, value, _native_web_collector,
+                                                  cached_sources=_native_cached_sources)
     evidence, fetched = _WebEvidence(), []
     pending = None
     for index, message in enumerate(messages[2:], 2):
@@ -156,6 +158,8 @@ def validate_record(value: dict, *, _native_web_profile=None) -> dict:
                 text = observation.get("text")
                 if isinstance(text, str) and text.strip():
                     fetched.append(text)
+                if _native_web_profile is not None and _native_web_profile.cached_rows:
+                    fetched.extend(row["text"] for row in observation.get("row_view", {}).get("records", []))
             pending = None
         else:
             raise ValueError("Teacher history must alternate tools and observations")
