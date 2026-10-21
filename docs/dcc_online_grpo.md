@@ -56,3 +56,44 @@ gradient oracle, failure coverage, and real Gloo synchronization. The policy
 checks include actual Hugging Face generation and xgrammar. These checks do
 not establish NF4 GPU correctness or benchmark improvement; both require the
 actual pilot and a matched base comparison.
+
+
+The matching evaluator uses the same HF loader for base and adapter, including
+NF4 preparation and nonquantized base dtypes. Use a fresh output for each arm.
+The following settings match the example pilot above; set all paths locally:
+
+```bash
+EVAL_ARGS=(
+  --model "$MODEL_CACHE" --data "$CUAD_DEV"
+  --source-commit "$EVALUATION_SOURCE_COMMIT"
+  --quantization nf4 --profile thinking --seed 47
+  --max-steps 2 --thought-tokens 4096 --json-tokens 4096
+  --initial-chunks 8 --retrieval-context-chars 800
+  --retrieval-max-context-chars 16000
+  --retrieval-profile "$RETRIEVAL_PROFILE"
+)
+python scripts/dcc_online_evaluate.py "${EVAL_ARGS[@]}" \
+  --output-dir "$RUN_ROOT/base" --generate-only
+python scripts/dcc_online_evaluate.py "${EVAL_ARGS[@]}" \
+  --adapter "$FINAL_ADAPTER" --output-dir "$RUN_ROOT/adapter" --generate-only
+python scripts/dcc_online_evaluate.py "${EVAL_ARGS[@]}" \
+  --output-dir "$RUN_ROOT/base" --score-only
+python scripts/dcc_online_evaluate.py "${EVAL_ARGS[@]}" \
+  --adapter "$FINAL_ADAPTER" --output-dir "$RUN_ROOT/adapter" \
+  --base-output-dir "$RUN_ROOT/base" --score-only
+```
+
+Generation can run in parallel on separately reserved GPUs. For sharded
+generation, add the same `--shards N` to every invocation and assign each
+generation process a unique `--shard-index I`. Score only after every shard
+has closed. Adapter scoring requires a completed base report with identical
+public tasks, scoring references, packages, retrieval, sampling, token budgets
+and observed base precision. Missing, duplicate, extra or inconsistent shards
+are rejected. The real split is preserved; rollout copies have no gold labels.
+Every failed episode remains in the denominator, with a separate
+`failure_zero_macro_f1` that assigns zero even to failures on negative tasks.
+
+Evaluation and training source commits are recorded separately. An adapter
+with no actual online optimizer updates is never marked as having recorded
+policy-gradient updates. Reports retain failures and deltas; they do not
+automatically assert a capability gain or a statistically reliable improvement.
