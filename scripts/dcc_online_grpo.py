@@ -37,7 +37,7 @@ from slime_plugins.dcc.online_grpo import ALGORITHM, apply_policy_update, group_
 from slime_plugins.dcc.retrieval import load_retrieval_profile
 
 
-def validate_source(expected):
+def validate_source(expected, *, online_web=False):
     """Accept an actual clean checkout or its explicitly identified Git export."""
     root = Path(__file__).resolve().parents[1]
     receipt = root / ".dcc-online-grpo-source.json"
@@ -48,8 +48,11 @@ def validate_source(expected):
         return
     result = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
                             capture_output=True, text=True, check=True)
+    checked_paths = ["scripts", "slime/slime_plugins/dcc"]
+    if online_web:
+        checked_paths.append("slime/slime_plugins/dcc_train_literal_reward_contract.py")
     status = subprocess.run(["git", "-C", str(root), "status", "--porcelain",
-                             "--untracked-files=normal", "--", "scripts", "slime/slime_plugins/dcc"],
+                             "--untracked-files=normal", "--", *checked_paths],
                             capture_output=True, text=True, check=True)
     if result.stdout.strip() != expected or status.stdout:
         raise ValueError("Commit actual clean runtime sources before claiming their identity")
@@ -66,7 +69,7 @@ def validate_train_tasks(tasks):
 
 
 def task_plan(tasks, *, steps, world_size, seed):
-    """A fixed public task plan; CUAD negatives get one of every four draws."""
+    """Fixed TRAIN gold strata; CUAD negatives get one of every four draws."""
     validate_train_tasks(tasks)
     rng = random.Random(seed)
     positive = [i for i, task in enumerate(tasks) if task.gold]
@@ -177,7 +180,7 @@ async def collect_group(runner, task, policy, *, group_size, rank):
 
 
 def configuration(args, plan, tasks, world_size):
-    return dict(algorithm=ALGORITHM, runtime="independent-HF; not Slime/Megatron",
+    config = dict(algorithm=ALGORITHM, runtime="independent-HF; not Slime/Megatron",
         source_commit=args.source_commit, world_size=world_size,
         arguments={key: str(value) if isinstance(value, Path) else value
                    for key, value in vars(args).items()},
@@ -194,6 +197,15 @@ def configuration(args, plan, tasks, world_size):
         objective_denominator=args.group_size * args.max_steps * args.thought_tokens,
         zero_global_gradient_optimizer_step=False,
         planned_task_ids=[[tasks[index].id for index in row] for row in plan])
+    if getattr(args, "enable_online_web", False):
+        from slime_plugins.dcc.online_web import binding_protocols
+        config["online_web"] = dict(enabled=True, protocols=binding_protocols(),
+            web_deck="public-ID-only-shuffled-cycles",
+            cuad_plan="existing-TRAIN-gold-positive-negative-stratification",
+            draws_per_cycle=dict(cuad=args.cuad_draws_per_cycle,
+                                 widesearch=args.web_draws_per_cycle),
+            labels="deserialized-only-after-own-group-durable-close")
+    return config
 
 
 def cpu_preflight(args, tasks, plan, world_size):
@@ -208,9 +220,9 @@ def cpu_preflight(args, tasks, plan, world_size):
         # Native policy applies the same complete-message encoding. Final-turn
         # controls are measured separately so a pilot cannot silently omit them.
         from slime_plugins.dcc.episode import final_turn_message
-        messages.append(final_turn_message(tasks[index], None)
-                        if tasks[index].benchmark == "cuad" else
-                        {"role": "user", "content": "Final answer now."})
+        from slime_plugins.dcc.episode import _WebEvidence
+        messages.append(final_turn_message(tasks[index], None if tasks[index].benchmark == "cuad"
+                                           else _WebEvidence()))
         lengths.append(len(encode_messages(tokenizer, messages, args.max_prompt_tokens,
                                           allow_truncation=False)))
     return dict(cpu_preflight_only=True, CUDA_initialized=torch.cuda.is_initialized(),
@@ -218,7 +230,7 @@ def cpu_preflight(args, tasks, plan, world_size):
                 training_config=configuration(args, plan, tasks, world_size))
 
 
-async def train(args, tasks, plan, world_size):
+async def train(args, tasks, plan, world_size, *, web_inputs=None):
     from slime_plugins.dcc.hf_native_policy import NativeHFPolicy
     rank, local = int(os.environ.get("RANK", "0")), int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local)
@@ -302,7 +314,17 @@ async def train(args, tasks, plan, world_size):
             begin = time.monotonic()
             optimizer.zero_grad(set_to_none=True)
             record(event="collect_begin", iteration=iteration, task_id=task.id, group_size=args.group_size)
-            results = await collect_group(runner, task, policy, group_size=args.group_size, rank=rank)
+            if web_inputs is not None and task.benchmark == "widesearch":
+                from slime_plugins.dcc.online_web import collect_public_group, score_closed_group
+                closed = await collect_public_group(runner, task, policy,
+                    group_size=args.group_size, rank=rank, iteration=iteration,
+                    directory=args.output_dir / "web_groups" / f"iteration_{iteration:06d}_rank{rank}",
+                    source_commit=args.source_commit)
+                results, web_reward = score_closed_group(closed, inputs=web_inputs, tokenizer=tokenizer)
+                record(event="web_group_scored", iteration=iteration, closure=closed.closure,
+                       **web_reward)
+            else:
+                results = await collect_group(runner, task, policy, group_size=args.group_size, rank=rank)
             record(event="collect_end", iteration=iteration, task_id=task.id, episodes=len(results),
                    seconds=time.monotonic() - begin)
             for sample, result in enumerate(results):
@@ -383,6 +405,13 @@ def main(argv=None):
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--adapter")
+    parser.add_argument("--enable-online-web", action="store_true",
+                        help="Opt in to separately reviewed public-only Web TRAIN groups")
+    parser.add_argument("--web-train-data", type=Path)
+    parser.add_argument("--web-train-labels", type=Path)
+    parser.add_argument("--web-binding", type=Path)
+    parser.add_argument("--cuad-draws-per-cycle", type=int, default=1)
+    parser.add_argument("--web-draws-per-cycle", type=int, default=1)
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--group-size", type=int, default=2)
     parser.add_argument("--thought-tokens", type=int, default=4096)
@@ -422,13 +451,33 @@ def main(argv=None):
             or not 0 < args.clip < 1):
         parser.error("Invalid online training budgets or optimizer settings")
     tasks = load_tasks(args.train_data)
-    validate_source(args.source_commit)
+    if args.enable_online_web:
+        validate_source(args.source_commit, online_web=True)
+    else:
+        validate_source(args.source_commit)
     world_size = args.plan_world_size if args.cpu_preflight else int(os.environ.get("WORLD_SIZE", "1"))
-    plan = task_plan(tasks, steps=args.steps, world_size=world_size, seed=args.seed)
+    if world_size < 1:
+        parser.error("Positive world size required")
+    web_paths = (args.web_train_data, args.web_train_labels, args.web_binding)
+    web_inputs = None
+    if args.enable_online_web:
+        if not all(web_paths) or min(args.cuad_draws_per_cycle, args.web_draws_per_cycle) < 1:
+            parser.error("Web opt-in requires separate public data, labels, reviewed binding and positive mixture")
+        validate_train_tasks(tasks)
+        from slime_plugins.dcc.online_web import WebTrainingInputs, mixed_task_plan
+        web_inputs = WebTrainingInputs(*web_paths, source_commit=args.source_commit)
+        plan = mixed_task_plan(tasks, web_inputs.tasks, steps=args.steps, world_size=world_size,
+            seed=args.seed, cuad_draws_per_cycle=args.cuad_draws_per_cycle,
+            web_draws_per_cycle=args.web_draws_per_cycle, cuad_plan=task_plan)
+        tasks = tasks + web_inputs.tasks
+    else:
+        if any(web_paths) or args.cuad_draws_per_cycle != 1 or args.web_draws_per_cycle != 1:
+            parser.error("Web inputs and mixture settings require --enable-online-web")
+        plan = task_plan(tasks, steps=args.steps, world_size=world_size, seed=args.seed)
     if args.cpu_preflight:
         print(json.dumps(cpu_preflight(args, tasks, plan, world_size), ensure_ascii=False, allow_nan=False))
     else:
-        asyncio.run(train(args, tasks, plan, world_size))
+        asyncio.run(train(args, tasks, plan, world_size, web_inputs=web_inputs))
     return 0
 
 

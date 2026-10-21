@@ -9,8 +9,8 @@ This is an independent HF LoRA runtime with optional NF4 loading, separate from 
 existing BF16 vLLM native evaluation protocol. Start with a bounded pilot and
 compare base and trained adapters under this exact HF precision, harness, token
 budgets and evaluation sampling. Scores from older vLLM runs are not matched
-controls for this runtime. The trainer and matched evaluator reject Web before
-loading weights pending verification of its TRAIN reward contract.
+controls for this runtime. The matched CUAD evaluator rejects Web. The trainer offers separately reviewed
+Web TRAIN groups through the opt-in switch described in `dcc_online_web.md`.
 
 Install `configs/dcc/requirements-online-grpo.txt` in the separate quantized
 environment. Set paths locally; none is embedded in the code:
@@ -138,9 +138,8 @@ final-answer and review schemas, including dynamic read-source citations and
 cached-row arguments. It reuses the existing review and bounded-whitespace
 grammars and validates the original public schema after decoding. Unsupported
 quoted or backslash-containing column keys are rejected before sampling, as in
-the existing pinned backend. This backend support does not enable WideSearch
-in the online training or matched evaluation entry points; those entry points
-remain CUAD-only pending verification of the TRAIN reward contract.
+the existing pinned backend. Web TRAIN groups are explicitly opt-in and require a source/data/reward binding
+as documented in `dcc_online_web.md`. The matching CUAD evaluator remains CUAD-only.
 
 TRAIN task selection retains the original seeded positive/negative decks with
 a three-to-one positive-to-negative schedule when both exist. This uses TRAIN

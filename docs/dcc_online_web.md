@@ -1,0 +1,68 @@
+# Opt-in online Web TRAIN groups
+
+The native HF LoRA trainer can mix its existing CUAD TRAIN groups with an
+independent, public-only Web TRAIN curriculum with the WideSearch task schema. The default remains
+CUAD-only. This path uses TRAIN literal row F1; it does not report a WideSearch
+benchmark score or the published judge metric.
+
+Use `--enable-online-web` with all three independent inputs:
+
+```sh
+python scripts/dcc_online_grpo.py \
+  --model MODEL --train-data cuad_train.jsonl --output-dir OUTPUT \
+  --source-commit ACTUAL_COMMITTED_RUNTIME \
+  --enable-online-web --web-train-data public_web_train.jsonl \
+  --web-train-labels private_web_train_labels.jsonl \
+  --web-binding reviewed_web_binding.json \
+  --cuad-draws-per-cycle 1 --web-draws-per-cycle 1
+```
+
+Public Web records must contain only public task fields, `gold: null` if present,
+and required-column metadata. Labels, provenance URLs and source answers cannot
+be attached to rollout tasks. The Web deck cycles through shuffled public IDs.
+The CUAD deck keeps its existing TRAIN gold positive/negative stratification, so
+the complete mixed plan is not label-blind.
+
+A separately reviewed binding uses version
+`dcc-hf-online-web-reviewed-binding-v1` and contains:
+
+- `source_commit`: the actual clean runtime commit/export identity;
+- `protocols`: the exact object returned by
+  `slime_plugins.dcc.online_web.binding_protocols()`;
+- `public_train` and `private_train_labels`: each file's exact `{sha256, bytes}`
+  identity, as returned by `file_identity(path)`;
+- `public_task_ids`: every public TRAIN task ID in input order;
+- `source_evidence`: `reviewed: true`, a nonempty `review_record`, positive
+  `receipt_pairs` and `lineage_cells`, and a nonempty `inventory` identifying the
+  externally reviewed acquisition receipts and exact cell lineage;
+- `root_accepted: true`, `training_reward_admission_approved: true`, and a
+  nonempty `review_record` referring to the actual review of this binding.
+
+These fields are explicit external review assertions, not authenticated producer
+proof. Historical acquisition receipts do not demonstrate native rollout fetches
+or runtime admission. A pending manifest or an approval for another source,
+reward wrapper, public file or private label file is rejected. A new runtime
+commit needs its own review binding. Keep private data and bindings outside Git.
+CPU controls do not constitute model/GPU admission.
+
+Each Web group creates fresh `native_traces`, `request_owners`, and
+`public_outcomes` JSONL journals under the output directory. The owner records
+bind actual completion UUIDs to task, iteration, rank, sample and turn, preserving
+original messages, schemas, token IDs and streamed raw behavior thought logprobs.
+The trainer must enable the native streaming behavior-score capture; replayed
+teacher-forced scores cannot substitute for the actual sampled behavior scores. The trainer drains all episode/model
+work and closes all three durable writers, then rereads the closed bytes and
+validates exact ownership, original native schemas, real thinking close/EOS,
+message encoding and final decoding. Only then is `generation_closed.json`
+written and the private label file parsed. Parsed labels are not cached across
+subsequent rollouts. Preflight only hashes the label file as opaque bytes.
+
+Reward uses the unchanged literal text/null scorer, public evidence guard,
+nonempty string cells, support in actual fetched observations, and support in
+the actual encoded final prompt. Substring support is a limited deterministic
+check, not semantic entailment. Numeric JSON cells are not converted into strings.
+Model failures retain sampled thoughts at zero reward. Any infrastructure or
+context failure retains every outcome and discards the whole gradient group.
+Timed-out native generations are drained and their actual late completions
+remain owned in the closed journals. No retry, sibling filtering or denominator
+change is performed.
