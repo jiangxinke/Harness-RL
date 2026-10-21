@@ -99,6 +99,62 @@ under the same task plan, seed, rewards, budgets, learning rate and evaluation
 harness. Failure handling, native token ownership, the fixed token denominator,
 importance-ratio clipping and zero-gradient Adam skipping are unchanged.
 
+The independent opt-in `--policy-surrogate episode-gspo` replaces token clipping
+with an episode-level, length-weighted GSPO surrogate. The default
+`--policy-surrogate token-grpo` retains the original objective. Set the same
+option in CPU preflight and training; the GSPO option currently requires
+`--reference-kl-beta 0`. It supports CUAD thought-only and joint JSON training;
+combining it with `--enable-online-web` is rejected before reading inputs.
+Sampling, actual captured old logprobs, group rewards/advantages, failure
+handling and the zero-gradient Adam rule stay unchanged.
+
+For one episode, concatenate the actual scored positions of every sampled
+turn, let `N` be their count, and set
+`s = exp(sum(current_logprob - actual_behavior_logprob) / N)`.
+The loss is `-(N / D) * min(s * advantage, clip(s) * advantage)`, where `D`
+is the original fixed group/turn/token-budget denominator. Thus its per-token
+gradient agrees with original token GRPO at ratio one before clipping; it
+does not silently introduce equal episode weighting or observed-length loss
+normalization. All actual scored positions count in `N`, including real stops
+and grammar-forced singleton positions. The latter have zero logprob/gradient
+but affect the ratio's length normalization. Empty episodes with a nonzero
+advantage are rejected. Existing discarded/constant groups do no replay.
+
+The ratio is computed across the whole episode, not independently per turn.
+It is a geometric-mean surrogate, not unbiased full-trajectory importance
+sampling. It can reduce the effect of isolated token logprob discrepancies,
+but correlated cached-generation/replay errors can remain. It neither repairs
+numerical disagreement nor substitutes teacher-forced scores for sampled old
+scores. Benchmark improvement requires a matched experiment.
+
+GSPO replays each active segment once with gradients. It backpropagates that
+segment's logprob sum divided by `D` immediately into an episode gradient
+buffer, then applies the episode scalar coefficient and adds the result to
+the local accumulated adapter gradients. It retains no graphs across turns
+and makes no second scoring pass. The cost is one extra adapter-gradient
+buffer plus gradient scaling/accumulation; even an eventually clipped episode
+must complete backward. Distributed averaging and final norm clipping still
+happen once through the original update function. Diagnostic replay remains
+optional and never supplies old probabilities.
+
+GSPO metadata identifies this separate algorithm. Its `importance_ratio_*`
+fields describe episode ratios; `token_importance_ratio_*` retain token-level
+diagnostics. `episode_gradient_clipped_count` distinguishes clipped-gradient
+episodes from ratios merely outside the clip interval. Bounded
+`episode_summaries` retain the original episode index, scored-token count,
+detached logratio sum, episode ratio, original advantage, scalar policy loss,
+and clipping state for nonzero-advantage episodes. They allow reconstructing
+the scalar loss without retaining token logprob arrays or replaying intermediate
+weights; constant groups record an empty list. The matched CUAD
+evaluator accepts completed GSPO update receipts without changing evaluation
+sampling or harness behavior. CPU tensor/gradient tests do not establish GPU
+execution or benchmark improvement.
+
+For admission, GSPO also preserves the existing finite-token-ratio guard: a
+nonfinite `exp(current_logprob - actual_behavior_logprob)` rejects replay even
+if the episode's mean logratio would be finite. This conservative guard is
+distinct from episode clipping and is reported here explicitly.
+
 Model truncation and invalid JSON retain their actual sampled thoughts and
 zero rewards in the group. Version `online-native-HF-thought-only-GRPO-v2`
 also retains a trajectory's prior sampled thoughts with zero reward when a

@@ -39,6 +39,8 @@ from slime_plugins.dcc.hf_compute import (COMPUTE_PROFILES, compute_profile_conf
     precision_observation, validate_model_compute_profile)
 from slime_plugins.dcc.online_grpo import (ALGORITHM, apply_policy_update, group_signal,
                                          thought_policy_loss, wait_for_update_ranks)
+from slime_plugins.dcc.episode_gspo import (POLICY_SURROGATES, VARIANT as GSPO_VARIANT,
+    gspo_configuration, validate_policy_surrogate)
 from slime_plugins.dcc.reference_kl import (VARIANT as REFERENCE_KL_VARIANT,
     frozen_base_logprobs, reference_kl_configuration, thought_reference_kl_loss,
     validate_base_reference_model, validate_reference_kl_beta)
@@ -154,7 +156,8 @@ def make_runner(args):
 def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens, clip,
                  replay_diagnostic="full", reference_kl_beta=0, reference_base_model=None,
                  reference_source_commit=None, joint_json_policy=False, json_tokens=None,
-                 grammar_compiler=None, logprob_backend="qwen3-moe-chunked", head_chunk_tokens=None):
+                 grammar_compiler=None, logprob_backend="qwen3-moe-chunked", head_chunk_tokens=None,
+                 policy_surrogate="token-grpo"):
     """Use actual cached-generation behavior as old; replay is diagnostic only.
 
     Cached generation and teacher-forced replay may differ numerically even
@@ -164,6 +167,7 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
     if replay_diagnostic not in {"full", "first", "off"}:
         raise ValueError("Replay diagnostic must be full, first or off")
     validate_reference_kl_beta(reference_kl_beta)
+    validate_policy_surrogate(policy_surrogate, reference_kl_beta)
     objective_tokens = thought_tokens
     if joint_json_policy:
         if type(json_tokens) is not int or json_tokens < 1 or grammar_compiler is None:
@@ -177,6 +181,11 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
         return scorer
     def old_values(segment):
         return segment.behavior_logprobs if joint_json_policy else segment.thought_logprobs
+    if policy_surrogate == "episode-gspo":
+        from slime_plugins.dcc.episode_gspo import replay_episode_gspo_group
+        return replay_episode_gspo_group(model, signal, scorer_for=scorer_for, old_values=old_values,
+            group_size=group_size, max_steps=max_steps, objective_tokens=objective_tokens,
+            clip=clip, replay_diagnostic=replay_diagnostic, joint_json_policy=joint_json_policy)
     scored = [(segment, advantage)
               for segments, advantage in zip(signal.segments, signal.advantages, strict=True)
               if advantage != 0 for segment in segments]
@@ -294,6 +303,11 @@ async def collect_group(runner, task, policy, *, group_size, rank):
 
 
 def configuration(args, plan, tasks, world_size):
+    surrogate = getattr(args, "policy_surrogate", "token-grpo")
+    validate_policy_surrogate(surrogate, getattr(args, "reference_kl_beta", 0))
+    if surrogate == "episode-gspo" and (getattr(args, "enable_online_web", False)
+            or any(t.benchmark != "cuad" for t in tasks)):
+        raise ValueError("episode-gspo currently supports CUAD only; online Web is unsupported")
     if getattr(args, "joint_json_policy", False) and (
             getattr(args, "enable_online_web", False) or any(t.benchmark != "cuad" for t in tasks)):
         raise ValueError("Joint JSON policy currently supports CUAD only; online Web is unsupported")
@@ -303,7 +317,9 @@ def configuration(args, plan, tasks, world_size):
     config = dict(algorithm=ALGORITHM, runtime="independent-HF; not Slime/Megatron",
         source_commit=args.source_commit, world_size=world_size,
         arguments={key: str(value) if isinstance(value, Path) else value
-                   for key, value in vars(args).items() if key != "joint_json_policy" or value},
+                   for key, value in vars(args).items()
+                   if (key != "joint_json_policy" or value)
+                   and (key != "policy_surrogate" or value != "token-grpo")},
         compute_profile=compute_profile_configuration(getattr(args, "compute_profile", "legacy")),
         cuad_concise_reasoning=cuad_concise_reasoning_configuration(getattr(args, "cuad_concise_reasoning", False)),
         auto_read_follow_docs=auto_read_follow_docs_configuration(getattr(args, "auto_read_follow_docs", False)),
@@ -345,6 +361,10 @@ def configuration(args, plan, tasks, world_size):
         if reference_kl["enabled"]:
             config["algorithm_variant"] = "frozen-base-reference-k3-nonzero-advantage-joint-v1"
             config["algorithm"] += "+" + config["algorithm_variant"]
+    if surrogate == "episode-gspo":
+        config["algorithm"] += "+" + GSPO_VARIANT
+        config["algorithm_variant"] = GSPO_VARIANT
+        config["policy_surrogate"] = gspo_configuration()
     if getattr(args, "enable_online_web", False):
         from slime_plugins.dcc.online_web import binding_protocols
         config["online_web"] = dict(enabled=True, protocols=binding_protocols(),
@@ -452,6 +472,12 @@ def cpu_preflight(args, tasks, plan, world_size):
 
 
 async def train(args, tasks, plan, world_size, *, web_inputs=None):
+    validate_policy_surrogate(getattr(args, "policy_surrogate", "token-grpo"),
+                              getattr(args, "reference_kl_beta", 0))
+    if getattr(args, "policy_surrogate", "token-grpo") == "episode-gspo" and (
+            getattr(args, "enable_online_web", False) or web_inputs is not None
+            or any(t.benchmark != "cuad" for t in tasks)):
+        raise ValueError("episode-gspo currently supports CUAD only; online Web is unsupported")
     if getattr(args, "joint_json_policy", False) and (
             getattr(args, "enable_online_web", False) or web_inputs is not None
             or any(t.benchmark != "cuad" for t in tasks)):
@@ -590,7 +616,8 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
                 joint_json_policy=getattr(args, "joint_json_policy", False), json_tokens=args.json_tokens,
                 grammar_compiler=policy.compiler if getattr(args, "joint_json_policy", False) else None,
                 logprob_backend=args.logprob_backend,
-                head_chunk_tokens=args.head_chunk_tokens)
+                head_chunk_tokens=args.head_chunk_tokens,
+                policy_surrogate=getattr(args, "policy_surrogate", "token-grpo"))
             record(event="replay_end", iteration=iteration, seconds=time.monotonic() - replay_started,
                    scored_tokens=report["scored_tokens"], scored_segments=report["scored_segments"])
             if world_size > 1:
@@ -648,6 +675,9 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
             if config["reference_kl"]["enabled"]:
                 complete.update(algorithm_variant=config.get("algorithm_variant", REFERENCE_KL_VARIANT),
                                 reference_kl=config["reference_kl"])
+            if "policy_surrogate" in config:
+                complete.update(algorithm_variant=config["algorithm_variant"],
+                                policy_surrogate=config["policy_surrogate"])
             with (args.output_dir / "training_complete.json").open("x") as stream:
                 stream.write(json.dumps(complete, indent=2, allow_nan=False) + "\n")
     except BaseException as error:
@@ -694,6 +724,8 @@ def main(argv=None):
     parser.add_argument("--group-size", type=int, default=2)
     parser.add_argument("--advantage-normalization", choices=("std", "centered"), default="std",
                         help="Group advantages: original (reward-mean)/(std+1e-4), or centered reward-mean without std/epsilon division")
+    parser.add_argument("--policy-surrogate", choices=POLICY_SURROGATES, default="token-grpo",
+                        help="Original token clipping (default), or opt-in fixed-budget episode GSPO; episode-gspo requires reference KL beta 0")
     parser.add_argument("--native-batch-size", type=int, default=4,
                         help="Maximum requests per physical native rollout batch on each rank; logical GRPO group size is unchanged")
     parser.add_argument("--native-mixed-schema-batching", action="store_true",
@@ -737,8 +769,11 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.joint_json_policy and args.enable_online_web:
         parser.error("--joint-json-policy supports CUAD only and cannot be combined with --enable-online-web")
+    if args.policy_surrogate == "episode-gspo" and args.enable_online_web:
+        parser.error("--policy-surrogate episode-gspo supports CUAD only and cannot be combined with --enable-online-web")
     try:
         validate_reference_kl_beta(args.reference_kl_beta)
+        validate_policy_surrogate(args.policy_surrogate, args.reference_kl_beta)
     except ValueError as error:
         parser.error(str(error))
     if args.web_train_reward_variant != TABLE_GROUNDED_REWARD and not args.enable_online_web:

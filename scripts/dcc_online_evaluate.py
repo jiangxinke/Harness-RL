@@ -40,11 +40,13 @@ from slime_plugins.dcc.hf_compute import (COMPUTE_PROFILES, adapter_compute_prof
 from slime_plugins.dcc.metrics import cuad_task_metrics
 from slime_plugins.dcc.native_joint_grpo import ALGORITHM as JOINT_ALGORITHM
 from slime_plugins.dcc.online_grpo import ALGORITHM
+from slime_plugins.dcc.episode_gspo import VARIANT as GSPO_VARIANT
 
 VERSION = "dcc-online-matched-HF-CUAD-evaluation-v1"
 ONLINE_ALGORITHMS = (ALGORITHM, JOINT_ALGORITHM,
     ALGORITHM + "+" + REFERENCE_KL_VARIANT,
-    JOINT_ALGORITHM + "+frozen-base-reference-k3-nonzero-advantage-joint-v1")
+    JOINT_ALGORITHM + "+frozen-base-reference-k3-nonzero-advantage-joint-v1",
+    ALGORITHM + "+" + GSPO_VARIANT, JOINT_ALGORITHM + "+" + GSPO_VARIANT)
 SCORE_FIELDS = {"f1", "precision", "recall", "no_answer_correct", "tp", "fp", "fn",
                 "verbatim_span_fraction"}
 
