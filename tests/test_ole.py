@@ -187,6 +187,54 @@ def test_threshold_ties_singletons_and_empty_batch():
     assert metrics["ole/groups"] == 0 and state["threshold"] == 0.25
 
 
+@pytest.mark.parametrize(
+    "group_rewards,selected",
+    [
+        ([[0.0, 0.8], [0.0, 0.8]], [True, True]),
+        ([[0.8]], [True]),
+        ([[0.0, 0.2], [0.0, 0.8], [0.0, 1.0]], [False, True, True]),
+        ([[0.001, 0.14, 0.93]], [True]),
+    ],
+)
+def test_repeated_batch_keeps_groups_equal_to_previous_quantile(group_rewards, selected):
+    state = {}
+    config = _config(ole_threshold_percent=0.5)
+    for rollout_id in range(3):
+        samples = [
+            _sample(group, episode, reward)
+            for group, rewards in enumerate(group_rewards)
+            for episode, reward in enumerate(rewards)
+        ]
+        metrics = select_prompt_groups(_args(), config, samples, state, rollout_id=rollout_id)
+        if rollout_id:
+            assert [sample.train_metadata["ole"]["selected"] for sample in samples] == [
+                selected[group]
+                for group, rewards in enumerate(group_rewards)
+                for _ in rewards
+            ]
+            assert metrics["ole/discarded_groups"] == selected.count(False)
+
+
+def test_repeated_decimal_reward_batch_retains_nonzero_policy_gradient():
+    from slime.utils.ppo_utils import compute_policy_loss
+
+    samples = [_sample(group, group * 2 + episode, reward)
+               for group in range(2) for episode, reward in enumerate((0.0, 0.8))]
+    state = {}
+    for rollout_id in range(2):
+        select_prompt_groups(_args(), _config(), samples, state, rollout_id=rollout_id)
+    _, normalized = normalize_by_episode(_args(), samples)
+    original = [torch.tensor([value]) for value in normalized]
+    data = {"advantages": original, "metadata": [sample.train_metadata for sample in samples]}
+    apply_selection_to_advantages(None, 1, data)
+    assert torch.equal(torch.stack(data["advantages"]), torch.stack(original))
+    parameter = torch.nn.Parameter(torch.zeros(4, 1))
+    loss, _ = compute_policy_loss(-parameter, torch.stack(data["advantages"]), 0.2, 0.2)
+    loss.mean().backward()
+    assert torch.isfinite(parameter.grad).all()
+    assert torch.count_nonzero(parameter.grad) == 4
+
+
 def test_infrastructure_and_empty_actor_episodes_do_not_bias_scores():
     samples = _batch()
     removed = _sample(0, 4, -100)
