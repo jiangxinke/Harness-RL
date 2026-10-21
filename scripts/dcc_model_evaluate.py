@@ -374,6 +374,12 @@ async def _evaluate(args, *, browser_reader=None):
     world = int(os.environ.get("WORLD_SIZE", "1"))
     backend = getattr(args, "inference_backend", "hf")
     quantization = getattr(args, "quantization", "none")
+    bf16_attention_only_lora = getattr(args, "vllm_bf16_attention_only_lora", False)
+    if type(bf16_attention_only_lora) is not bool:
+        raise TypeError("vllm_bf16_attention_only_lora must be a bool")
+    if bf16_attention_only_lora and (backend != "vllm" or quantization != "none"
+            or args.vllm_tensor_parallel_size != 1):
+        raise ValueError("--vllm-bf16-attention-only-lora requires vLLM, quantization=none and TP=1")
     sampling = _evaluation_sampling(args, backend)
     structured_final = getattr(args, "web_structured_final", False)
     structured = web_structured_configuration(structured_final)
@@ -540,6 +546,10 @@ async def _evaluate(args, *, browser_reader=None):
         from slime_plugins.dcc.fp8_runtime import runtime_identity
         manifest.update(fp8_contract=dict(QUANTIZATION), fp8_validation=dict(VALIDATION_LAYOUT),
                         runtime_code_identity=runtime_identity())
+    if bf16_attention_only_lora:
+        from slime_plugins.dcc.bf16_attention_guard import VALIDATION_LAYOUT, runtime_identity
+        manifest.update(bf16_attention_only_lora=True, bf16_lora_validation=dict(VALIDATION_LAYOUT),
+                        runtime_code_identity=runtime_identity())
     if backend != "hf":
         manifest["inference_backend"] = backend
         manifest["evaluation_sampling"] = sampling.to_dict()
@@ -632,6 +642,9 @@ async def _evaluate(args, *, browser_reader=None):
                 if quantization == "fp8":
                     async_options.update(quantization="fp8",
                         fp8_validation_dir=str((output / f"fp8_validation_rank{rank}").absolute()))
+                if bf16_attention_only_lora:
+                    async_options.update(bf16_attention_only_lora=True,
+                        bf16_lora_validation_dir=str((output / f"bf16_lora_validation_rank{rank}").absolute()))
                 policy = load_vllm_policy(
                     args.model, adapter=args.adapter, batch_size=args.batch_size,
                     max_prompt_tokens=args.max_prompt_tokens,
@@ -645,6 +658,9 @@ async def _evaluate(args, *, browser_reader=None):
                 if quantization == "fp8":
                     from slime_plugins.dcc.fp8_attention_guard import validate_worker_receipts
                     validate_worker_receipts(output / f"fp8_validation_rank{rank}", adapter=args.adapter)
+                if bf16_attention_only_lora:
+                    from slime_plugins.dcc.bf16_attention_guard import validate_worker_receipts
+                    validate_worker_receipts(output / f"bf16_lora_validation_rank{rank}", adapter=args.adapter)
                 if native is not None:
                     from slime_plugins.dcc.native_thinking_eval import NativeThinkingPolicy, NativeTraceJournal, budget_from_configuration
                     journal = NativeTraceJournal(output / f"native_thinking_traces_rank{rank}.jsonl")
@@ -1065,6 +1081,8 @@ def main():
     parser.add_argument("--vllm-memory-utilization", type=float, default=0.88)
     parser.add_argument("--vllm-batched-tokens", type=int, default=8192)
     parser.add_argument("--vllm-enforce-eager", action="store_true")
+    parser.add_argument("--vllm-bf16-attention-only-lora", action="store_true",
+                        help="Opt into the BF16 native-expert runtime for base without LoRA or exact q/v/o LoRA; vLLM 0.11.2/TP=1/fresh validation directory")
     parser.add_argument("--vllm-async", action="store_true",
                         help="Use native per-request vLLM scheduling and abort timed-out GPU requests")
     parser.add_argument("--native-thinking", action="store_true",

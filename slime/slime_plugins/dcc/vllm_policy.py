@@ -339,8 +339,8 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
     """
     if type(bf16_attention_only_lora) is not bool:
         raise TypeError("bf16_attention_only_lora must be a bool")
-    if bf16_attention_only_lora and (quantization != "none" or adapter is None or tensor_parallel_size != 1):
-        raise ValueError("BF16 attention-only LoRA requires quantization=none, an adapter and TP=1")
+    if bf16_attention_only_lora and (quantization != "none" or tensor_parallel_size != 1):
+        raise ValueError("BF16 attention-only runtime requires quantization=none and TP=1")
     if not bf16_attention_only_lora and bf16_lora_validation_dir is not None:
         raise ValueError("bf16_lora_validation_dir requires explicit bf16_attention_only_lora=True")
     if quantization not in {"none", "fp8"}:
@@ -447,7 +447,7 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
     if bf16_attention_only_lora:
         from .bf16_attention_guard import WORKER_CLASS, worker_binding
         engine_kwargs["worker_cls"] = WORKER_CLASS
-        binding = worker_binding(adapter=metadata["path"], model_config=config.to_dict(),
+        binding = worker_binding(adapter=metadata["path"] if metadata else None, model_config=config.to_dict(),
                                  audit_dir=bf16_lora_validation_dir)
     with binding, _engine_environment():
         if asynchronous:
