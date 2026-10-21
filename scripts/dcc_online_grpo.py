@@ -129,7 +129,8 @@ def cuad_task_sampling_configuration(sampling):
 
 
 def make_web_tools(args):
-    return WebTools(max_text_window_chars=getattr(args, "web_text_window_chars", None))
+    return WebTools(max_text_window_chars=getattr(args, "web_text_window_chars", None),
+                    web_zip_member_fallback=getattr(args, "web_zip_member_fallback", False))
 
 
 def make_runner(args):
@@ -303,6 +304,8 @@ async def collect_group(runner, task, policy, *, group_size, rank):
 
 
 def configuration(args, plan, tasks, world_size):
+    from slime_plugins.dcc.web_archive import web_zip_member_fallback_configuration
+
     surrogate = getattr(args, "policy_surrogate", "token-grpo")
     validate_policy_surrogate(surrogate, getattr(args, "reference_kl_beta", 0))
     if surrogate == "episode-gspo" and (getattr(args, "enable_online_web", False)
@@ -318,7 +321,7 @@ def configuration(args, plan, tasks, world_size):
         source_commit=args.source_commit, world_size=world_size,
         arguments={key: str(value) if isinstance(value, Path) else value
                    for key, value in vars(args).items()
-                   if (key != "joint_json_policy" or value)
+                   if (key not in {"joint_json_policy", "web_zip_member_fallback"} or value)
                    and (key != "policy_surrogate" or value != "token-grpo")},
         compute_profile=compute_profile_configuration(getattr(args, "compute_profile", "legacy")),
         cuad_concise_reasoning=cuad_concise_reasoning_configuration(getattr(args, "cuad_concise_reasoning", False)),
@@ -367,6 +370,8 @@ def configuration(args, plan, tasks, world_size):
         config["policy_surrogate"] = gspo_configuration()
     if getattr(args, "enable_online_web", False):
         from slime_plugins.dcc.online_web import binding_protocols
+        if web.web_zip_member_fallback:
+            config["web_zip_member_fallback"] = web_zip_member_fallback_configuration(True)
         config["online_web"] = dict(enabled=True, protocols=binding_protocols(),
             web_deck="public-ID-only-shuffled-cycles",
             cuad_plan=("existing-TRAIN-gold-positive-negative-stratification"
@@ -747,6 +752,8 @@ def main(argv=None):
     parser.add_argument("--auto-read-sources", type=int, choices=(0, 1, 2), default=2)
     parser.add_argument("--auto-read-follow-docs", action="store_true",
                         help="Within existing automatic-read budgets, prioritize one observed same-origin Help/API/documentation link per search")
+    parser.add_argument("--web-zip-member-fallback", action="store_true",
+                        help="Opt in to skipping whole ZIP members only at text character caps; all byte/security limits remain enforced")
     parser.add_argument("--web-text-window-chars", type=int,
                         help="Optional positive fetch_url body-window limit; cached source and original cached-row JSON budget are unchanged")
     parser.add_argument("--lora-rank", type=int, default=16)

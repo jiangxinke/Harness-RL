@@ -743,7 +743,8 @@ def _bounded_delimited_text(content: bytes) -> str | None:
 
 def extract_page(content: bytes, content_type: str, encoding: str = "utf-8", *,
                  xlsx_sections: list[dict[str, Any]] | None = None,
-                 archive_sections: list[dict[str, Any]] | None = None) -> str:
+                 archive_sections: list[dict[str, Any]] | None = None,
+                 web_zip_member_fallback: bool = False) -> str:
     if (content_type.partition(";")[0].strip().lower() in {_XLSX_MIME, "application/zip", "application/x-zip-compressed"}
             or content.startswith((b"PK\x03\x04", b"PK\x05\x06"))):
         extracted = _xlsx_page(content, sections=xlsx_sections)
@@ -751,7 +752,7 @@ def extract_page(content: bytes, content_type: str, encoding: str = "utf-8", *,
             return extracted
         from .web_archive import text_zip_page
 
-        return text_zip_page(content, sections=archive_sections)
+        return text_zip_page(content, sections=archive_sections, member_fallback=web_zip_member_fallback)
     if content_type == "application/pdf" or content.startswith(b"%PDF-"):
         try:
             from pypdf import PdfReader
@@ -806,12 +807,15 @@ def extract_page(content: bytes, content_type: str, encoding: str = "utf-8", *,
 class WebTools:
     """Search public indexes or an operator-configured web-search API."""
 
-    def __init__(self, *, backend: str | None = None, max_page_chars: int = 14000, browser_reader=None, web_cached_rows=False, max_text_window_chars: int | None = None) -> None:
+    def __init__(self, *, backend: str | None = None, max_page_chars: int = 14000, browser_reader=None, web_cached_rows=False, max_text_window_chars: int | None = None, web_zip_member_fallback=False) -> None:
         if max_text_window_chars is not None and (type(max_text_window_chars) is not int or max_text_window_chars < 1):
             raise ValueError("max_text_window_chars must be a positive integer or None")
         from .web_rows import web_cached_rows_configuration
 
         self.web_cached_rows = web_cached_rows_configuration(web_cached_rows)["enabled"]
+        from .web_archive import web_zip_member_fallback_configuration
+
+        self.web_zip_member_fallback = web_zip_member_fallback_configuration(web_zip_member_fallback)["enabled"]
         self.backend = backend or os.environ.get("DCC_SEARCH_BACKEND", "public_web")
         self.max_page_chars = max_page_chars
         # Limit ordinary body windows without shrinking cached-row provenance
@@ -995,7 +999,7 @@ class WebTools:
                 else:
                     async with self._semaphore:
                         raw, content_type, encoding = await asyncio.to_thread(_download_public, url)
-                    text = await asyncio.to_thread(extract_page, raw, content_type, encoding, xlsx_sections=worksheets, archive_sections=archive_members)
+                    text = await asyncio.to_thread(extract_page, raw, content_type, encoding, xlsx_sections=worksheets, archive_sections=archive_members, web_zip_member_fallback=self.web_zip_member_fallback)
                     links = await asyncio.to_thread(_page_links, raw, content_type, encoding, url)
                     # Rendering is explicitly injected by the evaluation owner.
                     # HTTP failures and access challenges never trigger it. Keep
@@ -1099,6 +1103,21 @@ class WebTools:
                 "to a member's start to read it before using its contents as evidence. Directory and unsupported "
                 "members have no text offsets and have not been read. Names/previews may be marked truncated."
             )
+            if self.web_zip_member_fallback:
+                # Directory metadata and member labels alone are navigation,
+                # never a successfully read source. Only literal content that
+                # overlaps this actual window can count toward grounding.
+                result["source_text_exposed"] = any(
+                    section.get("status") == "readable" and
+                    bool(text[max(start, section["content_start"]):min(end, section["content_end"])].strip())
+                    for section in self.page_archives[url]
+                    if section.get("status") == "readable" and
+                    max(start, section["content_start"]) < min(end, section["content_end"]))
+                result["archive_members_note"] += (
+                    " Members marked unexposed_text_limit were skipped in full at a character cap; "
+                    "their contents, previews and offsets are unavailable, and any such exclusion makes the export incomplete. "
+                    "Directory metadata and member labels alone are not source evidence."
+                )
         window = result["text"]
         previous = self._read_windows.get(window)
         if previous is not None:
@@ -1118,7 +1137,8 @@ class WebTools:
             self._read_windows[window] = {"url": url, "start": start, "end": end, "count": 1}
             while len(self._read_windows) > 128:
                 self._read_windows.popitem(last=False)
-        self.sources.setdefault(url, {"title": "", "url": url, "snippet": text[:300]})
+        if result.get("source_text_exposed") is not False:
+            self.sources.setdefault(url, {"title": "", "url": url, "snippet": text[:300]})
         return result
 
     def citation_validity(self, answer: Any) -> float:

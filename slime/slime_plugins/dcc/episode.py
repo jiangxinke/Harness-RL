@@ -261,6 +261,8 @@ class _WebEvidence:
                 self.searches += 1
                 self.sources.update(self._source_key(url) for url in urls)
         elif tool == "fetch_url" and self._source_url(observation.get("url")):
+            if observation.get("source_text_exposed") is False:
+                return
             text = observation.get("text")
             if isinstance(text, str) and text.strip():
                 self.fetches += 1

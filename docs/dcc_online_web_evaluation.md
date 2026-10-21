@@ -113,3 +113,5 @@ operators must keep the selected base checkpoint immutable.
 `matched_base` reports paired mean deltas without automatically claiming an
 improvement. A CPU test, runtime smoke or one favorable DEV comparison does not
 establish an official benchmark improvement or statistical confidence.
+
+The optional [`--web-zip-member-fallback`](dcc_web_zip_member_fallback.md) skips whole ZIP text members only at character caps; it defaults off, retains all byte and archive validation limits, and must match across compared policies.

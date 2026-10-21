@@ -308,3 +308,5 @@ Readiness timing is recorded separately from optimizer application. Gradient
 averaging, clipping, zero-signal skipping and the objective are unchanged.
 This is a synchronization safeguard, not evidence of improved model quality
 or proof that every NCCL watchdog failure has the same cause.
+
+The optional [`--web-zip-member-fallback`](dcc_web_zip_member_fallback.md) skips whole ZIP text members only at character caps; it defaults off, retains all byte and archive validation limits, and must match across compared policies.

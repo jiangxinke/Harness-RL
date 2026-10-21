@@ -26,6 +26,20 @@ _MAX_NAME_CHARS = 1024
 _NAV_NAME_CHARS = 256
 _NAV_PREVIEW_CHARS = 256
 _NAV_TOTAL_PREVIEW_CHARS = 4096
+WEB_ZIP_MEMBER_FALLBACK_VERSION = "bounded-zip-character-member-fallback-v1"
+
+
+def web_zip_member_fallback_configuration(enabled=False):
+    if type(enabled) is not bool:
+        raise ValueError("web_zip_member_fallback must be a boolean")
+    return {"enabled": enabled,
+            "version": WEB_ZIP_MEMBER_FALLBACK_VERSION if enabled else None}
+
+
+class _MemberTextCharacterLimit(ValueError):
+    """Only the decoded-text character cap can opt in to member skipping."""
+
+
 _TEXT_FORMATS = {".csv": "csv", ".tsv": "tsv", ".xml": "xml", ".json": "json", ".txt": "text"}
 _ARCHIVE_SUFFIXES = {
     ".zip", ".zipx", ".gz", ".gzip", ".tgz", ".bz2", ".tbz", ".tbz2", ".xz", ".txz", ".zst", ".tzst",
@@ -87,7 +101,7 @@ def _safe_member(member: zipfile.ZipInfo) -> None:
         raise ValueError("ZIP directory member has nonempty content")
 
 
-def _decode_text(raw: bytes, format: str) -> str:
+def _decode_text(raw: bytes, format: str, *, member_fallback: bool = False) -> str:
     if raw.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
         encoding = "utf-32"
     elif raw.startswith((b"\xff\xfe", b"\xfe\xff")):
@@ -106,7 +120,8 @@ def _decode_text(raw: bytes, format: str) -> str:
         raise ValueError("ZIP member has invalid or unsupported text encoding") from exc
     if any(ord(character) < 32 and character not in "\t\n\r" for character in text):
         raise ValueError("ZIP member contains binary control bytes")
-    if len(text) > _MAX_TEXT_CHARS:
+    over_character_limit = len(text) > _MAX_TEXT_CHARS
+    if over_character_limit and not member_fallback:
         raise ValueError("ZIP member text exceeds the character limit")
     if format == "xml":
         if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", text, re.IGNORECASE):
@@ -120,12 +135,22 @@ def _decode_text(raw: bytes, format: str) -> str:
             json.loads(text)
         except (ValueError, RecursionError) as exc:
             raise ValueError("ZIP JSON member is not well-formed") from exc
+    # In fallback mode, a text cap cannot mask a structured-format error.
+    # Validation remains bounded by the unchanged member/total byte limits.
+    if over_character_limit:
+        raise _MemberTextCharacterLimit("ZIP member text exceeds the character limit")
     # Match the external-page Unicode boundary before recording offsets.
     return text.encode("utf-8", errors="replace").decode("utf-8")
 
 
-def text_zip_page(content: bytes, *, sections: list[dict[str, Any]] | None = None) -> str:
-    """Return literal bounded text and atomic source-wide member navigation."""
+def text_zip_page(content: bytes, *, sections: list[dict[str, Any]] | None = None,
+                  member_fallback: bool = False) -> str:
+    """Return literal bounded text and atomic source-wide member navigation.
+
+    The opt-in skips only whole members exceeding text character budgets. It
+    never converts other reader or archive validation failures into success.
+    """
+    web_zip_member_fallback_configuration(member_fallback)
     _directory(content)
     navigation: list[dict[str, Any]] = []
     output = io.StringIO()
@@ -160,11 +185,20 @@ def text_zip_page(content: bytes, *, sections: list[dict[str, Any]] | None = Non
                         raise ValueError("ZIP member expanded size is inconsistent or exceeds the byte limit")
                     if raw.startswith(_ARCHIVE_MAGIC) or raw[257:262] == b"ustar":
                         raise ValueError("nested ZIP/archive content is unsupported")
-                    text = _decode_text(raw, format)
+                    text = _decode_text(raw, format, member_fallback=member_fallback)
+                except _MemberTextCharacterLimit:
+                    section.update(status="unexposed_text_limit",
+                                   reason="member_text_character_limit", text_exposed=False)
+                    continue
                 except (zipfile.BadZipFile, UnicodeError, ValueError, OSError, RuntimeError, NotImplementedError) as exc:
                     raise ValueError(f"ZIP member {member.filename!r}: {exc}") from exc
+                label = "\nArchive member: " + json.dumps(member.filename, ensure_ascii=False) + f" ({format})\n"
+                if member_fallback and output.tell() + len(label) + len(text) + 1 > _MAX_TEXT_CHARS:
+                    section.update(status="unexposed_text_limit",
+                                   reason="archive_text_character_limit", text_exposed=False)
+                    continue
                 section.update(status="readable", start=output.tell())
-                output.write("\nArchive member: " + json.dumps(member.filename, ensure_ascii=False) + f" ({format})\n")
+                output.write(label)
                 section["content_start"] = output.tell()
                 output.write(text)
                 section["content_end"] = output.tell()

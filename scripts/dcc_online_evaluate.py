@@ -341,6 +341,8 @@ def parser():
     result.add_argument("--auto-read-sources", type=int, choices=(0, 1, 2), default=2)
     result.add_argument("--auto-read-follow-docs", action="store_true",
                         help="Prioritize one observed same-origin documentation link within existing automatic-read budgets; must match base and adapter")
+    result.add_argument("--web-zip-member-fallback", action="store_true",
+                        help="Opt in to bounded ZIP text-member fallback; must match base and adapter Web evaluation")
     result.add_argument("--web-text-window-chars", type=int,
                         help="Optional positive fetch_url body-window limit; must match base and adapter Web evaluation")
     mode = result.add_mutually_exclusive_group()

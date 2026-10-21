@@ -63,12 +63,13 @@ def web_tool_configuration(runner):
     A matched environment does not imply frozen live search responses.
     """
     from slime_plugins.dcc import tools, search_provider, search_query
+    from slime_plugins.dcc.web_archive import web_zip_member_fallback_configuration
 
     web = runner.web_tools_factory()
     timeout = float(os.environ.get("DCC_WEB_TIMEOUT", "30"))
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("DCC_WEB_TIMEOUT must be finite and positive")
-    return dict(factory=f"{type(web).__module__}.{type(web).__qualname__}",
+    config = dict(factory=f"{type(web).__module__}.{type(web).__qualname__}",
         implementation_identities={module.__name__: identity(inspect.getsource(module))
             for module in (tools, search_provider, search_query)},
         search_backend=web.backend, web_timeout_seconds=timeout,
@@ -96,6 +97,9 @@ def web_tool_configuration(runner):
         provider_cooldown_seconds=dict(challenge=300., transient_error=10.),
         extraction_limits={key: value for key, value in vars(tools).items()
             if key.startswith(("_DELIMITED_MAX_", "_XLSX_MAX_"))})
+    if web.web_zip_member_fallback:
+        config["web_zip_member_fallback"] = web_zip_member_fallback_configuration(True)
+    return config
 
 
 def runner_configuration(args):
