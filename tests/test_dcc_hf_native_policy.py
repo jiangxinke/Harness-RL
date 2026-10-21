@@ -603,7 +603,8 @@ def test_web_original_public_schema_postvalidation_keeps_failure_thoughts(tokeni
     assert failure.completion.completion_ids == [10065, END_THINK] + final_ids(tokenizer, text=text)
 
 
-def tiny_real_web_policy(tokenizer, values, *, thoughts=None, bounded=False):
+def tiny_real_web_policy(tokenizer, values, *, thoughts=None, bounded=False,
+                         budget_close=False, profile="raw", trace_sink=None):
     """Actual tiny HF model/generate and xgrammar, with fixture LM-head logits.
 
     This controls synthetic token preferences, not generation, EOS, grammar
@@ -637,7 +638,8 @@ def tiny_real_web_policy(tokenizer, values, *, thoughts=None, bounded=False):
         return result
     model.generate = generate
     value = NativeHFPolicy(model, tokenizer, thought_tokens=4, json_tokens=1024,
-        max_prompt_tokens=24000, web_bounded_whitespace=bounded)
+        max_prompt_tokens=24000, web_bounded_whitespace=bounded, sampling_profile=profile,
+        trace_sink=trace_sink, **({"web_thought_budget_close": True} if budget_close else {}))
     return value, calls
 
 
@@ -688,6 +690,79 @@ def test_actual_tiny_hf_web_thought_failure_is_retained(tokenizer):
     assert failure.completion.thought_token_count == 4
     assert [call['phase'] for call in calls] == ['thought']
     assert not torch.cuda.is_initialized()
+
+
+@pytest.mark.parametrize('profile', ['raw', 'thinking', 'greedy'])
+def test_actual_tiny_hf_web_budget_close_samples_singleton_at_last_position(tokenizer, profile):
+    from slime_plugins.dcc.hf_native_policy import (WEB_THOUGHT_BUDGET_CLOSE_PROTOCOL,
+        web_thought_budget_close_configuration)
+    traces, observed = [], []
+    answer = {'answer': [{'name': 'Alpha', 'citations': [WEB_URL]}]}
+    value, calls = tiny_real_web_policy(tokenizer, [answer], thoughts=[[10065, 10066, 10067, 10068]],
+        budget_close=True, profile=profile, trace_sink=traces.append)
+    generate = value.model.generate
+    class Observe:
+        def __call__(self, ids, scores):
+            if ids.shape[1] == self.width + 3:
+                observed.append((torch.isfinite(scores).sum().item(),
+                    (scores[0, END_THINK] - scores[0].logsumexp(-1)).item()))
+            return scores
+    def record(**kwargs):
+        cfg = _call_generation_config(kwargs)
+        if END_THINK in cfg.eos_token_id:
+            assert cfg.forced_eos_token_id == END_THINK and cfg.max_new_tokens == 4
+            observer = Observe();observer.width = kwargs['input_ids'].shape[1]
+            kwargs['logits_processor'].append(observer)
+        else:
+            assert cfg.forced_eos_token_id is None and cfg.max_new_tokens == 1024
+        return generate(**kwargs)
+    value.model.generate = record
+    completion = value._generate_batch([messages()], web_final_schema(['name'], [WEB_URL]), ['synthetic'])[0]
+    assert isinstance(completion, NativeHFCompletion)
+    assert observed == [(1, 0.)]
+    assert calls[0]['ids'] == [[10065, 10066, 10067, END_THINK]]
+    assert calls[1]['phase'] == 'json' and calls[1]['ids'][0][-1] == tokenizer.eos_token_id
+    assert completion.thought_token_count == 4 and json.loads(completion.text) == answer
+    assert completion.thought_logprobs is completion.thought_logprobs_source is None
+    assert value.protocol == traces[0]['protocol'] == WEB_THOUGHT_BUDGET_CLOSE_PROTOCOL
+    assert traces[0]['web_thought_budget_close'] == web_thought_budget_close_configuration(4)
+    assert traces[0]['forced_thought_positions'] == [3]
+    assert not torch.cuda.is_initialized()
+
+
+def test_actual_tiny_hf_web_budget_close_preserves_natural_early_stop(tokenizer):
+    answer = {'answer': [{'name': 'Alpha', 'citations': [WEB_URL]}]}
+    results, generated, states = [], [], []
+    for enabled in (False, True):
+        traces = []
+        value, calls = tiny_real_web_policy(tokenizer, [answer], thoughts=[[10065, END_THINK]],
+            budget_close=enabled, profile='thinking', trace_sink=traces.append)
+        torch.manual_seed(83)
+        completion = value._generate_batch([messages()], web_final_schema(['name'], [WEB_URL]))[0]
+        saved = asdict(completion);saved.pop('trace_id')
+        results.append(saved);generated.append(calls);states.append(torch.get_rng_state())
+        if enabled:
+            assert traces[0]['forced_thought_positions'] == []
+        else:
+            assert 'web_thought_budget_close' not in traces[0] and 'forced_thought_positions' not in traces[0]
+            assert 'web_thought_budget_close' not in value.provenance
+    assert results[0] == results[1] and generated[0] == generated[1]
+    assert generated[0][0]['ids'] == [[10065, END_THINK]]
+    assert torch.equal(states[0], states[1]) and not torch.cuda.is_initialized()
+
+
+@pytest.mark.parametrize('options', [dict(capture_thought_logprobs=True), dict(joint_json_policy=True),
+    dict(capture_thought_logprobs=True, joint_json_policy=True), dict(web_thought_budget_close=1)])
+def test_web_budget_close_refuses_training_capture_and_nonboolean_flag(tokenizer, options):
+    with pytest.raises(ValueError, match='evaluation-only'):
+        policy(tokenizer, **{'web_thought_budget_close': True, **options})
+
+
+def test_web_budget_close_rejects_cuad_before_any_model_call(tokenizer):
+    value = policy(tokenizer, web_thought_budget_close=True)
+    with pytest.raises(ValueError, match='Web evaluation schemas only'):
+        value._generate_batch([messages()], cuad_final_schema())
+    assert value.model.calls == []
 
 
 @pytest.mark.parametrize('column', ['quoted"column', 'back\\slash'])

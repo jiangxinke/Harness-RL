@@ -28,8 +28,18 @@ from .native_behavior_logprobs import BEHAVIOR_LOGPROB_SOURCE, StreamingRawThoug
 
 PROTOCOL = "hf-native-two-stage-thought-only-policy-v1"
 JOINT_PROTOCOL = "hf-native-two-stage-joint-masked-JSON-policy-v1"
+WEB_THOUGHT_BUDGET_CLOSE_PROTOCOL = "hf-native-web-thought-budget-close-evaluation-v1"
 OPEN_THINK, END_THINK = 151667, 151668
 NATIVE_SUFFIX = "<|im_start|>assistant\n<think>\n"
+
+
+def web_thought_budget_close_configuration(thought_tokens):
+    """Explicit identity of the optional Web evaluation decoding policy."""
+    if type(thought_tokens) is not int or thought_tokens < 1:
+        raise ValueError("Positive integer thought budget required")
+    return dict(version="web-thought-budget-close-evaluation-v1", enabled=True,
+        evaluation_only=True, thought_tokens=thought_tokens, forced_eos_token_id=END_THINK,
+        forced_position=thought_tokens - 1, position_indexing="zero-based-generated-thought", extra_tokens=0)
 
 
 def _explicit_generation_kwargs(config):
@@ -86,6 +96,7 @@ class NativeHFPolicy:
     # Preserve lightweight legacy decoder seams that bypass __init__. Real
     # joint runtimes always override both values explicitly in __init__.
     joint_json_policy = False
+    web_thought_budget_close = False
     protocol = PROTOCOL
 
     @staticmethod
@@ -102,7 +113,7 @@ class NativeHFPolicy:
                  max_prompt_tokens=16384, max_model_len=None, batch_size=4,
                  sampling_profile="raw", allow_truncation=False, trace_sink=None,
                  web_bounded_whitespace=False, capture_thought_logprobs=False,
-                 mixed_schema_batching=False, joint_json_policy=False):
+                 mixed_schema_batching=False, joint_json_policy=False, web_thought_budget_close=False):
         from transformers import GenerationConfig
         import xgrammar as xgr
 
@@ -111,6 +122,9 @@ class NativeHFPolicy:
         if any(type(value) is not int or value <= 0
                for value in (thought_tokens, json_tokens, max_prompt_tokens, batch_size)):
             raise ValueError("Positive integer token and batch budgets required")
+        if type(web_thought_budget_close) is not bool or (web_thought_budget_close and
+                (capture_thought_logprobs or joint_json_policy)):
+            raise ValueError("Web thought budget closing is evaluation-only; behavior capture and joint JSON are unsupported")
         if type(capture_thought_logprobs) is not bool or (capture_thought_logprobs and sampling_profile != "raw"):
             raise ValueError("Actual behavior scores require explicit raw thought sampling")
         if type(mixed_schema_batching) is not bool:
@@ -119,6 +133,7 @@ class NativeHFPolicy:
                 (sampling_profile != "raw" or not capture_thought_logprobs or web_bounded_whitespace)):
             raise ValueError("Joint CUAD JSON policy requires captured raw thoughts and unchanged CUAD grammar")
         self.joint_json_policy = joint_json_policy
+        self.web_thought_budget_close = web_thought_budget_close
         self.protocol = JOINT_PROTOCOL if joint_json_policy else PROTOCOL
         self.capture_thought_logprobs = capture_thought_logprobs
         self.mixed_schema_batching = mixed_schema_batching
@@ -165,6 +180,13 @@ class NativeHFPolicy:
                 policy_gradient="sampled-raw-thought-and-grammar-normalized-JSON",
                 failure_policy="retain-actual-sampled-thought-and-JSON-IDs-with-reward-zero; no-forced-close-or-retry",
                 supported_benchmark="cuad")
+        if web_thought_budget_close:
+            self.protocol = WEB_THOUGHT_BUDGET_CLOSE_PROTOCOL
+            self.provenance.update(protocol=self.protocol,
+                web_thought_budget_close=web_thought_budget_close_configuration(thought_tokens),
+                policy_gradient="disabled-evaluation-only",
+                failure_policy="retain-original-outcomes; last-thought-position-singleton-close; no-appended-token-or-retry",
+                supported_benchmark="widesearch")
 
     async def __call__(self, *args, **kwargs):
         raise ValueError("HF native policy requires generate_structured and an explicit public schema")
@@ -258,6 +280,10 @@ class NativeHFPolicy:
             output_attentions=False, output_hidden_states=False, output_scores=False,
             disable_compile=False,
             use_cache=True, return_dict_in_generate=False)
+        if phase == "thought" and self.web_thought_budget_close:
+            # HF masks the last in-budget sampling position to this singleton.
+            # generate selects and returns the real token; nothing is appended.
+            config.forced_eos_token_id = END_THINK
         tracker = StreamingRawThoughtLogprobs() if raw and self.capture_thought_logprobs else None
         processors = [LogitsProcessor(grammar)] if grammar is not None else []
         if sampled_json:
@@ -326,6 +352,8 @@ class NativeHFPolicy:
             schemas = [json_schema] * count
         for schema in schemas:
             kind = native_structured_schema_kind(schema)
+            if self.web_thought_budget_close and kind not in {"web", "web-review"}:
+                raise ValueError("Web thought budget closing supports exact Web evaluation schemas only")
             if self.joint_json_policy and kind != "cuad":
                 raise ValueError("Joint JSON policy currently supports CUAD only")
         return schemas
@@ -404,6 +432,10 @@ class NativeHFPolicy:
                         "json": json_seconds if i in valid else None},
                     "thought_sampling_profile": self.sampling_profile,
                     "json_public_schema": schemas[i]}
+                if self.web_thought_budget_close:
+                    trace.update(web_thought_budget_close=web_thought_budget_close_configuration(self.thought_tokens),
+                        forced_thought_positions=([self.thought_tokens - 1]
+                            if len(thought) == self.thought_tokens and thought[-1] == END_THINK else []))
                 if self.joint_json_policy:
                     trace.update(json_logprobs=completion.json_logprobs,
                         json_logprobs_source=completion.json_logprobs_source,

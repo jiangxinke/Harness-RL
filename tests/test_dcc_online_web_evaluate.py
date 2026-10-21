@@ -14,7 +14,8 @@ import pytest
 import torch
 
 from slime_plugins.dcc.data import Task
-from slime_plugins.dcc.hf_native_policy import NativeHFCompletion, END_THINK, PROTOCOL
+from slime_plugins.dcc.hf_native_policy import (NativeHFCompletion, END_THINK, PROTOCOL,
+    WEB_THOUGHT_BUDGET_CLOSE_PROTOCOL, web_thought_budget_close_configuration)
 from slime_plugins.dcc.episode import ModelProtocolFailure
 from slime_plugins.dcc.prompt_history import PromptHistoryBudgetExceeded
 from slime_plugins.dcc.tools import WebTools
@@ -129,6 +130,7 @@ def evaluator(monkeypatch):
             self.tokenizer, self.options = tokenizer, kwargs
             self.eos_ids, self.suffix_ids, self.worker = [151645], [151667], None
             self.closed = True
+            self.protocol = WEB_THOUGHT_BUDGET_CLOSE_PROTOCOL if kwargs.get("web_thought_budget_close") else PROTOCOL
             value.policies.append(self)
         def bind_task(self, task_id, rank):
             self.task_id, self.turn, self.closed = task_id, 0, False
@@ -143,6 +145,8 @@ def evaluator(monkeypatch):
             if self.task_id.endswith("timeout"):
                 await asyncio.sleep(.06)
             thought = [10 + torch.randint(0, 10, (1,)).item(), END_THINK]
+            if self.options.get("web_thought_budget_close") and self.task_id.endswith("budget-close"):
+                thought = thought[:1] * (self.options["thought_tokens"] - 1) + [END_THINK]
             action = ({"tool": "web_search", "arguments": {"query": "invented public entities", "count": 8}}
                       if self.turn == 0 else {"answer": [{"name": "Alpha", "country": "AA", "citations": [URL]}]})
             if self.task_id.endswith("wrong") and self.turn:
@@ -157,14 +161,19 @@ def evaluator(monkeypatch):
             completion = NativeHFCompletion(text=text, prompt_ids=prompt, completion_ids=thought + final,
                 thought_token_count=len(thought), phase_lengths=(len(thought), len(final)), native_status=status,
                 finish_reason="stop" if final else "length", trace_id=trace_id)
-            self.options["trace_sink"](dict(protocol=PROTOCOL, task_id=self.task_id, trace_id=trace_id,
+            trace = dict(protocol=self.protocol, task_id=self.task_id, trace_id=trace_id,
                 prompt_ids=prompt, thought_ids=thought, json_ids=final, thought_token_count=len(thought),
                 status=status, final_text=text, json_public_schema=deepcopy(json_schema),
                 thought_sampling_profile=self.options["sampling_profile"], thought_logprobs=None,
-                thought_logprobs_source=None))
+                thought_logprobs_source=None)
+            if self.options.get("web_thought_budget_close"):
+                budget = self.options["thought_tokens"]
+                trace.update(web_thought_budget_close=web_thought_budget_close_configuration(budget),
+                    forced_thought_positions=[budget - 1] if len(thought) == budget else [])
+            self.options["trace_sink"](trace)
             self.turn += 1
             if status != "completed":
-                raise ModelProtocolFailure(status, completion=completion, protocol=PROTOCOL, trace_id=trace_id)
+                raise ModelProtocolFailure(status, completion=completion, protocol=self.protocol, trace_id=trace_id)
             return completion
         async def close(self):
             self.closed, self.worker = True, None
@@ -305,6 +314,76 @@ def test_score_only_rejects_changed_web_reasoning_flag(evaluator, tmp_path, enab
     generate(evaluator, args, tasks, tmp_path)
     args.web_concise_reasoning = not enabled
     with pytest.raises(ValueError, match="configuration, precision, runtime or closure differs"):
+        evaluator.score(args, tasks)
+    assert not evaluator.metric_calls and not torch.cuda.is_initialized()
+
+
+def test_budget_close_default_manifest_serialization_is_unchanged(evaluator, tmp_path):
+    args = arguments(evaluator, tmp_path / "default")
+    assert args.web_thought_budget_close is False
+    baseline = evaluator.manifest(args, references(("success",)))
+    del args.web_thought_budget_close  # Namespace from before this option existed.
+    assert evaluator.manifest(args, references(("success",))) == baseline
+    assert baseline['comparison']['protocol'] == PROTOCOL
+    assert 'web_thought_budget_close' not in baseline['comparison']['harness']
+    parsed = evaluator.parser().parse_args(['--model', 'invented', '--data', 'unused', '--output-dir',
+        str(tmp_path / 'enabled'), '--source-commit', 'a' * 40, '--web-thought-budget-close'])
+    assert parsed.web_thought_budget_close is True
+
+
+@pytest.mark.parametrize('base_enabled,adapter_enabled', [(False, False), (True, True), (False, True), (True, False)])
+def test_web_budget_close_policy_must_match_base_and_adapter(evaluator, tmp_path, base_enabled, adapter_enabled):
+    tasks = references(('budget-close' if base_enabled and adapter_enabled else 'success',))
+    base = arguments(evaluator, tmp_path / 'base', web_thought_budget_close=base_enabled)
+    public = generate(evaluator, base, tasks, tmp_path)
+    evaluator.score(base, tasks)
+    adapter = arguments(evaluator, tmp_path / 'trained', web_thought_budget_close=adapter_enabled,
+        adapter=make_adapter(tmp_path / 'adapter'), base_output_dir=base.output_dir)
+    asyncio.run(evaluator.generate(adapter, public))
+    for args, enabled in ((base, base_enabled), (adapter, adapter_enabled)):
+        config = json.loads((args.output_dir / 'config_rank0.json').read_text())['comparison']
+        traces = evaluator.read_jsonl(args.output_dir / 'native_traces_rank0.jsonl')
+        assert config['protocol'] == (WEB_THOUGHT_BUDGET_CLOSE_PROTOCOL if enabled else PROTOCOL)
+        if enabled:
+            expected = web_thought_budget_close_configuration(4)
+            assert config['harness']['web_thought_budget_close'] == expected
+            positions = [3] if tasks[0].id.endswith('budget-close') else []
+            assert all(trace['web_thought_budget_close'] == expected and trace['forced_thought_positions'] == positions for trace in traces)
+        else:
+            assert 'web_thought_budget_close' not in config['harness']
+            assert all('web_thought_budget_close' not in trace and 'forced_thought_positions' not in trace for trace in traces)
+    if base_enabled == adapter_enabled:
+        assert evaluator.score(adapter, tasks)['matched_base']['f1_by_row_delta'] == 0
+    else:
+        with pytest.raises(ValueError, match='configuration, precision, runtime or closure differs'):
+            evaluator.score(adapter, tasks)
+    assert not torch.cuda.is_initialized()
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_score_only_rejects_changed_web_budget_close_flag(evaluator, tmp_path, enabled):
+    tasks = references(('success',))
+    args = arguments(evaluator, tmp_path / 'run', web_thought_budget_close=enabled)
+    generate(evaluator, args, tasks, tmp_path)
+    args.web_thought_budget_close = not enabled
+    with pytest.raises(ValueError, match='configuration, precision, runtime or closure differs'):
+        evaluator.score(args, tasks)
+    assert not evaluator.metric_calls and not torch.cuda.is_initialized()
+
+
+@pytest.mark.parametrize('damage', ['protocol', 'policy', 'position', 'raw_behavior'])
+def test_budget_close_native_policy_corruption_is_rejected_before_scoring(evaluator, tmp_path, damage):
+    tasks = references(('success',))
+    args = arguments(evaluator, tmp_path / 'run', web_thought_budget_close=True)
+    generate(evaluator, args, tasks, tmp_path)
+    path = args.output_dir / 'native_traces_rank0.jsonl'
+    traces = evaluator.read_jsonl(path)
+    if damage == 'protocol':traces[0]['protocol'] = PROTOCOL
+    if damage == 'policy':traces[0]['web_thought_budget_close']['version'] = 'unknown'
+    if damage == 'position':traces[0]['forced_thought_positions'] = [3]
+    if damage == 'raw_behavior':traces[0]['thought_logprobs_source'] = 'streaming-generation-raw-logits-v1'
+    path.write_text(''.join(json.dumps(row) + '\n' for row in traces))
+    with pytest.raises(ValueError, match='Native prompt/schema/token/status|Web thought budget closing'):
         evaluator.score(args, tasks)
     assert not evaluator.metric_calls and not torch.cuda.is_initialized()
 

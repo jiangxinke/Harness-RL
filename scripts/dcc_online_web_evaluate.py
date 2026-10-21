@@ -35,7 +35,8 @@ from slime_plugins.dcc.adapter_identity import adapter_content_identity
 from slime_plugins.dcc.durable_journal import OrderedDurableJSONLWriter, close_durable_journals
 from slime_plugins.dcc.episode import EPISODE_PROMPT_VERSION, WIDESEARCH_EVIDENCE_GUARD_VERSION
 from slime_plugins.dcc.hf_compute import precision_observation, validate_compute_profile, validate_model_compute_profile
-from slime_plugins.dcc.hf_native_policy import NativeHFPolicy, PROTOCOL
+from slime_plugins.dcc.hf_native_policy import (NativeHFPolicy, PROTOCOL,
+    WEB_THOUGHT_BUDGET_CLOSE_PROTOCOL, web_thought_budget_close_configuration)
 from slime_plugins.dcc.hf_policy import load_policy_model, PROMPT_ENCODING_VERSION
 from slime_plugins.dcc.tools import WEB_READER_VERSION
 from slime_plugins.dcc.web_hf_evaluation import (STATUSES, OwnedEvaluationPolicy, canonical,
@@ -138,6 +139,8 @@ def runner_configuration(args):
             "web_tools": web_tool_configuration(runner)}
     if runner.web_concise_reasoning:
         config["web_concise_reasoning"] = web_concise_reasoning_configuration(True)
+    if getattr(args, "web_thought_budget_close", False):
+        config["web_thought_budget_close"] = web_thought_budget_close_configuration(args.thought_tokens)
     return config
 
 
@@ -154,7 +157,8 @@ def manifest(args, tasks):
             packages[name] = version(name)
         except PackageNotFoundError:
             packages[name] = None
-    return dict(version=VERSION, comparison=dict(source_commit=args.source_commit, protocol=PROTOCOL,
+    protocol = WEB_THOUGHT_BUDGET_CLOSE_PROTOCOL if getattr(args, "web_thought_budget_close", False) else PROTOCOL
+    return dict(version=VERSION, comparison=dict(source_commit=args.source_commit, protocol=protocol,
         runtime="independent native HF; separate from vLLM native and Slime/Megatron",
         model=args.model, quantization=args.quantization, compute_profile=compute,
         thought_sampling_profile=args.profile, thought_sampling=sampling,
@@ -206,7 +210,8 @@ async def generate(args, tasks):
         model.eval()
         policy = NativeHFPolicy(model, tokenizer, thought_tokens=args.thought_tokens,
             json_tokens=args.json_tokens, max_prompt_tokens=args.max_prompt_tokens,
-            sampling_profile=args.profile, trace_sink=lambda row: enqueue("native_traces", row))
+            sampling_profile=args.profile, trace_sink=lambda row: enqueue("native_traces", row),
+            **({"web_thought_budget_close": True} if getattr(args, "web_thought_budget_close", False) else {}))
         runtime = runtime_identity(model, tokenizer, policy)
         runner = make_runner(args)
         for task in assigned:
@@ -224,7 +229,9 @@ async def generate(args, tasks):
         if any(len(saved[name]) != writer.count for name, writer in writers.items()):
             raise ValueError("Closed evaluation journal count differs from exact persisted records")
         ownership = verify_native_ownership(assigned, saved["predictions"], saved["request_owners"],
-            saved["native_traces"], rank=rank, profile=args.profile, eos_ids=policy.eos_ids, tokenizer=tokenizer)
+            saved["native_traces"], rank=rank, profile=args.profile, eos_ids=policy.eos_ids, tokenizer=tokenizer,
+            **({"web_thought_budget_close": configuration["comparison"]["harness"]["web_thought_budget_close"]}
+               if getattr(args, "web_thought_budget_close", False) else {}))
         write_json(args.output_dir / f"rank{rank}.done.json", dict(version=VERSION,
             source_commit=args.source_commit, shard_index=rank, tasks=len(assigned),
             generation_complete=True, policy_drained=True, journals_closed=True,
@@ -279,7 +286,9 @@ def load_closed_run(args, tasks):
         if done.get("closed_journals") != {name: len(value) for name, value in rows.items()}:
             raise ValueError("Closed journal record counts changed")
         ownership = verify_native_ownership(assigned, rows["predictions"], rows["request_owners"], rows["native_traces"],
-            rank=rank, profile=args.profile, eos_ids=runtime.get("eos_ids"))
+            rank=rank, profile=args.profile, eos_ids=runtime.get("eos_ids"),
+            **({"web_thought_budget_close": expected["comparison"]["harness"]["web_thought_budget_close"]}
+               if getattr(args, "web_thought_budget_close", False) else {}))
         if ownership != done.get("native_ownership") or any(row.get("task_seed") != task_seed(args.seed, task.id)
                 for task, row in zip(assigned, rows["predictions"], strict=True)):
             raise ValueError("Native ownership receipt or per-task seeds changed")
@@ -372,6 +381,8 @@ def parser():
     # Native Web tasks need search/read/review/final turns. All values remain
     # explicit in the comparison manifest and must match base and adapter.
     result.set_defaults(max_steps=20)
+    result.add_argument("--web-thought-budget-close", action="store_true",
+        help="Experimental Web evaluation only: constrain the last in-budget thought token to the real closing token; JSON is unchanged")
     profile = next(action for action in result._actions if action.dest == "profile")
     profile.choices = ("raw", "thinking", "greedy")
     return result

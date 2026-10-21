@@ -164,7 +164,8 @@ class OwnedEvaluationPolicy:
         self.sink(row)
 
 
-def verify_native_ownership(tasks, predictions, owners, traces, *, rank, profile, eos_ids, tokenizer=None):
+def verify_native_ownership(tasks, predictions, owners, traces, *, rank, profile, eos_ids, tokenizer=None,
+                            web_thought_budget_close=None):
     """Bind every persisted request/trace/step; optional token encoding replay.
 
     Generation supplies its real tokenizer before publishing its done marker.
@@ -172,12 +173,20 @@ def verify_native_ownership(tasks, predictions, owners, traces, *, rank, profile
     a model/tokenizer. Cancelled native outputs remain owned, but earn no score.
     """
     from jsonschema import Draft202012Validator
-    from .hf_native_policy import END_THINK, PROTOCOL, _strict_json
+    from .hf_native_policy import (END_THINK, PROTOCOL, WEB_THOUGHT_BUDGET_CLOSE_PROTOCOL,
+        _strict_json, web_thought_budget_close_configuration)
     from .hf_native_structured import _web_review_mode
     from .hf_policy import _chat_tokens
 
     if not eos_ids or END_THINK in eos_ids:
         raise ValueError("Exact native non-thinking EOS IDs required")
+    protocol = PROTOCOL
+    if web_thought_budget_close is not None:
+        if (not isinstance(web_thought_budget_close, dict)
+                or web_thought_budget_close != web_thought_budget_close_configuration(
+                    web_thought_budget_close.get("thought_tokens"))):
+            raise ValueError("Exact Web thought budget closing configuration required")
+        protocol = WEB_THOUGHT_BUDGET_CLOSE_PROTOCOL
     expected = [task.id for task in tasks]
     if [row.get("task_id") for row in predictions] != expected:
         raise ValueError("Prediction ownership does not cover the exact assigned task order")
@@ -222,7 +231,7 @@ def verify_native_ownership(tasks, predictions, owners, traces, *, rank, profile
             count, ids = completion.get("thought_token_count"), completion.get("completion_ids")
             if (type(count) is not int or not isinstance(ids, list) or not 0 < count <= len(ids)
                     or completion.get("native_status") not in allowed
-                    or trace.get("protocol") != PROTOCOL or trace.get("task_id") != task.id
+                    or trace.get("protocol") != protocol or trace.get("task_id") != task.id
                     or trace.get("thought_sampling_profile") != profile
                     or trace.get("prompt_ids") != completion.get("prompt_ids")
                     or trace.get("thought_ids") != ids[:count] or trace.get("json_ids") != ids[count:]
@@ -232,6 +241,21 @@ def verify_native_ownership(tasks, predictions, owners, traces, *, rank, profile
                     or trace.get("final_text") != completion["text"]
                     or completion.get("phase_lengths") != [count, len(ids) - count]):
                 raise ValueError("Native prompt/schema/token/status trace binding differs")
+            if web_thought_budget_close is not None:
+                budget = web_thought_budget_close["thought_tokens"]
+                thought = ids[:count]
+                forced = [budget - 1] if count == budget else []
+                if (count > budget or (forced and (thought[-1] != END_THINK
+                        or thought.count(END_THINK) != 1 or set(thought).intersection(eos_ids)))
+                        or trace.get("web_thought_budget_close") != web_thought_budget_close
+                        or trace.get("forced_thought_positions") != forced
+                        or trace.get("thought_logprobs") is not None
+                        or trace.get("thought_logprobs_source") is not None
+                        or completion.get("thought_logprobs") is not None
+                        or completion.get("thought_logprobs_source") is not None):
+                    raise ValueError("Actual Web thought budget closing policy/position differs")
+            elif "web_thought_budget_close" in trace or "forced_thought_positions" in trace:
+                raise ValueError("Unexpected Web thought budget closing policy")
             if tokenizer is not None and _chat_tokens(tokenizer, owner["messages"]) != completion["prompt_ids"]:
                 raise ValueError("Original public request does not encode to the actual native prompt IDs")
             # Round-trip the exact original public constructors. Do not compile
