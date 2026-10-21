@@ -25,17 +25,20 @@ def episode(reward, *, status="completed", thought=(6, 7), json_ids=(8, 9)):
                          [step], [], [])
 
 
-def signal(results):
-    return group_signal(results, group_size=len(results), max_steps=2, thought_tokens=8)
+def signal(results, *, advantage_normalization="std"):
+    return group_signal(results, group_size=len(results), max_steps=2, thought_tokens=8,
+                        advantage_normalization=advantage_normalization)
 
 
-def test_failed_model_thoughts_remain_negative_training_examples():
+@pytest.mark.parametrize("mode", ["std", "centered"])
+def test_failed_model_thoughts_remain_negative_training_examples(mode):
     success = episode(1)
     failed = episode(0, status="model_protocol_failure", thought=(10,), json_ids=())
     assert failed.trainable_steps == []  # Legacy evaluation property is unchanged.
-    group = signal([success, failed])
+    group = signal([success, failed], advantage_normalization=mode)
     assert group.discarded_reason is None
     assert group.advantages[0] > 0 > group.advantages[1]
+    assert group.advantage_normalization == mode
     assert group.segments[0][0].completion_ids == [6, 7]
     assert group.segments[1][0].completion_ids == [10]
     assert all(8 not in s.completion_ids and 9 not in s.completion_ids
@@ -43,17 +46,71 @@ def test_failed_model_thoughts_remain_negative_training_examples():
 
 
 @pytest.mark.parametrize("reward", [0.0, 0.1, float(torch.tensor(0.1)), 1.0])
-def test_equal_rewards_have_exactly_zero_advantages(reward):
-    group = signal([episode(reward) for _ in range(7)])
+@pytest.mark.parametrize("mode", ["std", "centered"])
+def test_equal_rewards_have_exactly_zero_advantages(reward, mode):
+    group = signal([episode(reward) for _ in range(7)], advantage_normalization=mode)
     assert group.advantages == [0.0] * 7
     assert group.reward_std == 0
+    assert group.advantage_normalization == mode
 
 
 @pytest.mark.parametrize("status", ["infrastructure_error", "context_budget_failure"])
-def test_infrastructure_discards_whole_group_without_dropping_only_failures(status):
-    group = signal([episode(1), episode(0, status=status)])
+@pytest.mark.parametrize("mode", ["std", "centered"])
+def test_infrastructure_discards_whole_group_without_dropping_only_failures(status, mode):
+    group = signal([episode(1), episode(0, status=status)], advantage_normalization=mode)
     assert group.discarded_reason
     assert group.advantages == [0, 0] and group.segments == [[], []]
+    assert group.advantage_normalization == mode
+
+
+def test_default_advantages_preserve_original_std_formula_exactly():
+    results = [episode(reward) for reward in (0., .25, .75, 1.)]
+    default = group_signal(results, group_size=4, max_steps=2, thought_tokens=8)
+    explicit = signal(results, advantage_normalization="std")
+    assert default == explicit
+    std = math.sqrt(.15625)
+    assert default.reward_std == std
+    assert default.advantages == [(reward - .5) / (std + 1e-4) for reward in (0., .25, .75, 1.)]
+
+
+@pytest.mark.parametrize("rewards", [(0., .25, .75, 1.), (.500001, .5)])
+def test_centered_advantages_do_not_divide_by_std_or_epsilon(rewards):
+    results = [episode(reward) for reward in rewards]
+    centered = signal(results, advantage_normalization="centered")
+    original = signal(results)
+    mean = math.fsum(rewards) / len(rewards)
+    assert centered.advantages == [reward - mean for reward in rewards]
+    assert centered.reward_std == original.reward_std
+    assert centered.segments == original.segments and centered.rewards == original.rewards
+    assert centered.advantages != original.advantages
+
+
+@pytest.mark.parametrize("mode", ["std", "centered"])
+@pytest.mark.parametrize("rewards", [(1., 0.), (.500001, .5)])
+def test_group_advantages_match_analytic_categorical_gradient(mode, rewards):
+    logits = torch.tensor([.2, -.4, .1], dtype=torch.float64, requires_grad=True)
+    logprobs = logits.log_softmax(-1)
+    results = [episode(rewards[0], thought=(0, 1)),
+               episode(rewards[1], status="model_protocol_failure" if rewards[1] == 0 else "completed",
+                       thought=(2,), json_ids=())]
+    token_ids = ([0, 1], [2])
+    for result, ids in zip(results, token_ids, strict=True):
+        result.steps[0].thought_logprobs = logprobs[ids].detach().tolist()
+    group = signal(results, advantage_normalization=mode)
+    loss = sum(thought_policy_loss(logprobs[ids], torch.tensor(segment[0].thought_logprobs, dtype=torch.float64), advantage,
+        group_size=2, max_steps=2, thought_tokens=8)
+        for ids, segment, advantage in zip(token_ids, group.segments, group.advantages, strict=True))
+    actual = torch.autograd.grad(loss, logits, retain_graph=True)[0]
+    delta = (rewards[0] - rewards[1]) / 2
+    scale = delta if mode == "centered" else delta / (abs(delta) + 1e-4)
+    oracle = -scale * (logprobs[0] + logprobs[1] - logprobs[2]) / 32
+    expected = torch.autograd.grad(oracle, logits)[0]
+    torch.testing.assert_close(actual, expected, rtol=1e-9, atol=1e-14)
+
+
+def test_unknown_advantage_normalization_is_rejected_even_for_constant_groups():
+    with pytest.raises(ValueError, match="normalization"):
+        signal([episode(0), episode(0)], advantage_normalization="unknown")
 
 
 def test_group_rejects_heldout_or_untyped_token_boundaries():
@@ -117,6 +174,48 @@ def load_trainer():
     trainer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(trainer)
     return trainer
+
+
+@pytest.mark.parametrize("extra,expected", [([], "std"),
+    (["--advantage-normalization", "std"], "std"),
+    (["--advantage-normalization", "centered"], "centered")])
+def test_advantage_normalization_cli_records_mode_without_changing_budgets(monkeypatch, extra, expected):
+    from slime_plugins.dcc.data import Task
+    trainer = load_trainer()
+    task = Task("synthetic-train", "cuad", "train", "Find the clause", document="clause", gold=["clause"])
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    monkeypatch.setattr(trainer, "load_tasks", lambda _: [task])
+    monkeypatch.setattr(trainer, "validate_source", lambda _: None)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("CLI mode checks must not initialize CUDA or load a model")
+    monkeypatch.setattr(torch.cuda, "set_device", forbidden)
+    monkeypatch.setattr(trainer, "load_policy_model", forbidden)
+    observed = []
+    async def capture(args, tasks, plan, world_size, *, web_inputs):
+        config = trainer.configuration(args, plan, tasks, world_size)
+        observed.append(config)
+        assert config["advantage_normalization"] == config["arguments"]["advantage_normalization"] == expected
+        assert config["objective_denominator"] == 4 * 2 * 8
+        assert config["zero_global_gradient_optimizer_step"] is False
+        assert args.clip == .2 and args.learning_rate == 1e-5
+    monkeypatch.setattr(trainer, "train", capture)
+    assert trainer.main(["--model", "CPU-fixture", "--train-data", "unused.jsonl",
+        "--output-dir", "unused-output", "--source-commit", "0" * 40,
+        "--group-size", "4", "--thought-tokens", "8", "--json-tokens", "8", *extra]) == 0
+    assert len(observed) == 1 and not torch.cuda.is_initialized()
+
+
+def test_invalid_advantage_normalization_cli_is_rejected_before_inputs_or_cuda(monkeypatch):
+    trainer = load_trainer()
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Invalid normalization may not read inputs or initialize CUDA")
+    monkeypatch.setattr(trainer, "load_tasks", forbidden)
+    monkeypatch.setattr(torch.cuda, "set_device", forbidden)
+    with pytest.raises(SystemExit) as error:
+        trainer.main(["--model", "CPU-fixture", "--train-data", "unused.jsonl",
+            "--output-dir", "unused-output", "--source-commit", "0" * 40,
+            "--advantage-normalization", "unknown"])
+    assert error.value.code == 2 and not torch.cuda.is_initialized()
 
 
 def test_default_task_plan_matches_frozen_original_training_draws():
@@ -513,8 +612,8 @@ def test_update_readiness_rejects_invalid_timeout(timeout):
         wait_for_update_ranks(timeout_seconds=timeout)
 
 
-@pytest.mark.parametrize("native_batch_size", [4, 2])
-def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration(tmp_path, monkeypatch, native_batch_size):
+@pytest.mark.parametrize("native_batch_size,mode", [(4, None), (2, "std"), (2, "centered")])
+def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration(tmp_path, monkeypatch, native_batch_size, mode):
     from peft import LoraConfig, get_peft_model
     from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
     import slime_plugins.dcc.hf_native_policy as native
@@ -566,6 +665,8 @@ def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration
         max_prompt_tokens=32, max_steps=2, group_size=2, clip=0.2,
         max_grad_norm=1.0, sync_artifacts=False, save_every=1, replay_diagnostic="off",
         native_batch_size=native_batch_size)
+    if mode is not None:
+        args.advantage_normalization = mode
     task = SimpleNamespace(id="task")
     asyncio.run(trainer.train(args, [task], [[0], [0]], 1))
     complete = json.loads((args.output_dir / "training_complete.json").read_text())
@@ -580,6 +681,12 @@ def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration
     assert [r["event"] for r in saves] == ["save_begin", "save_end"] * 4
     assert all(r.get("seconds", 0) >= 0 for r in records)
     steps = [r for r in records if r["event"] == "step"]
+    expected_mode = mode or "std"
+    signals = [r for r in records if r["event"] == "signal"]
+    assert all(r["advantage_normalization"] == expected_mode for r in steps + signals)
+    expected_advantage = .5 if expected_mode == "centered" else .5 / (.5 + 1e-4)
+    assert steps[0]["advantages"] == signals[0]["advantages"] == [expected_advantage, -expected_advantage]
+    assert steps[1]["advantages"] == signals[1]["advantages"] == [0., 0.]
     assert all(r["replay_diagnostic_mode"] == "off" and r["diagnostic_scored_segments"] == 0
                and r["maximum_behavior_replay_logprob_difference"] is None for r in steps)
     assert [r["optimizer_step_applied"] for r in steps] == [True, False]
@@ -593,6 +700,9 @@ def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration
     saved_config = json.loads((args.output_dir / "final/training_config.json").read_text())
     assert saved_config["replay_diagnostic_mode"] == saved_config["arguments"]["replay_diagnostic"] == "off"
     assert saved_config["arguments"]["native_batch_size"] == native_batch_size
+    assert saved_config["advantage_normalization"] == expected_mode
+    if mode is not None:
+        assert saved_config["arguments"]["advantage_normalization"] == expected_mode
     assert not torch.cuda.is_initialized()
 
 

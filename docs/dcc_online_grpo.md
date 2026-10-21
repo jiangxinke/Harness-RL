@@ -45,10 +45,25 @@ is diagnostic because cached sampling and full-sequence replay can differ
 numerically even before an update. Logs distinguish behavior-versus-replay,
 behavior-versus-current and replay-versus-current differences, plus actual
 importance-ratio ranges and clip fractions. Unscored groups record null
-diagnostics. Each group receives one replay and at most one optimizer update. Group advantages retain reward-standard-deviation
-normalization; the token loss uses a fixed group/turn/thought-budget denominator
+diagnostics. Each group receives one replay and at most one optimizer update.
+Group advantages default to reward-standard-deviation normalization; the token loss uses a fixed group/turn/thought-budget denominator
 instead of dividing by observed response lengths. This is fixed-budget GRPO,
 not the complete Dr.GRPO algorithm.
+
+The explicit training switch `--advantage-normalization std|centered` defaults
+to `std`, preserving `(reward - group_mean) / (population_std + 1e-4)`.
+`centered` uses only `reward - group_mean`, with no standard-deviation or
+epsilon division. Both modes retain exact zero advantages for constant groups.
+Configurations and signal/step logs record the selected mode; `reward_std`
+remains the same descriptive statistic in either mode. Replay consumes the
+recorded advantages directly without recomputing a default signal.
+
+Centering changes the relative weights of groups with different reward spreads,
+including small reward differences. It is an optional algorithm ablation,
+not a demonstrated bug fix or performance improvement. Compare it with `std`
+under the same task plan, seed, rewards, budgets, learning rate and evaluation
+harness. Failure handling, native token ownership, the fixed token denominator,
+importance-ratio clipping and zero-gradient Adam skipping are unchanged.
 
 Model truncation and invalid JSON retain their actual sampled thoughts and
 zero rewards in the group. Version `online-native-HF-thought-only-GRPO-v2`

@@ -256,6 +256,7 @@ def configuration(args, plan, tasks, world_size):
             teacher_forced_replay_is_behavior=False),
         policy_loss_tokens="sampled thought only, including actual closing token",
         replay_diagnostic_mode=getattr(args, "replay_diagnostic", "full"),
+        advantage_normalization=getattr(args, "advantage_normalization", "std"),
         json_policy_loss=False, model_failure_reward=0,
         context_failure_handling=context_handling_configuration(),
         distributed_update_readiness=dict(backend="gloo", device_synchronize_before_wait=True,
@@ -403,9 +404,11 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
                 enqueue(rollouts, dict(iteration=iteration, sample=sample,
                                        **result.to_dict(include_tokens=True)))
             signal = group_signal(results, group_size=args.group_size,
-                                  max_steps=args.max_steps, thought_tokens=args.thought_tokens)
+                max_steps=args.max_steps, thought_tokens=args.thought_tokens,
+                advantage_normalization=config["advantage_normalization"])
             record(event="signal", iteration=iteration, rewards=signal.rewards, reward_std=signal.reward_std,
-                   advantages=signal.advantages, discarded_reason=signal.discarded_reason)
+                   advantages=signal.advantages, discarded_reason=signal.discarded_reason,
+                   advantage_normalization=signal.advantage_normalization)
             replay_started = time.monotonic()
             record(event="replay_begin", iteration=iteration)
             report = replay_group(model, signal, scorer, group_size=args.group_size,
@@ -431,6 +434,7 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
                 optimizer_step_applied=applied, global_gradient_norm=norm,
                 task_id=task.id, statuses=[r.status for r in results], rewards=signal.rewards,
                 reward_std=signal.reward_std, advantages=signal.advantages,
+                advantage_normalization=signal.advantage_normalization,
                 discarded_reason=signal.discarded_reason,
                 sampled_thought_tokens=sum(len(s.completion_ids) for group in signal.segments for s in group),
                 seconds=time.monotonic() - begin, **report)
@@ -498,6 +502,8 @@ def main(argv=None):
                         help="Original TRAIN gold strata (default), or a label-blind shuffled deck of all CUAD TRAIN task indices")
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--group-size", type=int, default=2)
+    parser.add_argument("--advantage-normalization", choices=("std", "centered"), default="std",
+                        help="Group advantages: original (reward-mean)/(std+1e-4), or centered reward-mean without std/epsilon division")
     parser.add_argument("--native-batch-size", type=int, default=4,
                         help="Maximum requests per physical native rollout batch on each rank; logical GRPO group size is unchanged")
     parser.add_argument("--native-mixed-schema-batching", action="store_true",

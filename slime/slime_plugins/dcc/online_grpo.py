@@ -33,15 +33,21 @@ class GroupSignal:
     rewards: list[float]
     reward_std: float
     discarded_reason: str | None = None
+    advantage_normalization: str = "std"
 
 
-def group_signal(results, *, group_size, max_steps, thought_tokens):
+def group_signal(results, *, group_size, max_steps, thought_tokens, advantage_normalization="std"):
     """Keep model failures in the group, reject unreliable environment groups.
 
     Do not use EpisodeResult.trainable_steps: evaluation protocol failures are
     intentionally excluded there, but excluding them from this stochastic
     policy objective would condition the baseline on successful generations.
+    ``std`` preserves (reward - mean) / (population_std + 1e-4); ``centered``
+    uses reward - mean. The reported reward standard deviation is descriptive
+    in both modes and is never used to renormalize a centered signal.
     """
+    if advantage_normalization not in ("std", "centered"):
+        raise ValueError("Advantage normalization must be std or centered")
     if len(results) != group_size or group_size < 2:
         raise ValueError("A complete same-task group of at least two episodes is required")
     if any(type(v) is not int or v < 1 for v in (max_steps, thought_tokens)):
@@ -55,7 +61,7 @@ def group_signal(results, *, group_size, max_steps, thought_tokens):
         raise ValueError("Finite rewards in [0, 1] required")
     if unreliable_context_or_environment_group(results):
         return GroupSignal([[] for _ in results], [0.0] * group_size, rewards, 0.0,
-                           "unreliable_environment_or_context_group")
+                           "unreliable_environment_or_context_group", advantage_normalization)
     allowed = {"completed", "max_steps", "invalid_answer", "evidence_failure",
                "model_protocol_failure", "context_budget_failure"}
     all_segments = []
@@ -71,16 +77,19 @@ def group_signal(results, *, group_size, max_steps, thought_tokens):
                 segments.append(ThoughtSegment(prompt, thought, behavior))
         if not segments:
             return GroupSignal([[] for _ in results], [0.0] * group_size, rewards, 0.0,
-                               "missing_sampled_thought_group")
+                               "missing_sampled_thought_group", advantage_normalization)
         all_segments.append(segments)
     # Equal represented rewards must be exactly zero even at float32 values
     # such as 0.1, rather than a subtraction/epsilon amplification artifact.
     if max(rewards) == min(rewards):
-        return GroupSignal(all_segments, [0.0] * group_size, rewards, 0.0)
+        return GroupSignal(all_segments, [0.0] * group_size, rewards, 0.0,
+                           advantage_normalization=advantage_normalization)
     mean = math.fsum(rewards) / group_size
     std = math.sqrt(math.fsum((r - mean) ** 2 for r in rewards) / group_size)
-    advantages = [(r - mean) / (std + 1e-4) for r in rewards]
-    return GroupSignal(all_segments, advantages, rewards, std)
+    advantages = ([(r - mean) / (std + 1e-4) for r in rewards]
+                  if advantage_normalization == "std" else [r - mean for r in rewards])
+    return GroupSignal(all_segments, advantages, rewards, std,
+                       advantage_normalization=advantage_normalization)
 
 
 def thought_policy_loss(current, old, advantage, *, group_size, max_steps, thought_tokens, clip=0.2):
