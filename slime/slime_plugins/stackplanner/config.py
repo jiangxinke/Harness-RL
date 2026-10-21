@@ -214,6 +214,13 @@ class TrainingConfig:
             raise ValueError("training_force_initial_delegate must be a boolean")
         if not 0 < self.top_p <= 1:
             raise ValueError("top_p must be in (0, 1]")
+        if (self.custom_generate_function == "slime_plugins.stackplanner.generate.generate"
+                and not self.train_only and self.top_p != 1.0):
+            raise ValueError(
+                "The built-in StackPlanner rollout currently requires top_p=1.0; "
+                "it does not preserve the exact nucleus token metadata needed for training. "
+                "A custom_generate_function may implement its own top-p replay support."
+            )
         if self.rollout_only and self.train_only:
             raise ValueError("rollout_only and train_only are mutually exclusive")
         if self.train_only and not self.replay_path:
