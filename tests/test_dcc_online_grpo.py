@@ -612,8 +612,9 @@ def test_update_readiness_rejects_invalid_timeout(timeout):
         wait_for_update_ranks(timeout_seconds=timeout)
 
 
-@pytest.mark.parametrize("native_batch_size,mode", [(4, None), (2, "std"), (2, "centered")])
-def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration(tmp_path, monkeypatch, native_batch_size, mode):
+@pytest.mark.parametrize("native_batch_size,mode,reference_kl_beta",
+    [(4, None, None), (2, "std", None), (2, "centered", None), (2, "std", .01)])
+def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration(tmp_path, monkeypatch, native_batch_size, mode, reference_kl_beta):
     from peft import LoraConfig, get_peft_model
     from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
     import slime_plugins.dcc.hf_native_policy as native
@@ -667,6 +668,8 @@ def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration
         native_batch_size=native_batch_size)
     if mode is not None:
         args.advantage_normalization = mode
+    if reference_kl_beta is not None:
+        args.reference_kl_beta = reference_kl_beta
     task = SimpleNamespace(id="task")
     asyncio.run(trainer.train(args, [task], [[0], [0]], 1))
     complete = json.loads((args.output_dir / "training_complete.json").read_text())
@@ -691,6 +694,19 @@ def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration
                and r["maximum_behavior_replay_logprob_difference"] is None for r in steps)
     assert [r["optimizer_step_applied"] for r in steps] == [True, False]
     assert [r["optimizer_updates"] for r in steps] == [1, 1]
+    if reference_kl_beta:
+        from slime_plugins.dcc.reference_kl import VARIANT
+        assert complete["algorithm_variant"] == VARIANT
+        assert complete["reference_kl"]["beta"] == reference_kl_beta
+        assert steps[0]["reference_scored_segments"] == 2
+        assert steps[1]["reference_scored_segments"] == 0
+        assert steps[1]["reference_kl_loss"] == steps[1]["objective_loss"] == 0
+        for step in steps:
+            assert step["objective_loss"] == pytest.approx(step["policy_loss"] + step["reference_kl_loss"])
+            assert step["reference_kl"]["source_commit"] == args.source_commit
+    else:
+        assert complete["algorithm"] == "online-native-HF-thought-only-GRPO-v2"
+        assert all("reference_kl_loss" not in step for step in steps)
     from safetensors.torch import load_file
     first = load_file(args.output_dir / "iteration_0001/adapter_model.safetensors")
     final = load_file(args.output_dir / "final/adapter_model.safetensors")
@@ -701,6 +717,7 @@ def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration
     assert saved_config["replay_diagnostic_mode"] == saved_config["arguments"]["replay_diagnostic"] == "off"
     assert saved_config["arguments"]["native_batch_size"] == native_batch_size
     assert saved_config["advantage_normalization"] == expected_mode
+    assert saved_config["reference_kl"]["beta"] == (reference_kl_beta or 0)
     if mode is not None:
         assert saved_config["arguments"]["advantage_normalization"] == expected_mode
     assert not torch.cuda.is_initialized()

@@ -38,6 +38,9 @@ from slime_plugins.dcc.hf_compute import (COMPUTE_PROFILES, compute_profile_conf
     precision_observation, validate_model_compute_profile)
 from slime_plugins.dcc.online_grpo import (ALGORITHM, apply_policy_update, group_signal,
                                          thought_policy_loss, wait_for_update_ranks)
+from slime_plugins.dcc.reference_kl import (VARIANT as REFERENCE_KL_VARIANT,
+    frozen_base_logprobs, reference_kl_configuration, thought_reference_kl_loss,
+    validate_base_reference_model, validate_reference_kl_beta)
 from slime_plugins.dcc.native_hf_context import context_handling_configuration
 from slime_plugins.dcc.retrieval import load_retrieval_profile
 from slime_plugins.dcc.tools import WebTools
@@ -146,7 +149,8 @@ def make_runner(args):
 
 
 def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens, clip,
-                 replay_diagnostic="full"):
+                 replay_diagnostic="full", reference_kl_beta=0, reference_base_model=None,
+                 reference_source_commit=None):
     """Use actual cached-generation behavior as old; replay is diagnostic only.
 
     Cached generation and teacher-forced replay may differ numerically even
@@ -155,9 +159,12 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
     """
     if replay_diagnostic not in {"full", "first", "off"}:
         raise ValueError("Replay diagnostic must be full, first or off")
+    validate_reference_kl_beta(reference_kl_beta)
     scored = [(segment, advantage)
               for segments, advantage in zip(signal.segments, signal.advantages, strict=True)
               if advantage != 0 for segment in segments]
+    if reference_kl_beta > 0 and scored:
+        validate_base_reference_model(model)
     diagnostics = {}
     if replay_diagnostic != "off":
         model.eval()
@@ -171,10 +178,15 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
                 diagnostics[index] = replay
     model.train()
     loss_total, tokens = 0.0, 0
+    reference_kl_total, objective_total = 0.0, 0.0
     behavior_replay, replay_current = None, None
     behavior_current, diagnostic_tokens = 0.0, 0
     ratio_min, ratio_max, clipped_tokens = None, None, 0
     for index, (segment, advantage) in enumerate(scored):
+        if reference_kl_beta > 0:
+            # Finish and restore the adapter context BEFORE creating a current
+            # graph. Backward below completes before the next reference read.
+            reference = frozen_base_logprobs(model, scorer, segment.prompt_ids, segment.completion_ids)
         current = scorer(model, segment.prompt_ids, segment.completion_ids)
         old = torch.tensor(segment.thought_logprobs, device=current.device, dtype=torch.float32)
         if old.shape != current.shape or not torch.isfinite(old).all() or not torch.isfinite(current).all():
@@ -198,10 +210,20 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
         clipped_tokens += ((ratio < 1 - clip) | (ratio > 1 + clip)).sum().item()
         loss = thought_policy_loss(current, old, advantage,
             group_size=group_size, max_steps=max_steps, thought_tokens=thought_tokens, clip=clip)
-        loss.backward()
+        if reference_kl_beta > 0:
+            kl = thought_reference_kl_loss(current, reference,
+                group_size=group_size, max_steps=max_steps, thought_tokens=thought_tokens)
+            objective = loss + reference_kl_beta * kl
+            if not torch.isfinite(objective):
+                raise FloatingPointError("Non-finite reference-KL online objective; refusing update")
+            objective.backward()
+            reference_kl_total += kl.item()
+            objective_total += objective.item()
+        else:
+            loss.backward()
         loss_total += loss.item()
         tokens += len(segment.completion_ids)
-    return dict(policy_loss=loss_total, scored_segments=len(scored), scored_tokens=tokens,
+    report = dict(policy_loss=loss_total, scored_segments=len(scored), scored_tokens=tokens,
                 replay_diagnostic_mode=replay_diagnostic,
                 replay_diagnostic_scope={"full": "all-nonzero-advantage-segments",
                     "first": "first-nonzero-advantage-segment-per-group", "off": "not-collected"}[replay_diagnostic],
@@ -212,6 +234,15 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
                 maximum_replay_current_logprob_difference=replay_current,
                 importance_ratio_min=ratio_min, importance_ratio_max=ratio_max,
                 importance_ratio_outside_clip_fraction=clipped_tokens / tokens if tokens else None)
+    if reference_kl_beta > 0:
+        report.update(algorithm_variant=REFERENCE_KL_VARIANT,
+            reference_kl=reference_kl_configuration(reference_kl_beta, base_model=reference_base_model,
+                source_commit=reference_source_commit),
+            reference_kl_unweighted_loss=reference_kl_total,
+            reference_kl_loss=reference_kl_beta * reference_kl_total,
+            objective_loss=objective_total,
+            reference_scored_segments=len(scored), reference_scored_tokens=tokens)
+    return report
 
 
 async def collect_group(runner, task, policy, *, group_size, rank):
@@ -239,6 +270,8 @@ async def collect_group(runner, task, policy, *, group_size, rank):
 
 def configuration(args, plan, tasks, world_size):
     web = make_web_tools(args)
+    reference_kl = reference_kl_configuration(getattr(args, "reference_kl_beta", 0),
+        base_model=args.model, source_commit=args.source_commit)
     config = dict(algorithm=ALGORITHM, runtime="independent-HF; not Slime/Megatron",
         source_commit=args.source_commit, world_size=world_size,
         arguments={key: str(value) if isinstance(value, Path) else value
@@ -264,6 +297,10 @@ def configuration(args, plan, tasks, world_size):
         objective_denominator=args.group_size * args.max_steps * args.thought_tokens,
         zero_global_gradient_optimizer_step=False,
         planned_task_ids=[[tasks[index].id for index in row] for row in plan])
+    config["reference_kl"] = reference_kl
+    if reference_kl["enabled"]:
+        config["algorithm"] = ALGORITHM + "+" + REFERENCE_KL_VARIANT
+        config["algorithm_variant"] = REFERENCE_KL_VARIANT
     if getattr(args, "enable_online_web", False):
         from slime_plugins.dcc.online_web import binding_protocols
         config["online_web"] = dict(enabled=True, protocols=binding_protocols(),
@@ -384,6 +421,8 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
         named = [(name, p) for name, p in model.named_parameters() if p.requires_grad]
         if not named or any("lora_" not in name for name, _ in named):
             raise ValueError("Only LoRA parameters may be trained")
+        if config["reference_kl"]["enabled"]:
+            validate_base_reference_model(model)
         parameters = [p for _, p in named]
         if world_size > 1:
             for parameter in parameters:
@@ -462,7 +501,9 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
             record(event="replay_begin", iteration=iteration)
             report = replay_group(model, signal, scorer, group_size=args.group_size,
                 max_steps=args.max_steps, thought_tokens=args.thought_tokens, clip=args.clip,
-                replay_diagnostic=getattr(args, "replay_diagnostic", "full"))
+                replay_diagnostic=getattr(args, "replay_diagnostic", "full"),
+                reference_kl_beta=getattr(args, "reference_kl_beta", 0), reference_base_model=args.model,
+                reference_source_commit=args.source_commit)
             record(event="replay_end", iteration=iteration, seconds=time.monotonic() - replay_started,
                    scored_tokens=report["scored_tokens"], scored_segments=report["scored_segments"])
             if world_size > 1:
@@ -506,10 +547,12 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
         else:
             summaries = [summary]
         if rank == 0:
-            complete = dict(complete=True, algorithm=ALGORITHM, source_commit=args.source_commit,
+            complete = dict(complete=True, algorithm=config["algorithm"], source_commit=args.source_commit,
                 rollout_iterations=args.steps, optimizer_updates=updates, world_size=world_size,
                 has_policy_gradient_updates=updates > 0 and all(s["changed_adapter_tensors"] > 0 for s in summaries),
                 ranks=summaries, benchmark_improvement_claimed=False)
+            if config["reference_kl"]["enabled"]:
+                complete.update(algorithm_variant=REFERENCE_KL_VARIANT, reference_kl=config["reference_kl"])
             with (args.output_dir / "training_complete.json").open("x") as stream:
                 stream.write(json.dumps(complete, indent=2, allow_nan=False) + "\n")
     except BaseException as error:
@@ -580,6 +623,8 @@ def main(argv=None):
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--clip", type=float, default=0.2)
+    parser.add_argument("--reference-kl-beta", type=float, default=0,
+                        help="Opt-in frozen-loaded-base K3 on existing nonzero-advantage thought segments only; 0 preserves original GRPO")
     parser.add_argument("--save-every", type=int, default=2)
     parser.add_argument("--seed", type=int, default=47)
     parser.add_argument("--logprob-backend", choices=("original", "qwen3-moe-chunked"), default="qwen3-moe-chunked")
@@ -590,6 +635,10 @@ def main(argv=None):
     parser.add_argument("--cpu-preflight", action="store_true")
     parser.add_argument("--plan-world-size", type=int, default=1)
     args = parser.parse_args(argv)
+    try:
+        validate_reference_kl_beta(args.reference_kl_beta)
+    except ValueError as error:
+        parser.error(str(error))
     import re
     if not re.fullmatch(r"[0-9a-f]{40}", args.source_commit):
         parser.error("--source-commit requires actual complete committed runtime identity")
