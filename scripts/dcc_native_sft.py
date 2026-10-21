@@ -150,7 +150,8 @@ def identity_from_manifest(value, expected_source):
 
 
 def validate_native_record(bundle, tokenizer, *, expected_identity: NativeIdentity,
-                           original_schema: dict, web_schema_profile=None, cached_sources=None):
+                           original_schema: dict, web_schema_profile=None, cached_sources=None,
+                           cuad_schema_profile=None):
     """Validate physical native IDs, then preserve all accepted-SFT gates."""
     # Local import lets the shared helper reuse the stable NativeIdentity API
     # without changing module-import order or introducing a circular import.
@@ -182,8 +183,29 @@ def validate_native_record(bundle, tokenizer, *, expected_identity: NativeIdenti
     prompt, completion = list(physical.prompt_ids), list(physical.completion_ids)
     public_json = physical.public_json
     # Original validators remain unchanged, including tool replay and grounding.
+    cuad_sources = None
     if record.get("source") == "cuad_train":
-        legacy.validate_cuad_record(record)
+        from dcc_cuad_retrieval import TASKBOUND_UNION_VERSION
+        bound_new = isinstance(collector, dict) and isinstance(collector.get("cuad_retrieval"), dict) \
+            and collector["cuad_retrieval"].get("version") == TASKBOUND_UNION_VERSION
+        trusted_new = isinstance(cuad_schema_profile, CuadSchemaProfile) and cuad_schema_profile.contiguous_sources
+        _require(bound_new == bool(trusted_new),
+                 "Task-bound contiguous CUAD marker requires its explicit trusted profile")
+        if trusted_new:
+            _require(_json_key(cuad_schema_profile.original_schema(record, collector)) == _json_key(original_schema),
+                     "Task-bound contiguous CUAD schema differs from actual public replay")
+            messages = record["messages"]
+            if expected_identity.prompt_history is not None:
+                from slime_plugins.dcc.prompt_history import PromptHistoryConfig, fit_prompt_history
+                config = PromptHistoryConfig.from_dict(expected_identity.prompt_history)
+                if config.enabled:
+                    messages = fit_prompt_history(tokenizer, messages,
+                        max_prompt_tokens=expected_identity.max_prompt_tokens,
+                        max_new_tokens=expected_identity.budget.total_tokens,
+                        max_model_len=expected_identity.max_model_len, config=config).messages
+            cuad_sources = cuad_schema_profile.observed_sources(record, collector, messages=messages,
+                encoded_prompt=tokenizer.decode(prompt, skip_special_tokens=False))
+        legacy.validate_cuad_record(record, _native_cuad_sources=cuad_sources)
         domain, stage = "cuad_tool", "cuad_tool_" + record["stage"]
         category = record["metadata"]["category"]
     else:
@@ -199,9 +221,14 @@ def validate_native_record(bundle, tokenizer, *, expected_identity: NativeIdenti
         fields = (record["grounding_fields"] if domain == "cuad_tool" else
                   [field for row in _strict_json(public_json)["answer"]
                    for name, field in row.items() if name != "citations"])
-        _require(all(" ".join(field.split()) in visible or
+        if cuad_sources is not None:
+            _require(all(any(" ".join(field.split()) in " ".join(source.split())
+                             for source in cuad_sources) for field in fields),
+                     "Final grounding is absent from actual encoded source intervals")
+        else:
+            _require(all(" ".join(field.split()) in visible or
                      " ".join(json.dumps(field, ensure_ascii=False)[1:-1].split()) in visible
-                     for field in fields), "Final grounding is absent from actual encoded prompt")
+                         for field in fields), "Final grounding is absent from actual encoded prompt")
     return legacy.Example(record["task_id"], stage, category, prompt, completion,
                           native_phase_lengths=physical.phase_lengths)
 
@@ -255,6 +282,8 @@ def _iter_validated_native(path, tokenizer, *, expected_identity: NativeIdentity
                 example = validate_native_record(bundle, tokenizer, expected_identity=expected_identity,
                                                  original_schema=schema_resolver(record, bundle.get("collector")),
                                                  web_schema_profile=(getattr(schema_resolver.__self__, "web", None)
+                                                     if isinstance(getattr(schema_resolver, "__self__", None), NativeSchemaProfile) else None),
+                                                 cuad_schema_profile=(getattr(schema_resolver.__self__, "cuad", None)
                                                      if isinstance(getattr(schema_resolver, "__self__", None), NativeSchemaProfile) else None),
                                                  cached_sources=(getattr(schema_resolver.__self__, "cached_sources", None)
                                                      if isinstance(getattr(schema_resolver, "__self__", None), NativeSchemaProfile) else None))
@@ -414,6 +443,18 @@ class CuadSchemaProfile:
             from dcc_cuad_retrieval import retrieval_runner_kwargs
             retrieval_runner_kwargs(self.retrieval)
 
+    @property
+    def contiguous_sources(self):
+        from dcc_cuad_retrieval import TASKBOUND_UNION_VERSION
+        return isinstance(self.retrieval, dict) and self.retrieval.get("version") == TASKBOUND_UNION_VERSION
+
+    def observed_sources(self, record, collector, *, messages=None, encoded_prompt=None):
+        from dcc_cuad_retrieval import contiguous_observed_sources, public_cuad_task
+        _require(self.contiguous_sources, "Explicit task-bound contiguous CUAD profile required")
+        task = public_cuad_task(collector.get("public_task"), task_id=record.get("task_id"))
+        return contiguous_observed_sources(task, record["messages"] if messages is None else messages,
+                                           encoded_prompt=encoded_prompt)
+
     def original_schema(self, record, collector):
         """Use the same zero-label early/last schemas as actual collection."""
         from slime_plugins.dcc.cuad_structured import cuad_action_schema, cuad_final_schema
@@ -433,7 +474,8 @@ class CuadSchemaProfile:
         else:
             _require(not isinstance(collector, dict) or "cuad_retrieval" not in collector,
                      "Legacy CUAD profile cannot strip an explicit retrieval binding")
-        legacy.validate_cuad_record(record)
+        legacy.validate_cuad_record(record, _native_cuad_sources=(
+            self.observed_sources(record, collector) if self.contiguous_sources else None))
         _require(isinstance(collector, dict) and type(collector.get("turn")) is int
                  and 0 <= collector["turn"] < self.max_steps,
                  "Actual CUAD turn is outside trusted collection profile")

@@ -222,7 +222,7 @@ def load_records(path):
     return records
 
 
-def validate_cuad_record(value):
+def validate_cuad_record(value, *, _native_cuad_sources=None):
     if not isinstance(value, dict) or value.get("source") != "cuad_train" or value.get("benchmark") != "cuad" or value.get("split") != "train":
         raise ValueError("CUAD tool records require cuad_train benchmark=cuad split=train")
     if not isinstance(value.get("task_id"), str) or not value["task_id"].strip() or value.get("stage") not in CUAD_STAGES:
@@ -324,7 +324,8 @@ def validate_cuad_record(value):
             spans.append(row["text"])
         if Counter(spans) != Counter(fields):
             raise ValueError("CUAD final target differs from declared grounding spans")
-        sources = [" ".join(text.split()) for text in source_texts]
+        sources = [" ".join(text.split()) for text in
+                   (source_texts if _native_cuad_sources is None else _native_cuad_sources)]
         if any(not any(" ".join(span.split()) in source for source in sources) for span in spans):
             raise ValueError("CUAD final span is absent from actual source observations")
     return value

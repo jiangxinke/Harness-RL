@@ -378,7 +378,7 @@ def final_turn_message(task: Task, evidence: _WebEvidence | None = None) -> dict
 
 
 class EpisodeRunner:
-    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900, retrieval_profile: RetrievalProfile | None = None, auto_read_sources: int = 0, retrieval_context_chars: int = 0, retrieval_max_context_chars: int = 16000, evaluation_temperature: float = 0.0, web_structured_final: bool = False, web_structured_actions: bool = False, web_explicit_review: bool = False, web_navigation_ledger: bool = False, web_research_checkpoints: bool = False, web_data_discovery_guidance: bool = False, web_multi_citation: bool = False, web_cached_rows: bool = False, cuad_structured_actions: bool = False) -> None:
+    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900, retrieval_profile: RetrievalProfile | None = None, auto_read_sources: int = 0, retrieval_context_chars: int = 0, retrieval_max_context_chars: int = 16000, evaluation_temperature: float = 0.0, web_structured_final: bool = False, web_structured_actions: bool = False, web_explicit_review: bool = False, web_navigation_ledger: bool = False, web_research_checkpoints: bool = False, web_data_discovery_guidance: bool = False, web_multi_citation: bool = False, web_cached_rows: bool = False, cuad_structured_actions: bool = False, retrieval_task_bound_expansion: bool = False) -> None:
         from .web_structured import (web_structured_actions_configuration, web_structured_configuration,
                                      web_multi_citation_configuration)
 
@@ -435,16 +435,23 @@ class EpisodeRunner:
         self.initial_chunks = initial_chunks
         self.web_tools_factory = web_tools_factory
         self.timeout_seconds = timeout_seconds
+        if type(retrieval_task_bound_expansion) is not bool:
+            raise ValueError("retrieval_task_bound_expansion must be a boolean")
+        self.retrieval_task_bound_expansion = retrieval_task_bound_expansion
         self.retrieval_profile = retrieval_profile
         self.auto_read_sources = auto_read_sources
         self.retrieval_context_chars = retrieval_context_chars
         self.retrieval_max_context_chars = retrieval_max_context_chars
 
-    def _search_document(self, document_tools: DocumentTools, query: str, top_k: int = 4):
+    def _search_document(self, document_tools: DocumentTools, query: str, top_k: int = 4, *, task: Task | None = None):
+        if self.retrieval_task_bound_expansion and (task is None or task.benchmark != "cuad"
+                or task.document != document_tools.document):
+            raise ValueError("Task-bound retrieval requires the current CUAD public document")
         return search_document(
             document_tools, query, top_k=top_k, profile=self.retrieval_profile,
             context_chars=self.retrieval_context_chars,
             max_context_chars=self.retrieval_max_context_chars,
+            expansion_question=task.prompt if self.retrieval_task_bound_expansion else None,
         )
 
     async def _read_search_sources(self, observation, web_tools, evidence, events, attempted, turn):
@@ -493,7 +500,7 @@ class EpisodeRunner:
     def initial_messages(self, task: Task) -> list[dict[str, str]]:
         messages = [{"role": "system", "content": _system_prompt(task, self.max_steps)}, {"role": "user", "content": task.prompt}]
         if task.benchmark == "cuad" and self.initial_chunks:
-            observation = self._search_document(_document_tools(task.document), task.prompt, top_k=self.initial_chunks)
+            observation = self._search_document(_document_tools(task.document), task.prompt, top_k=self.initial_chunks, task=task)
             messages.append({"role": "user", "content": "Initial contract retrieval (source material):\n" + json.dumps(observation, ensure_ascii=False)})
         return messages
 
@@ -630,7 +637,7 @@ class EpisodeRunner:
                                 if index == self.max_steps - 1:
                                     observation = {"error": "Tools are unavailable on the final turn; no tool was executed."}
                                 elif tool == "search_document" and document_tools:
-                                    observation = self._search_document(document_tools, **arguments)
+                                    observation = self._search_document(document_tools, **arguments, task=task)
                                 elif tool == "read_document" and document_tools:
                                     observation = document_tools.read_document(**arguments)
                                 elif tool == "web_search" and web_tools:

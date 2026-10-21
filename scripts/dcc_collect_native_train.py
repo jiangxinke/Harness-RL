@@ -652,7 +652,8 @@ def select(output, destination, *, labels_path, profile, identity, schema_profil
                             **{name: value for name, value in owner.items() if name != "turn"}},
                         "native_trace": copy.deepcopy(trace)}
                     validate_native_record(bundle, tokenizer, expected_identity=identity, original_schema=schema,
-                                           web_schema_profile=schema_profile.web, cached_sources=cache_sources)
+                                           web_schema_profile=schema_profile.web, cached_sources=cache_sources,
+                                           cuad_schema_profile=schema_profile.cuad)
                     bundles.append(bundle)
                 require(bundles, "Completed episode has no actual requests")
                 segment_keys = [_segment_key(bundle["record"]) for bundle in bundles]

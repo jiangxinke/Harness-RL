@@ -13,6 +13,7 @@ import json
 from jsonschema import Draft202012Validator
 
 VERSION = "cuad-train-retrieval-binding-v1"
+TASKBOUND_UNION_VERSION = "cuad-train-retrieval-taskbound-contiguous-v2"
 OBSERVATION = "Tool observation (source material):\n"
 
 
@@ -38,7 +39,7 @@ def retrieval_runner_kwargs(binding):
 
     require(isinstance(binding, dict) and set(binding) == {
         "version", "initial_chunks", "retrieval_context_chars", "retrieval_max_context_chars",
-        "profile_bytes_base64"} and binding["version"] == VERSION,
+        "profile_bytes_base64"} and binding["version"] in {VERSION, TASKBOUND_UNION_VERSION},
         "Explicit portable CUAD retrieval binding required")
     require(type(binding["initial_chunks"]) is int and 1 <= binding["initial_chunks"] <= 8,
             "CUAD initial_chunks must be an integer between one and eight")
@@ -71,16 +72,20 @@ def retrieval_runner_kwargs(binding):
         actual = parse_retrieval_profile(value)
     except (UnicodeError, binascii.Error, KeyError, TypeError, json.JSONDecodeError) as exc:
         raise ValueError("Malformed portable CUAD retrieval profile bytes") from exc
-    return {"initial_chunks": binding["initial_chunks"], "retrieval_profile": actual,
+    result = {"initial_chunks": binding["initial_chunks"], "retrieval_profile": actual,
             "retrieval_context_chars": binding["retrieval_context_chars"],
             "retrieval_max_context_chars": binding["retrieval_max_context_chars"]}
+    if binding["version"] == TASKBOUND_UNION_VERSION:
+        result["retrieval_task_bound_expansion"] = True
+    return result
 
 
 def make_retrieval_binding(profile_bytes, *, initial_chunks=8, retrieval_context_chars=0,
-                           retrieval_max_context_chars=16000):
+                           retrieval_max_context_chars=16000, taskbound_contiguous=False):
     """Keep exact original UTF-8 bytes; no rewriting or path serialization."""
     require(isinstance(profile_bytes, bytes), "Original retrieval profile bytes required")
-    binding = {"version": VERSION, "initial_chunks": initial_chunks,
+    require(type(taskbound_contiguous) is bool, "Task-bound contiguous option must be boolean")
+    binding = {"version": TASKBOUND_UNION_VERSION if taskbound_contiguous else VERSION, "initial_chunks": initial_chunks,
         "retrieval_context_chars": retrieval_context_chars,
         "retrieval_max_context_chars": retrieval_max_context_chars,
         "profile_bytes_base64": base64.b64encode(profile_bytes).decode("ascii")}
@@ -126,7 +131,7 @@ def public_request_schema(task, messages, *, turn, max_steps, binding):
                 and action.get("tool") in {"search_document", "read_document"},
                 "Bound CUAD historical action must be an original document tool")
         try:
-            observation = (runner._search_document(tools, **action["arguments"])
+            observation = (runner._search_document(tools, **action["arguments"], task=task)
                 if action["tool"] == "search_document" else tools.read_document(**action["arguments"]))
         except (TypeError, ValueError, OverflowError) as exc:
             observation = {"error": f"invalid tool arguments: {exc}"}
@@ -140,3 +145,54 @@ def public_request_schema(task, messages, *, turn, max_steps, binding):
     controls = [final_turn_message(task)] if turn == max_steps - 1 else []
     require(messages[index:] == controls, "Bound CUAD final control or public history differs")
     return cuad_final_schema() if controls else cuad_action_schema()
+
+
+def contiguous_observed_sources(task, messages, *, encoded_prompt=None):
+    """Union only exact public-document intervals actually exposed as source hits.
+
+    No normalization is applied to hit text or offsets. Answer containment uses
+    the pre-existing whitespace normalization in the caller. The optional native
+    decoded prompt additionally proves each complete source observation, including
+    every hit offset and text, survived effective encoding.
+    Caller must first replay the full public request under its trusted binding.
+    """
+    public_cuad_task(task.to_dict())
+    require(isinstance(messages, list), "Observed public messages required")
+    ranges = []
+    visible = encoded_prompt
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        content = message.get("content", "")
+        if content.startswith("Initial contract retrieval (source material):\n"):
+            observation = strict_json(content.split("\n", 1)[1])
+        elif content.startswith(OBSERVATION):
+            observation = strict_json(content[len(OBSERVATION):].split("\nRemaining turns:", 1)[0])
+        else:
+            continue
+        require(isinstance(observation, dict), "Exact CUAD source observation required")
+        if observation.get("error"):
+            continue
+        if visible is not None:
+            # Bind text and offsets together in the exact source-message JSON.
+            # A repeated quotation elsewhere in the prompt is insufficient.
+            require(content in visible,
+                    "Complete CUAD source observation with offsets is absent from actual encoded prompt")
+        require(observation.get("document_length", len(task.document)) == len(task.document),
+                "CUAD observed source document length differs")
+        chunks = observation.get("hits", [observation])
+        require(isinstance(chunks, list), "Exact CUAD observed source chunks required")
+        for chunk in chunks:
+            require(isinstance(chunk, dict), "Exact CUAD observed source hit required")
+            start, end, text = chunk.get("start"), chunk.get("end"), chunk.get("text")
+            require(type(start) is int and type(end) is int and 0 <= start < end <= len(task.document)
+                    and isinstance(text, str) and text == task.document[start:end],
+                    "CUAD hit must exactly match the current public document offset")
+            ranges.append((start, end))
+    merged = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return [task.document[start:end] for start, end in merged]

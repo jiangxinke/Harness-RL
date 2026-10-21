@@ -200,13 +200,19 @@ def search_document(
     document_tools: DocumentTools, query: str, *, top_k: int = 4,
     profile: RetrievalProfile | None = None,
     context_chars: int = 0, max_context_chars: int = 16000,
+    expansion_question: str | None = None,
 ) -> dict[str, Any]:
     """Retrieve the same bounded number of original source chunks.
 
     Unknown questions and categories use the unmodified baseline. Two complete
     BM25 rankings are fused; each chunk appears at most once, with index ties.
     """
-    words = profile.questions.get(_question(query), ()) if profile is not None else ()
+    # The optional anchor is supplied by the current public task, never inferred
+    # from a model query. Preserve query for the original BM25 ranking.
+    anchor = query if expansion_question is None else expansion_question
+    if not isinstance(anchor, str):
+        raise ValueError("Expansion question must be public task text")
+    words = profile.questions.get(_question(anchor), ()) if profile is not None else ()
     if not words:
         observation = document_tools.search_document(query, top_k=top_k)
         return expand_document_context(document_tools, observation, context_chars=context_chars,

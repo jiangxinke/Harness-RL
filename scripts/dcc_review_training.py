@@ -15,6 +15,7 @@ WEB32K_CACHED_PROFILE = "dcc-native-train-profile-web32k-cached-rows-v3"
 WEB32K_CACHED_8K_PROFILE = "dcc-native-train-profile-web32k-cached-rows-8k-thought-v3"
 CACHED_TRAIN_PROFILES = frozenset({WEB32K_CACHED_PROFILE, WEB32K_CACHED_8K_PROFILE})
 CUAD_RETRIEVAL_PROFILE = "dcc-native-train-profile-cuad-retrieval-v1"
+CUAD_TASKBOUND_UNION_PROFILE = "dcc-native-train-profile-cuad-taskbound-contiguous-v2"
 JOINT_CACHED_CUAD_PROFILE = "dcc-native-train-profile-web32k-cached-rows-cuad-retrieval-v3"
 WEB_STAGE_PROFILE = "final50-search25-fetch25"
 WEB_STAGE_CYCLE = ("final", "search", "final", "fetch")
@@ -39,7 +40,7 @@ def strict_json(text):
 def approved_web_profile(profile, profile_class):
     require(isinstance(profile, dict), "Trusted native TRAIN profile must be an object")
     version = profile.get("version")
-    if version in {CUAD_RETRIEVAL_PROFILE, JOINT_CACHED_CUAD_PROFILE}:
+    if version in {CUAD_RETRIEVAL_PROFILE, CUAD_TASKBOUND_UNION_PROFILE, JOINT_CACHED_CUAD_PROFILE}:
         # Reuse an explicitly declared, unchanged Web route. Retrieval belongs
         # to the CUAD harness and never alters the shared model identity.
         route = profile.get("web_profile_version")
@@ -116,7 +117,7 @@ def approved_web_profile(profile, profile_class):
 
 def approved_cuad_profile(profile, profile_class):
     value = profile.get("cuad")
-    bound = profile.get("version") in {CUAD_RETRIEVAL_PROFILE, JOINT_CACHED_CUAD_PROFILE}
+    bound = profile.get("version") in {CUAD_RETRIEVAL_PROFILE, CUAD_TASKBOUND_UNION_PROFILE, JOINT_CACHED_CUAD_PROFILE}
     if value is None:
         require(not bound, "Explicit retrieval profile requires CUAD configuration")
         return None
@@ -125,13 +126,18 @@ def approved_cuad_profile(profile, profile_class):
         keys.add("retrieval")
     require(isinstance(value, dict) and set(value) == keys, "Invalid approved CUAD profile fields")
     require(not bound or isinstance(value["retrieval"], dict), "Explicit CUAD retrieval binding required")
+    if bound:
+        from dcc_cuad_retrieval import VERSION, TASKBOUND_UNION_VERSION
+        expected = TASKBOUND_UNION_VERSION if profile.get("version") == CUAD_TASKBOUND_UNION_PROFILE else VERSION
+        require(value["retrieval"].get("version") == expected,
+                "CUAD binding version differs from explicitly approved harness profile")
     result = profile_class(**value)
     result.validate()
     return result
 
 
 def bind_profile_source(profile, source_root):
-    if profile["version"] in {REVIEW20_PROFILE, WEB32K_PROFILE, WEB32K_CACHED_PROFILE, WEB32K_CACHED_8K_PROFILE, CUAD_RETRIEVAL_PROFILE, JOINT_CACHED_CUAD_PROFILE}:
+    if profile["version"] in {REVIEW20_PROFILE, WEB32K_PROFILE, WEB32K_CACHED_PROFILE, WEB32K_CACHED_8K_PROFILE, CUAD_RETRIEVAL_PROFILE, CUAD_TASKBOUND_UNION_PROFILE, JOINT_CACHED_CUAD_PROFILE}:
         overlay = strict_json((Path(source_root) / ".dcc-training-code-overlay.json").read_text())
         require(overlay.get("overlay_id") == profile["collection_overlay_id"]
                 and overlay.get("explicit_training_profile") == profile["version"]
