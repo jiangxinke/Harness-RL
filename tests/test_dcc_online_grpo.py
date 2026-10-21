@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import asyncio
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -285,7 +286,7 @@ def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration
         quantization="none", learning_rate=0.01, logprob_backend="original",
         head_chunk_tokens=None, thought_tokens=8, json_tokens=8,
         max_prompt_tokens=32, max_steps=2, group_size=2, clip=0.2,
-        max_grad_norm=1.0, sync_artifacts=False, save_every=1)
+        max_grad_norm=1.0, sync_artifacts=False, save_every=1, replay_diagnostic="off")
     task = SimpleNamespace(id="task")
     asyncio.run(trainer.train(args, [task], [[0], [0]], 1))
     complete = json.loads((args.output_dir / "training_complete.json").read_text())
@@ -300,6 +301,8 @@ def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration
     assert [r["event"] for r in saves] == ["save_begin", "save_end"] * 4
     assert all(r.get("seconds", 0) >= 0 for r in records)
     steps = [r for r in records if r["event"] == "step"]
+    assert all(r["replay_diagnostic_mode"] == "off" and r["diagnostic_scored_segments"] == 0
+               and r["maximum_behavior_replay_logprob_difference"] is None for r in steps)
     assert [r["optimizer_step_applied"] for r in steps] == [True, False]
     assert [r["optimizer_updates"] for r in steps] == [1, 1]
     from safetensors.torch import load_file
@@ -308,6 +311,8 @@ def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration
     assert all(torch.equal(first[k], final[k]) for k in first)
     state = torch.load(args.output_dir / "final/training_state.pt", weights_only=False)
     assert state["optimizer_steps"] == 1 and state["rollout_iterations"] == 2
+    saved_config = json.loads((args.output_dir / "final/training_config.json").read_text())
+    assert saved_config["replay_diagnostic_mode"] == saved_config["arguments"]["replay_diagnostic"] == "off"
     assert not torch.cuda.is_initialized()
 
 
@@ -352,7 +357,8 @@ def test_replay_uses_actual_behavior_denominator_and_reports_replay_discrepancy(
     assert report["importance_ratio_outside_clip_fraction"] == 1
 
 
-def test_constant_group_retains_behavior_segments_without_inventing_replay_evidence():
+@pytest.mark.parametrize("mode", ["full", "first", "off"])
+def test_constant_group_retains_behavior_segments_without_inventing_replay_evidence(mode):
     trainer = load_trainer()
     group = signal([episode(0), episode(0, status="model_protocol_failure")])
     assert len(group.segments) == 2 and all(segment for segment in group.segments)
@@ -360,7 +366,114 @@ def test_constant_group_retains_behavior_segments_without_inventing_replay_evide
     def forbidden(*args):
         raise AssertionError("An exact zero group must not replay")
     report = trainer.replay_group(model, group, forbidden,
-        group_size=2, max_steps=2, thought_tokens=8, clip=.2)
+        group_size=2, max_steps=2, thought_tokens=8, clip=.2, replay_diagnostic=mode)
     assert report["scored_tokens"] == 0
     assert report["maximum_behavior_replay_logprob_difference"] is None
     assert report["importance_ratio_min"] is None
+    assert report["replay_diagnostic_mode"] == mode
+    assert report["diagnostic_scored_segments"] == report["diagnostic_scored_tokens"] == 0
+
+
+def test_replay_diagnostic_modes_preserve_clipped_categorical_loss_and_gradients():
+    """Actual-old numerical drift clips both signs; only diagnostics get skipped."""
+    trainer = load_trainer()
+    logits = torch.tensor([-.3, .1, -.2, .4])
+    current = logits.log_softmax(0)
+    ratios = [1.4, .7, .7, 1.4]
+    old = [float(current[i]) - math.log(ratio) for i, ratio in enumerate(ratios)]
+    segments = [SimpleNamespace(prompt_ids=[10 + i], completion_ids=[i],
+                                thought_logprobs=[old[i]]) for i in range(4)]
+    group = SimpleNamespace(segments=[segments[:2], segments[2:]], advantages=[1., -1.])
+    # Pos ratio1.4 and neg ratio.7 are clipped constants. The remaining two
+    # derivatives are -.7*dlogp[1]/4 and +1.4*dlogp[3]/4.
+    expected_gradient = -.7 * logits.softmax(0)
+    expected_gradient[1] -= .7
+    expected_gradient[3] += 1.4
+    expected_gradient /= 4
+    reports, gradients = {}, {}
+    for mode, diagnostic_count in [("full", 4), ("first", 1), ("off", 0)]:
+        model = torch.nn.Linear(1, 4, bias=False)
+        with torch.no_grad():
+            model.weight[:, 0].copy_(logits)
+        calls = []
+        def scorer(value, prompt, completion):
+            index = completion[0]
+            calls.append((value.training, torch.is_grad_enabled(), index))
+            # Deliberately distinct diagnostic numerics. They must never be
+            # substituted for the actual generation behavior denominator.
+            delta = .04 * (index + 1) if not value.training else 0.
+            return value.weight[:, 0].log_softmax(0)[[index]] + delta
+        report = trainer.replay_group(model, group, scorer, group_size=2,
+            max_steps=2, thought_tokens=1, clip=.2, replay_diagnostic=mode)
+        assert len(calls) == 4 + diagnostic_count
+        assert sum(not training and not grad for training, grad, _ in calls) == diagnostic_count
+        assert [(grad, index) for training, grad, index in calls if training] == [(True, i) for i in range(4)]
+        assert report["scored_segments"] == report["scored_tokens"] == 4
+        assert report["diagnostic_scored_segments"] == report["diagnostic_scored_tokens"] == diagnostic_count
+        assert report["replay_diagnostic_mode"] == mode
+        assert report["policy_loss"] == pytest.approx(.075, abs=1e-7)
+        assert report["importance_ratio_min"] == pytest.approx(.7)
+        assert report["importance_ratio_max"] == pytest.approx(1.4)
+        assert report["importance_ratio_outside_clip_fraction"] == 1.
+        assert report["maximum_behavior_current_logprob_difference"] == pytest.approx(-math.log(.7))
+        if mode == "off":
+            assert report["maximum_behavior_replay_logprob_difference"] is None
+            assert report["maximum_replay_current_logprob_difference"] is None
+            assert report["replay_diagnostic_scope"] == "not-collected"
+        else:
+            assert report["maximum_replay_current_logprob_difference"] == pytest.approx(.16 if mode == "full" else .04)
+            assert report["replay_diagnostic_scope"] == ("all-nonzero-advantage-segments" if mode == "full"
+                else "first-nonzero-advantage-segment-per-group")
+        gradients[mode] = model.weight.grad[:, 0]
+        torch.testing.assert_close(gradients[mode], expected_gradient, rtol=1e-6, atol=1e-7)
+        reports[mode] = report
+    assert torch.equal(gradients["full"], gradients["first"]) and torch.equal(gradients["full"], gradients["off"])
+    assert len({report["policy_loss"] for report in reports.values()}) == 1
+    assert not torch.cuda.is_initialized()
+
+
+def test_first_diagnostic_uses_first_nonzero_advantage_segment_only():
+    trainer = load_trainer()
+    ignored = SimpleNamespace(prompt_ids=[99], completion_ids=[99], thought_logprobs=[-1.])
+    active = SimpleNamespace(prompt_ids=[1], completion_ids=[2], thought_logprobs=[-1.])
+    group = SimpleNamespace(segments=[[ignored], [active]], advantages=[0., 1.])
+    model = torch.nn.Linear(1, 1, bias=False)
+    with torch.no_grad():
+        model.weight.fill_(-1.)
+    calls = []
+    def scorer(value, prompt, completion):
+        assert prompt == [1] and completion == [2]
+        calls.append((value.training, torch.is_grad_enabled()))
+        return value.weight.reshape(1)
+    report = trainer.replay_group(model, group, scorer, group_size=2,
+        max_steps=1, thought_tokens=1, clip=.2, replay_diagnostic="first")
+    assert calls == [(False, False), (True, True)]
+    assert report["diagnostic_scored_segments"] == report["scored_segments"] == 1
+
+
+@pytest.mark.parametrize("mode", ["full", "first", "off"])
+@pytest.mark.parametrize("failure", ["behavior_nan", "behavior_shape", "current_nan", "ratio_inf"])
+def test_every_diagnostic_mode_retains_actual_behavior_current_and_ratio_checks(mode, failure):
+    trainer = load_trainer()
+    model = torch.nn.Linear(1, 1, bias=False)
+    with torch.no_grad():
+        model.weight.fill_(-1.)
+    behavior = {"behavior_nan": [float("nan")], "behavior_shape": [], "current_nan": [-1.], "ratio_inf": [-1000.]}[failure]
+    segment = SimpleNamespace(prompt_ids=[1], completion_ids=[2], thought_logprobs=behavior)
+    group = SimpleNamespace(segments=[[segment]], advantages=[1.])
+    def scorer(value, prompt, completion):
+        result = value.weight.reshape(1)
+        return result * float("nan") if failure == "current_nan" and value.training else result
+    with pytest.raises(FloatingPointError):
+        trainer.replay_group(model, group, scorer, group_size=2,
+            max_steps=1, thought_tokens=1, clip=.2, replay_diagnostic=mode)
+
+
+def test_invalid_replay_diagnostic_fails_before_any_forward():
+    trainer = load_trainer()
+    model = torch.nn.Linear(1, 1)
+    def forbidden(*args):
+        raise AssertionError("Invalid mode may not run a decoder")
+    with pytest.raises(ValueError, match="full, first or off"):
+        trainer.replay_group(model, signal([episode(1), episode(0)]), forbidden,
+            group_size=2, max_steps=2, thought_tokens=8, clip=.2, replay_diagnostic="unknown")

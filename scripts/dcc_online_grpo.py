@@ -105,37 +105,51 @@ def make_runner(args):
     )
 
 
-def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens, clip):
+def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens, clip,
+                 replay_diagnostic="full"):
     """Use actual cached-generation behavior as old; replay is diagnostic only.
 
     Cached generation and teacher-forced replay may differ numerically even
     before an update. Report that discrepancy; never reconstruct the behavior
     denominator from a teacher-forced snapshot.
     """
-    scored = []
-    model.eval()
-    with torch.no_grad():
-        for segments, advantage in zip(signal.segments, signal.advantages, strict=True):
-            if advantage == 0:
-                continue
-            for segment in segments:
+    if replay_diagnostic not in {"full", "first", "off"}:
+        raise ValueError("Replay diagnostic must be full, first or off")
+    scored = [(segment, advantage)
+              for segments, advantage in zip(signal.segments, signal.advantages, strict=True)
+              if advantage != 0 for segment in segments]
+    diagnostics = {}
+    if replay_diagnostic != "off":
+        model.eval()
+        with torch.no_grad():
+            selected = scored if replay_diagnostic == "full" else scored[:1]
+            for index, (segment, _) in enumerate(selected):
                 replay = scorer(model, segment.prompt_ids, segment.completion_ids).detach()
                 old = torch.tensor(segment.thought_logprobs, device=replay.device, dtype=torch.float32)
                 if old.shape != replay.shape or not torch.isfinite(old).all() or not torch.isfinite(replay).all():
                     raise FloatingPointError("Aligned finite behavior and diagnostic replay scores required")
-                scored.append((segment, old, replay, advantage))
+                diagnostics[index] = replay
     model.train()
     loss_total, tokens = 0.0, 0
-    behavior_replay, behavior_current, replay_current = 0.0, 0.0, 0.0
+    behavior_replay, replay_current = None, None
+    behavior_current, diagnostic_tokens = 0.0, 0
     ratio_min, ratio_max, clipped_tokens = None, None, 0
-    for segment, old, replay, advantage in scored:
+    for index, (segment, advantage) in enumerate(scored):
         current = scorer(model, segment.prompt_ids, segment.completion_ids)
-        if not torch.isfinite(current).all():
-            raise FloatingPointError("Non-finite current thought scores")
+        old = torch.tensor(segment.thought_logprobs, device=current.device, dtype=torch.float32)
+        if old.shape != current.shape or not torch.isfinite(old).all() or not torch.isfinite(current).all():
+            raise FloatingPointError("Aligned finite actual behavior and current thought scores required")
         observed = current.detach()
-        behavior_replay = max(behavior_replay, (replay - old).abs().max().item())
         behavior_current = max(behavior_current, (observed - old).abs().max().item())
-        replay_current = max(replay_current, (observed - replay).abs().max().item())
+        if index in diagnostics:
+            replay = diagnostics[index]
+            if old.shape != replay.shape or replay.device != current.device:
+                raise FloatingPointError("Aligned behavior, current and diagnostic replay scores required")
+            difference = (replay - old).abs().max().item()
+            behavior_replay = max(behavior_replay if behavior_replay is not None else difference, difference)
+            difference = (observed - replay).abs().max().item()
+            replay_current = max(replay_current if replay_current is not None else difference, difference)
+            diagnostic_tokens += len(segment.completion_ids)
         ratio = (observed - old).exp()
         if not torch.isfinite(ratio).all():
             raise FloatingPointError("Non-finite actual behavior importance ratio")
@@ -148,10 +162,14 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
         loss_total += loss.item()
         tokens += len(segment.completion_ids)
     return dict(policy_loss=loss_total, scored_segments=len(scored), scored_tokens=tokens,
+                replay_diagnostic_mode=replay_diagnostic,
+                replay_diagnostic_scope={"full": "all-nonzero-advantage-segments",
+                    "first": "first-nonzero-advantage-segment-per-group", "off": "not-collected"}[replay_diagnostic],
+                diagnostic_scored_segments=len(diagnostics), diagnostic_scored_tokens=diagnostic_tokens,
                 old_logprob_source="actual-sampled-thought-behavior",
-                maximum_behavior_replay_logprob_difference=behavior_replay if tokens else None,
+                maximum_behavior_replay_logprob_difference=behavior_replay,
                 maximum_behavior_current_logprob_difference=behavior_current if tokens else None,
-                maximum_replay_current_logprob_difference=replay_current if tokens else None,
+                maximum_replay_current_logprob_difference=replay_current,
                 importance_ratio_min=ratio_min, importance_ratio_max=ratio_max,
                 importance_ratio_outside_clip_fraction=clipped_tokens / tokens if tokens else None)
 
@@ -193,6 +211,7 @@ def configuration(args, plan, tasks, world_size):
             old_logprob_source="streaming-generation-raw-logits-v1",
             teacher_forced_replay_is_behavior=False),
         policy_loss_tokens="sampled thought only, including actual closing token",
+        replay_diagnostic_mode=getattr(args, "replay_diagnostic", "full"),
         json_policy_loss=False, model_failure_reward=0,
         objective_denominator=args.group_size * args.max_steps * args.thought_tokens,
         zero_global_gradient_optimizer_step=False,
@@ -338,7 +357,8 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
             replay_started = time.monotonic()
             record(event="replay_begin", iteration=iteration)
             report = replay_group(model, signal, scorer, group_size=args.group_size,
-                max_steps=args.max_steps, thought_tokens=args.thought_tokens, clip=args.clip)
+                max_steps=args.max_steps, thought_tokens=args.thought_tokens, clip=args.clip,
+                replay_diagnostic=getattr(args, "replay_diagnostic", "full"))
             record(event="replay_end", iteration=iteration, seconds=time.monotonic() - replay_started,
                    scored_tokens=report["scored_tokens"], scored_segments=report["scored_segments"])
             apply_started = time.monotonic()
@@ -438,6 +458,8 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=47)
     parser.add_argument("--logprob-backend", choices=("original", "qwen3-moe-chunked"), default="qwen3-moe-chunked")
     parser.add_argument("--head-chunk-tokens", type=int)
+    parser.add_argument("--replay-diagnostic", choices=("full", "first", "off"), default="full",
+                        help="Extra eval/no-grad replay diagnostics: every segment, first segment per group, or none; actual behavior/current loss is unchanged")
     parser.add_argument("--sync-artifacts", action="store_true")
     parser.add_argument("--cpu-preflight", action="store_true")
     parser.add_argument("--plan-world-size", type=int, default=1)

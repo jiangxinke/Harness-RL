@@ -85,3 +85,20 @@ thought/JSON/turn budgets to bound policy work. A queue timeout alone does not
 show a model error. Requests cancelled while waiting for another schema group
 are checked again before submission and do not start new generation. Already
 running work is still drained and retained with its actual ownership.
+
+`--replay-diagnostic full|first|off` controls only the extra evaluation-mode,
+no-gradient decoder forwards used to compare teacher-forced replay with the
+actual sampled behavior. The default `full` retains the existing forwards for
+every nonzero-advantage segment. `first` measures only the first such segment
+per group; `off` performs none. Every mode still scores every nonzero-advantage
+thought with gradients, checks its complete actual behavior/current alignment
+and finite importance ratios, and applies the same clipped policy loss.
+Teacher-forced replay never becomes the old-policy denominator.
+
+Training arguments and configuration retain the diagnostic mode. Step records
+also identify its scope and `diagnostic_scored_segments`/`diagnostic_scored_tokens`,
+separately from all loss-scored segments/tokens. Unmeasured diagnostic maxima
+are null; `first` maxima describe that one segment, not the entire group.
+Actual behavior-versus-current maxima and ratio ranges/clip fractions retain
+their complete loss-scored coverage in every mode. This saves diagnostic work;
+it does not establish a training-quality improvement or measured GPU speedup.
