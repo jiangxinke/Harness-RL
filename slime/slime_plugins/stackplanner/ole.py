@@ -75,9 +75,13 @@ def select_prompt_groups(
         group_rewards[key[0]].append(rewards[0])
         valid_episodes.add(key)
 
-    scores = {group: float(np.mean(rewards) + config.ole_k * np.std(rewards)) for group, rewards in group_rewards.items()}
+    scores = {}
+    for group, rewards in group_rewards.items():
+        values = np.asarray(rewards, dtype=np.float32)
+        scores[group] = float(np.float32(np.mean(values) + config.ole_k * np.std(values)))
     threshold = float(state.get("threshold", config.ole_init_threshold))
-    # Match OLE's float32 quantile input and population (ddof=0) deviation.
+    # Use one FP32 score representation for comparisons and the next quantile.
+    # Otherwise a rounded-up threshold can reject an identical later group.
     next_threshold = threshold
     if scores:
         score_values = np.array(list(scores.values()), dtype=np.float32)
