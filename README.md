@@ -202,7 +202,11 @@ directory.
 
 slime's in-training evaluation uses greedy sampling (`temperature=0`,
 `top_p=1`) for both actor and frozen roles. Training keeps the configured
-sampling parameters. The upstream branch review and regression commands are
+temperature. The built-in StackPlanner rollout requires `top_p=1`: its adapter
+does not yet retain the exact nucleus-token metadata required by slime's
+training converter. Other values are rejected during configuration, before
+generation. Custom generators can supply their own top-p replay support.
+The upstream branch review and regression commands are
 recorded in [the bug-fix review](docs/upstream-bugfix-review.md).
 
 Generate predictions with the production StackPlanner graph:
