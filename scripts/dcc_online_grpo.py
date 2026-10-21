@@ -30,6 +30,7 @@ from dcc_training_io import prepare_training_output, publish_checkpoint
 from dcc_train import validate_grpo_dropout
 from slime_plugins.dcc import EpisodeRunner, load_tasks
 from slime_plugins.dcc.cuad_reasoning import cuad_concise_reasoning_configuration
+from slime_plugins.dcc.web_auto_read import auto_read_follow_docs_configuration
 from slime_plugins.dcc.durable_journal import OrderedDurableJSONLWriter, close_durable_journals
 from slime_plugins.dcc.hf_chunked_logprobs import resolve_logprob_backend
 from slime_plugins.dcc.hf_policy import encode_messages, load_policy_model
@@ -135,6 +136,7 @@ def make_runner(args):
         cuad_structured_actions=True,
         cuad_concise_reasoning=getattr(args, "cuad_concise_reasoning", False),
         auto_read_sources=args.auto_read_sources,
+        auto_read_follow_docs=getattr(args, "auto_read_follow_docs", False),
         web_tools_factory=partial(make_web_tools, args),
         web_structured_actions=True, web_structured_final=True,
         web_explicit_review=True, web_navigation_ledger=True,
@@ -243,6 +245,7 @@ def configuration(args, plan, tasks, world_size):
                    for key, value in vars(args).items()},
         compute_profile=compute_profile_configuration(getattr(args, "compute_profile", "legacy")),
         cuad_concise_reasoning=cuad_concise_reasoning_configuration(getattr(args, "cuad_concise_reasoning", False)),
+        auto_read_follow_docs=auto_read_follow_docs_configuration(getattr(args, "auto_read_follow_docs", False)),
         web_tool_limits=dict(max_page_chars=web.max_page_chars,
                              max_text_window_chars=web.max_text_window_chars),
         training_split_only=True, sft_auxiliary=False, offline_preferences=False,
@@ -512,6 +515,8 @@ def main(argv=None):
     parser.add_argument("--cuad-concise-reasoning", action="store_true",
                         help="Opt in to brief CUAD reasoning using only observed source identifiers/character ranges; answer spans and schema are unchanged")
     parser.add_argument("--auto-read-sources", type=int, choices=(0, 1, 2), default=2)
+    parser.add_argument("--auto-read-follow-docs", action="store_true",
+                        help="Within existing automatic-read budgets, prioritize one observed same-origin Help/API/documentation link per search")
     parser.add_argument("--web-text-window-chars", type=int,
                         help="Optional positive fetch_url body-window limit; cached source and original cached-row JSON budget are unchanged")
     parser.add_argument("--lora-rank", type=int, default=16)

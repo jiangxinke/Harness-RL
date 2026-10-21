@@ -384,7 +384,7 @@ def final_turn_message(task: Task, evidence: _WebEvidence | None = None) -> dict
 
 
 class EpisodeRunner:
-    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900, retrieval_profile: RetrievalProfile | None = None, auto_read_sources: int = 0, retrieval_context_chars: int = 0, retrieval_max_context_chars: int = 16000, evaluation_temperature: float = 0.0, web_structured_final: bool = False, web_structured_actions: bool = False, web_explicit_review: bool = False, web_navigation_ledger: bool = False, web_research_checkpoints: bool = False, web_data_discovery_guidance: bool = False, web_multi_citation: bool = False, web_cached_rows: bool = False, cuad_structured_actions: bool = False, retrieval_task_bound_expansion: bool = False, cuad_concise_reasoning: bool = False) -> None:
+    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900, retrieval_profile: RetrievalProfile | None = None, auto_read_sources: int = 0, auto_read_follow_docs: bool = False, retrieval_context_chars: int = 0, retrieval_max_context_chars: int = 16000, evaluation_temperature: float = 0.0, web_structured_final: bool = False, web_structured_actions: bool = False, web_explicit_review: bool = False, web_navigation_ledger: bool = False, web_research_checkpoints: bool = False, web_data_discovery_guidance: bool = False, web_multi_citation: bool = False, web_cached_rows: bool = False, cuad_structured_actions: bool = False, retrieval_task_bound_expansion: bool = False, cuad_concise_reasoning: bool = False) -> None:
         from .web_structured import (web_structured_actions_configuration, web_structured_configuration,
                                      web_multi_citation_configuration)
 
@@ -448,6 +448,9 @@ class EpisodeRunner:
         self.retrieval_task_bound_expansion = retrieval_task_bound_expansion
         self.retrieval_profile = retrieval_profile
         self.auto_read_sources = auto_read_sources
+        from .web_auto_read import auto_read_follow_docs_configuration
+
+        self.auto_read_follow_docs = auto_read_follow_docs_configuration(auto_read_follow_docs)["enabled"]
         self.retrieval_context_chars = retrieval_context_chars
         self.retrieval_max_context_chars = retrieval_max_context_chars
 
@@ -471,9 +474,12 @@ class EpisodeRunner:
             return observation
         sources = []
         successful = 0
-        for row in rows:
+        candidates = [(row, None) for row in rows]
+        followed_documentation = False
+        while candidates:
             if successful >= self.auto_read_sources or len(attempted) >= 4:
                 break
+            row, parent = candidates.pop(0)
             url = row.get("url") if isinstance(row, dict) else None
             if not evidence._source_url(url):
                 continue
@@ -486,12 +492,26 @@ class EpisodeRunner:
                 page = await web_tools.fetch_url(**arguments)
             except (InfrastructureError, TimeoutError, ConnectionError) as exc:
                 page = {"url": url, "error": str(exc)}
-            events.append({"turn": turn, "tool": "fetch_url", "arguments": arguments,
-                           "observation": page, "automatic": True, "trigger": "web_search"})
+            event = {"turn": turn, "tool": "fetch_url", "arguments": arguments,
+                     "observation": page, "automatic": True, "trigger": "web_search"}
+            if parent is not None:
+                event.update(trigger="observed_documentation_link", parent_url=parent)
+            events.append(event)
             before = evidence.fetches
             evidence.observe("fetch_url", page)
             successful += evidence.fetches - before
             sources.append(page)
+            if (self.auto_read_follow_docs and not followed_documentation and parent is None
+                    and evidence.fetches > before and successful < self.auto_read_sources
+                    and len(attempted) < 4):
+                from .web_auto_read import observed_documentation_link
+
+                target = observed_documentation_link(page, excluded=evidence.fetched_sources | attempted)
+                if target is not None:
+                    # One hop within the existing success/attempt budgets. A
+                    # failed documentation read still consumes its attempt.
+                    candidates.insert(0, ({"url": target}, page["url"]))
+                    followed_documentation = True
         return {
             **observation,
             "auto_read_sources": sources,

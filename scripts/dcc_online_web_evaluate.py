@@ -109,6 +109,7 @@ def runner_configuration(args):
     from slime_plugins.dcc.web_data_discovery import web_data_discovery_configuration
     from slime_plugins.dcc.web_rows import web_cached_rows_configuration
     from slime_plugins.dcc.web_whitespace import web_bounded_whitespace_configuration
+    from slime_plugins.dcc.web_auto_read import auto_read_follow_docs_configuration
 
     runner = make_runner(args)
     scalar = ("max_steps", "max_new_tokens", "temperature", "evaluation_temperature", "initial_chunks",
@@ -116,6 +117,7 @@ def runner_configuration(args):
               "retrieval_task_bound_expansion", "cuad_structured_actions")
     return {"shared_factory": "dcc_online_grpo.make_runner", "episode_prompt": EPISODE_PROMPT_VERSION,
             "cuad_concise_reasoning": cuad_concise_reasoning_configuration(runner.cuad_concise_reasoning),
+            "auto_read_follow_docs": auto_read_follow_docs_configuration(runner.auto_read_follow_docs),
             "prompt_encoding": PROMPT_ENCODING_VERSION, "evidence_guard": WIDESEARCH_EVIDENCE_GUARD_VERSION,
             "web_reader": WEB_READER_VERSION, **{key: getattr(runner, key) for key in scalar},
             "retrieval_profile": asdict(runner.retrieval_profile) if runner.retrieval_profile else None,

@@ -26,7 +26,7 @@ def wide():
 
 @pytest.fixture
 def transport(monkeypatch):
-    state = {"results": URLS[:3], "errors": set(), "empty": set(), "queries": {}, "calls": []}
+    state = {"results": URLS[:3], "errors": set(), "empty": set(), "queries": {}, "calls": [], "pages": {}}
 
     def request(url, **kwargs):
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["q"][0]
@@ -38,6 +38,8 @@ def transport(monkeypatch):
         state["calls"].append(("fetch", url))
         if url in state["errors"]:
             raise tools.InfrastructureError("source retrieval failed")
+        if url in state["pages"]:
+            return state["pages"][url].encode(), "text/html", "utf-8"
         text = "" if url in state["empty"] else "Alpha authoritative page evidence. " * 4
         return text.encode(), "text/plain", "utf-8"
 
@@ -46,7 +48,7 @@ def transport(monkeypatch):
     return state
 
 
-def run(actions, *, auto=1, item=None, default=False):
+def run(actions, *, auto=1, item=None, default=False, follow_docs=None):
     iterator, prompts = iter(actions), []
 
     async def policy(messages, **kwargs):
@@ -54,6 +56,8 @@ def run(actions, *, auto=1, item=None, default=False):
         return PolicyCompletion(json.dumps(next(iterator)), [1], [2], [-0.1])
 
     options = {} if default else {"auto_read_sources": auto}
+    if follow_docs is not None:
+        options["auto_read_follow_docs"] = follow_docs
     runner = EpisodeRunner(max_steps=len(actions), web_tools_factory=lambda: tools.WebTools(backend="duckduckgo_lite", max_page_chars=40), **options)
     return asyncio.run(runner.run(item or wide(), policy, evaluation=True)), prompts
 
@@ -208,3 +212,73 @@ def test_unreadable_results_do_not_exhaust_success_target_or_exceed_total_attemp
     assert seen["auto_read_attempts_remaining"] == 0
     assert result.status == "completed"
     assert result.metrics["evidence_guard"]["successful_fetches"] == 1
+
+
+def portal(*links):
+    return '<html><body><p>Alpha public catalog source and navigation.</p>' + ''.join(
+        f'<a href="{url}">{title}</a>' for url, title in links) + '</body></html>'
+
+
+@pytest.mark.parametrize("value", [0, 1, "true", None])
+def test_follow_docs_requires_an_explicit_boolean(value):
+    with pytest.raises(ValueError, match="auto_read_follow_docs must be a boolean"):
+        EpisodeRunner(auto_read_follow_docs=value)
+
+
+def test_follow_docs_default_off_preserves_actual_sources_observations_and_events(transport):
+    docs = "https://example.org/help"
+    transport["pages"][URLS[0]] = portal((docs, "Help"))
+    actions = [SEARCH, final()]
+    implicit, left = run(actions, auto=2)
+    explicit, right = run(actions, auto=2, follow_docs=False)
+    assert implicit.to_dict() == explicit.to_dict() and left == right
+    assert [value for kind, value in transport["calls"] if kind == "fetch"] == URLS[:2] * 2
+
+
+def test_follow_docs_reads_observed_help_before_next_result_without_extra_turns(transport):
+    docs = "https://example.org/catalog/service"
+    transport["pages"][URLS[0]] = portal((docs, "Help"))
+    transport["pages"][docs] = portal(("https://example.org/nested-api", "API documentation"))
+    result, prompts = run([SEARCH, final(docs)], auto=2, follow_docs=True)
+    assert [value for kind, value in transport["calls"] if kind == "fetch"] == [URLS[0], docs]
+    assert result.status == "completed" and len(result.steps) == 2
+    assert result.metrics["evidence_guard"]["successful_fetches"] == 2
+    followup = result.tool_events[-1]
+    assert followup["trigger"] == "observed_documentation_link" and followup["parent_url"] == URLS[0]
+    assert followup["arguments"] == {"url": docs, "start": 0}
+    assert observation(prompts[-1])["auto_read_attempts_remaining"] == 2
+
+
+def test_follow_docs_filters_origin_self_and_already_read_fragment_aliases(transport):
+    prior, docs = "https://example.org/prior-api", "https://example.org/documentation"
+    transport["pages"][URLS[0]] = portal(
+        (prior + "#section", "API"), (URLS[0] + "#help", "Help"),
+        ("https://different.example.org/help", "Help"), ("http://example.org/help", "Help"),
+        ("https://example.org:444/help", "Help"), ("https://user@example.org/help", "Help"),
+        (docs, "Documentation"), (docs, "Documentation"))
+    actions = [{"tool": "fetch_url", "arguments": {"url": prior}}, SEARCH, SEARCH, final(docs)]
+    result, _ = run(actions, auto=2, follow_docs=True)
+    automatic = [event["arguments"]["url"] for event in result.tool_events if event.get("automatic")]
+    assert automatic == [URLS[0], docs, URLS[1], URLS[2]]
+    assert len(automatic) == 4 and result.status == "completed"
+
+
+def test_failed_followup_consumes_original_episode_cap_and_is_not_evidence(transport):
+    docs = "https://example.org/help"
+    transport["pages"][URLS[0]] = portal((docs, "Help"))
+    transport["results"] = URLS
+    transport["errors"] = {docs, *URLS[1:]}
+    result, prompts = run([SEARCH, SEARCH, final()], auto=2, follow_docs=True)
+    automatic = [event for event in result.tool_events if event.get("automatic")]
+    assert [event["arguments"]["url"] for event in automatic] == [URLS[0], docs, URLS[1], URLS[2]]
+    assert automatic[1]["observation"].get("error")
+    assert observation(prompts[1])["auto_read_attempts_remaining"] == 0
+    assert observation(prompts[2])["auto_read_sources"] == []
+    assert result.metrics["evidence_guard"]["successful_fetches"] == 1
+
+
+@pytest.mark.parametrize("auto", [0, 1])
+def test_follow_docs_does_not_raise_configured_success_target(transport, auto):
+    transport["pages"][URLS[0]] = portal(("https://example.org/help", "Help"))
+    result, _ = run([SEARCH, final()], auto=auto, follow_docs=True)
+    assert len([event for event in result.tool_events if event.get("automatic")]) == auto

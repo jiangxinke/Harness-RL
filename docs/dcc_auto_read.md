@@ -23,6 +23,17 @@ URLs. Returned errors stay visible and cannot satisfy the successful-fetch
 evidence check. A valid final still needs search, nonempty fetched text, and
 observed citations; failed episodes remain in the evaluation denominator.
 
+The online GRPO and HF evaluation entry points also accept
+`--auto-read-follow-docs`, disabled by default. With `--auto-read-sources 2`, a
+successfully read page can contribute one observed, same-origin Help, API, or
+documentation link ahead of the next search result. The link is read through
+the normal fetcher and does not recursively trigger another follow-up. This
+uses the existing successful-page and four-attempt budgets; failed follow-ups
+also consume an attempt. These events use
+`trigger=observed_documentation_link` and record `parent_url`. Enable the same
+setting for base and adapter comparisons. This is a navigation candidate;
+its availability does not establish a benchmark improvement.
+
 The option adds page text to the prompt and can increase context use and HTTP
 latency. Start with one source and check a separate development set before
 enabling it for an evaluation. Automatic reads do not consume model turns, but

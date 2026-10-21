@@ -46,6 +46,22 @@ def arguments(evaluator, output, **kwargs):
     return args
 
 
+def test_follow_docs_cli_is_explicit_and_part_of_matched_harness(evaluator, tmp_path):
+    original = arguments(evaluator, tmp_path / "original")
+    enabled = arguments(evaluator, tmp_path / "enabled", auto_read_follow_docs=True)
+    baseline = evaluator.runner_configuration(original)
+    candidate = evaluator.runner_configuration(enabled)
+    assert baseline["auto_read_follow_docs"]["enabled"] is False
+    assert candidate["auto_read_follow_docs"]["enabled"] is True
+    assert candidate["auto_read_follow_docs"]["max_followups_per_search"] == 1
+    assert candidate["auto_read_sources"] == baseline["auto_read_sources"] == 2
+    assert {key: value for key, value in candidate.items() if key != "auto_read_follow_docs"} == {
+        key: value for key, value in baseline.items() if key != "auto_read_follow_docs"}
+    parsed = evaluator.parser().parse_args(["--model", "CPU-fixture", "--data", "unused.jsonl",
+        "--output-dir", str(tmp_path / "flag"), "--source-commit", "a" * 40, "--auto-read-follow-docs"])
+    assert parsed.auto_read_follow_docs is True
+
+
 @pytest.fixture
 def evaluator(monkeypatch):
     path = Path(__file__).resolve().parents[1] / "scripts/dcc_online_web_evaluate.py"

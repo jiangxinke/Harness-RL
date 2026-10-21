@@ -246,9 +246,10 @@ def test_invalid_cuad_sampling_cli_is_rejected_before_inputs_or_cuda(monkeypatch
     assert error.value.code == 2 and not torch.cuda.is_initialized()
 
 
-@pytest.mark.parametrize("batch_args,expected,concise", [([], 4, False),
-    (["--native-batch-size", "2", "--cuad-concise-reasoning"], 2, True)])
-def test_native_batch_cli_keeps_logical_group_and_token_budgets(monkeypatch, batch_args, expected, concise):
+@pytest.mark.parametrize("batch_args,expected,concise,follow_docs", [([], 4, False, False),
+    (["--native-batch-size", "2", "--cuad-concise-reasoning"], 2, True, False),
+    (["--auto-read-follow-docs"], 4, False, True)])
+def test_native_batch_cli_keeps_logical_group_and_token_budgets(monkeypatch, batch_args, expected, concise, follow_docs):
     from slime_plugins.dcc.data import Task
     trainer = load_trainer()
     task = Task("synthetic-train", "cuad", "train", "Find the clause", document="clause", gold=["clause"])
@@ -267,6 +268,9 @@ def test_native_batch_cli_keeps_logical_group_and_token_budgets(monkeypatch, bat
         assert (args.thought_tokens, args.json_tokens, args.max_steps) == (8, 16, 2)
         assert web_inputs is None
         assert trainer.make_runner(args).cuad_concise_reasoning is concise
+        assert trainer.make_runner(args).auto_read_follow_docs is follow_docs
+        assert config["auto_read_follow_docs"]["enabled"] is follow_docs
+        assert args.auto_read_sources == 2
     monkeypatch.setattr(trainer, "train", capture)
     assert trainer.main(["--model", "CPU-fixture", "--train-data", "unused.jsonl",
         "--output-dir", "unused-output", "--source-commit", "0" * 40,

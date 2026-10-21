@@ -30,6 +30,7 @@ import torch
 from dcc_online_grpo import make_runner, validate_source
 from slime_plugins.dcc import load_tasks
 from slime_plugins.dcc.cuad_reasoning import cuad_concise_reasoning_configuration
+from slime_plugins.dcc.web_auto_read import auto_read_follow_docs_configuration
 from slime_plugins.dcc.durable_journal import OrderedDurableJSONLWriter, close_durable_journals
 from slime_plugins.dcc.evaluation import evaluate_results
 from slime_plugins.dcc.hf_native_policy import NativeHFPolicy, PROTOCOL
@@ -126,6 +127,7 @@ def manifest(args, tasks):
         retrieval_max_context_chars=args.retrieval_max_context_chars,
         retrieval_task_bound_expansion=args.retrieval_task_bound_expansion,
         auto_read_sources=args.auto_read_sources, cuad_structured_actions=True,
+        auto_read_follow_docs=auto_read_follow_docs_configuration(getattr(args, "auto_read_follow_docs", False)),
         cuad_concise_reasoning=cuad_concise_reasoning_configuration(getattr(args, "cuad_concise_reasoning", False)),
         episodes_per_task=1,
         allow_prompt_truncation=False, full_task_ids=[task.id for task in tasks],
@@ -331,6 +333,8 @@ def parser():
     result.add_argument("--cuad-concise-reasoning", action="store_true",
                         help="Opt in to concise CUAD source-offset reasoning; must match base and adapter evaluation")
     result.add_argument("--auto-read-sources", type=int, choices=(0, 1, 2), default=2)
+    result.add_argument("--auto-read-follow-docs", action="store_true",
+                        help="Prioritize one observed same-origin documentation link within existing automatic-read budgets; must match base and adapter")
     result.add_argument("--web-text-window-chars", type=int,
                         help="Optional positive fetch_url body-window limit; must match base and adapter Web evaluation")
     mode = result.add_mutually_exclusive_group()
