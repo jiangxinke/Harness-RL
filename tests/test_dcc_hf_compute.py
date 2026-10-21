@@ -129,11 +129,12 @@ def test_actual_bf16_hf_sampling_original_and_chunked_replay_share_context(actua
     model.get_output_embeddings().register_forward_hook(
         lambda module, args, output: head_dtypes.append(output.dtype))
     cfg = GenerationConfig(max_new_tokens=5, do_sample=True, temperature=1., top_p=1., top_k=0,
-        eos_token_id=2, pad_token_id=0, return_dict_in_generate=True, output_logits=True)
+        eos_token_id=2, pad_token_id=0, num_beams=1, num_return_sequences=1, use_cache=True,
+        return_dict_in_generate=True, output_logits=True)
     with torch.no_grad(), compute_context(model):
         torch.manual_seed(37)
-        generated = model.generate(input_ids=torch.tensor([prompt]), generation_config=cfg,
-                                   use_model_defaults=False)
+        from slime_plugins.dcc.hf_native_policy import _explicit_generation_kwargs
+        generated = model.generate(input_ids=torch.tensor([prompt]), **_explicit_generation_kwargs(cfg))
     response = generated.sequences[0, len(prompt):].tolist()
     rows = torch.stack([logit[0].float() for logit in generated.logits])
     target = torch.tensor(response)

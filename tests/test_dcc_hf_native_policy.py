@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
+import inspect
 import json
 import re
 from pathlib import Path
@@ -21,7 +22,8 @@ from slime_plugins.dcc import EpisodeRunner
 from slime_plugins.dcc.cuad_structured import cuad_backend_schema, cuad_final_schema
 from slime_plugins.dcc.data import Task
 from slime_plugins.dcc.episode import ModelProtocolFailure
-from slime_plugins.dcc.hf_native_policy import END_THINK, NativeHFCompletion, NativeHFPolicy
+from slime_plugins.dcc.hf_native_policy import (END_THINK, NativeHFCompletion, NativeHFPolicy,
+    _explicit_generation_kwargs)
 from slime_plugins.dcc.hf_policy import encode_messages
 from slime_plugins.dcc.prompt_history import PromptHistoryBudgetExceeded
 
@@ -47,6 +49,13 @@ class Tokenizer:
         return self.encode(text) if tokenize else text
 
 
+def _call_generation_config(kwargs):
+    if 'generation_config' in kwargs:
+        return kwargs['generation_config']
+    fields = GenerationConfig().to_dict()
+    return GenerationConfig(**{key: value for key, value in kwargs.items() if key in fields})
+
+
 class ScriptedModel:
     """Only the control-flow fixture is scripted; grammar APIs remain real."""
     device = torch.device('cpu')
@@ -62,8 +71,8 @@ class ScriptedModel:
         return self
 
     def generate(self, **kwargs):
-        self.calls.append(kwargs)
-        thought = END_THINK in kwargs['generation_config'].eos_token_id
+        self.calls.append({**kwargs, 'generation_config': _call_generation_config(kwargs)})
+        thought = END_THINK in _call_generation_config(kwargs).eos_token_id
         rows = self.thoughts if thought else self.finals
         assert len(rows) == len(kwargs['input_ids'])
         width = max(map(len, rows))
@@ -118,7 +127,9 @@ def test_raw_two_phase_ids_and_neutral_generation_options(tokenizer):
     assert final['input_ids'][0].tolist() == original + [10065, END_THINK]
     for call in value.model.calls:
         cfg = call['generation_config']
-        assert call['use_model_defaults'] is False
+        from transformers.generation.utils import GenerationMixin
+        supports_defaults = 'use_model_defaults' in inspect.signature(GenerationMixin.generate).parameters
+        assert (call.get('use_model_defaults') is False) if supports_defaults else 'use_model_defaults' not in call
         assert cfg.repetition_penalty == 1 and cfg.forced_eos_token_id is None
         assert cfg.min_new_tokens is None and cfg.min_length == 0
     assert thought['generation_config'].do_sample is True
@@ -128,6 +139,25 @@ def test_raw_two_phase_ids_and_neutral_generation_options(tokenizer):
     assert final['generation_config'].do_sample is False and len(final['logits_processor']) == 1
     assert END_THINK not in final['generation_config'].eos_token_id
     assert asdict(result)['thought_token_count'] == 2
+
+
+@pytest.mark.parametrize('supports_defaults', [False, True])
+def test_native_checks_hf_base_api_instead_of_kwargs_wrapper(tokenizer, monkeypatch, supports_defaults):
+    from transformers.generation.utils import GenerationMixin
+    def old_api(self, *, use_model_defaults=None, **kwargs):
+        raise AssertionError('Only the explicit base signature is inspected')
+    def new_api(self, **kwargs):
+        raise AssertionError('Only the explicit base signature is inspected')
+    monkeypatch.setattr(GenerationMixin, 'generate', old_api if supports_defaults else new_api)
+    value = policy(tokenizer)
+    result = value._generate_batch([messages()], cuad_final_schema())[0]
+    assert isinstance(result, NativeHFCompletion)
+    for call in value.model.calls:
+        assert (call.get('use_model_defaults') is False) if supports_defaults else 'use_model_defaults' not in call
+        config = call['generation_config']
+        assert config.repetition_penalty == config.encoder_repetition_penalty == 1.
+        assert config.typical_p == 1. and config.epsilon_cutoff == config.eta_cutoff == 0.
+        assert config.forced_eos_token_id is None and config.min_new_tokens is None
 
 
 @pytest.mark.parametrize('tokens', [[10065, 10066, 10067, 10068], [10065, 151645]])
@@ -457,7 +487,7 @@ def tiny_real_web_policy(tokenizer, values, *, thoughts=None, bounded=False):
         return logits
     model.lm_head.register_forward_hook(fixture_logits)
     def generate(**kwargs):
-        thought = END_THINK in kwargs['generation_config'].eos_token_id
+        thought = END_THINK in _call_generation_config(kwargs).eos_token_id
         state['tokens'] = (next(thought_rows) if thought_rows is not None else [END_THINK]) if thought else next(finals)
         state['cursor'] = 0
         result = original_generate(**kwargs)

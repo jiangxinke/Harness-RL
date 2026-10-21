@@ -68,6 +68,14 @@ and both evaluation arms. This profile does not promise BF16 KV tensors or
 lower memory for every quantized operator: bitsandbytes may return its input
 dtype. Real GPU throughput and memory must be measured before scaling a run.
 
+Native generation explicitly disables inherited checkpoint penalties, forced
+tokens and minimum lengths. Transformers versions exposing `use_model_defaults`
+receive `False`; versions that removed it receive every public generation field
+as an explicit argument, including disabled optional fields set to `None`.
+The implementation checks the base HF API rather than PEFT's generic wrapper.
+Actual CPU generation/replay tests cover both pinned HF environments; a new
+package version is still a distinct runtime for matched evaluation.
+
 With nonzero retrieval context, the source-character budget reserves original
 ranked hit cores before expanding their surroundings. If the core union exceeds
 the cap, whole cores are retained greedily by rank; later overlapping or shorter

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from dataclasses import dataclass
+import inspect
 import json
 import uuid
 
@@ -24,6 +25,22 @@ from .prompt_history import PromptHistoryBudgetExceeded
 PROTOCOL = "hf-native-two-stage-thought-only-policy-v1"
 OPEN_THINK, END_THINK = 151667, 151668
 NATIVE_SUFFIX = "<|im_start|>assistant\n<think>\n"
+
+
+def _explicit_generation_kwargs(config):
+    """Keep native generation independent of checkpoint decoding defaults.
+
+    Inspect the HF implementation: PEFT's wrapper accepts arbitrary kwargs.
+    HF 5 removed use_model_defaults and fills None config entries from the
+    checkpoint. Passing all public entries as kwargs overrides that fallback,
+    including disabled optional processors whose explicit value is None.
+    """
+    from transformers.generation.utils import GenerationMixin
+
+    if "use_model_defaults" in inspect.signature(GenerationMixin.generate).parameters:
+        return {"generation_config": config, "use_model_defaults": False}
+    return {key: value for key, value in config.to_dict().items()
+            if not key.startswith("_") and key != "transformers_version"}
 
 
 @dataclass(slots=True)
@@ -177,12 +194,17 @@ class NativeHFPolicy:
             temperature=0.6 if thinking else 1.0, top_p=0.95 if thinking else 1.0,
             top_k=20 if thinking else 0, eos_token_id=stop_ids, pad_token_id=pad,
             max_new_tokens=self.thought_tokens if phase == "thought" else self.json_tokens,
+            num_beams=1, num_return_sequences=1, min_length=0, early_stopping=False,
+            repetition_penalty=1.0, encoder_repetition_penalty=1.0, length_penalty=1.0,
+            no_repeat_ngram_size=0, encoder_no_repeat_ngram_size=0,
+            typical_p=1.0, epsilon_cutoff=0.0, eta_cutoff=0.0,
+            renormalize_logits=False, remove_invalid_values=False, token_healing=False,
+            output_attentions=False, output_hidden_states=False, output_scores=False,
+            disable_compile=False,
             use_cache=True, return_dict_in_generate=False)
-        # Explicit False prevents Transformers 4.57 from restoring the model's
-        # penalties/top-p/forced tokens into otherwise neutral default fields.
         with compute_context(self.model):
             output = self.model.generate(input_ids=ids, attention_mask=attention,
-                generation_config=config, use_model_defaults=False,
+                **_explicit_generation_kwargs(config),
                 logits_processor=LogitsProcessorList([LogitsProcessor(grammar)] if grammar is not None else []))
         rows = []
         for row in output[:, width:].tolist():
