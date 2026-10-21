@@ -295,6 +295,7 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
         record(event="scorer", **score_recipe)
         policy = NativeHFPolicy(model, tokenizer, thought_tokens=args.thought_tokens,
             json_tokens=args.json_tokens, max_prompt_tokens=args.max_prompt_tokens,
+            batch_size=getattr(args, "native_batch_size", 4),
             sampling_profile="raw", trace_sink=lambda value: enqueue(traces, value),
             capture_thought_logprobs=True,
             mixed_schema_batching=getattr(args, "native_mixed_schema_batching", False))
@@ -435,6 +436,8 @@ def main(argv=None):
     parser.add_argument("--web-draws-per-cycle", type=int, default=1)
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--group-size", type=int, default=2)
+    parser.add_argument("--native-batch-size", type=int, default=4,
+                        help="Maximum requests per physical native rollout batch on each rank; logical GRPO group size is unchanged")
     parser.add_argument("--native-mixed-schema-batching", action="store_true",
                         help="Batch native requests with distinct schemas using one grammar matcher per row")
     parser.add_argument("--thought-tokens", type=int, default=4096)
@@ -468,7 +471,7 @@ def main(argv=None):
     if not re.fullmatch(r"[0-9a-f]{40}", args.source_commit):
         parser.error("--source-commit requires actual complete committed runtime identity")
     if (any(value < 1 for value in (args.steps, args.max_steps, args.thought_tokens, args.json_tokens,
-            args.max_prompt_tokens, args.lora_rank, args.plan_world_size))
+            args.max_prompt_tokens, args.lora_rank, args.plan_world_size, args.native_batch_size))
             or args.group_size < 2 or args.save_every < 0
             or not math.isfinite(args.learning_rate) or args.learning_rate <= 0
             or not math.isfinite(args.max_grad_norm) or args.max_grad_norm <= 0

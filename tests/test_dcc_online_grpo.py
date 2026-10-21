@@ -119,6 +119,117 @@ def load_trainer():
     return trainer
 
 
+@pytest.mark.parametrize("batch_args,expected", [([], 4), (["--native-batch-size", "2"], 2)])
+def test_native_batch_cli_keeps_logical_group_and_token_budgets(monkeypatch, batch_args, expected):
+    from slime_plugins.dcc.data import Task
+    trainer = load_trainer()
+    task = Task("synthetic-train", "cuad", "train", "Find the clause", document="clause", gold=["clause"])
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    monkeypatch.setattr(trainer, "load_tasks", lambda _: [task])
+    monkeypatch.setattr(trainer, "validate_source", lambda _: None)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("CLI parsing may not initialize CUDA or load a model")
+    monkeypatch.setattr(torch.cuda, "set_device", forbidden)
+    monkeypatch.setattr(trainer, "load_policy_model", forbidden)
+    observed = []
+    async def capture(args, tasks, plan, world_size, *, web_inputs):
+        config = trainer.configuration(args, plan, tasks, world_size)
+        observed.append(config)
+        assert args.native_batch_size == expected and args.group_size == 4
+        assert (args.thought_tokens, args.json_tokens, args.max_steps) == (8, 16, 2)
+        assert web_inputs is None
+    monkeypatch.setattr(trainer, "train", capture)
+    assert trainer.main(["--model", "CPU-fixture", "--train-data", "unused.jsonl",
+        "--output-dir", "unused-output", "--source-commit", "0" * 40,
+        "--group-size", "4", "--thought-tokens", "8", "--json-tokens", "16",
+        "--max-steps", "2", *batch_args]) == 0
+    assert len(observed) == 1
+    assert observed[0]["arguments"]["native_batch_size"] == expected
+    assert observed[0]["objective_denominator"] == 4 * 2 * 8
+    assert not torch.cuda.is_initialized()
+
+
+@pytest.mark.parametrize("invalid", ["0", "-1", "1.5", "nan", "true"])
+def test_invalid_native_batch_cli_is_rejected_before_cuda_or_inputs(monkeypatch, invalid):
+    trainer = load_trainer()
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Invalid batching may not initialize CUDA, load inputs or train")
+    for name in ("load_tasks", "validate_source", "load_policy_model", "train"):
+        monkeypatch.setattr(trainer, name, forbidden)
+    monkeypatch.setattr(torch.cuda, "set_device", forbidden)
+    with pytest.raises(SystemExit) as error:
+        trainer.main(["--model", "CPU-fixture", "--train-data", "unused.jsonl",
+            "--output-dir", "unused-output", "--source-commit", "0" * 40,
+            "--native-batch-size", invalid])
+    assert error.value.code == 2
+    assert not torch.cuda.is_initialized()
+
+
+def test_native_batch_two_collects_complete_group_four_with_failure_and_fixed_loss():
+    """Real native queue/episode control flow; only neural decoding is synthetic."""
+    from slime_plugins.dcc import EpisodeRunner
+    from slime_plugins.dcc.data import Task
+    from slime_plugins.dcc.episode import ModelProtocolFailure
+    from slime_plugins.dcc.hf_native_policy import END_THINK, NativeHFCompletion, NativeHFPolicy
+    trainer = load_trainer()
+    task = Task("synthetic-train", "cuad", "train", "Find clause", document="clause", gold=["clause"])
+    batches, produced = [], []
+    async def collect():
+        # The decoder seam avoids any model/tokenizer/compiler or GPU load;
+        # generate_structured, the queue worker, episode runner and drain are real.
+        policy = object.__new__(NativeHFPolicy)
+        policy.batch_size, policy.thought_tokens, policy.json_tokens = 2, 4, 4
+        policy.sampling_profile, policy.mixed_schema_batching = "raw", False
+        policy.queue, policy.worker = asyncio.Queue(), None
+        def decode(messages, schema, task_ids):
+            assert all(value == task.id for value in task_ids)
+            batches.append(len(messages))
+            values = []
+            for _ in messages:
+                index = len(produced)
+                failed = index == 1
+                thought = [20 + index] * 4 if failed else [20 + index, END_THINK]
+                step = NativeHFCompletion(
+                    text="" if failed else '{"plan":"Check","checks":"Observed","answer":[{"text":"clause","confidence":1}]}',
+                    prompt_ids=[3, 4, 5], completion_ids=thought + ([] if failed else [151645]),
+                    thought_token_count=len(thought), phase_lengths=(len(thought), 0 if failed else 1),
+                    finish_reason="length" if failed else "stop",
+                    native_status="thought_did_not_stop_on_real_close" if failed else "completed",
+                    thought_logprobs=[-1.] * len(thought), thought_logprobs_source=BEHAVIOR_LOGPROB_SOURCE)
+                produced.append(step)
+                values.append(ModelProtocolFailure(step.native_status, completion=step,
+                    protocol="synthetic-decoder", trace_id=str(index)) if failed else step)
+            return values
+        policy._generate_batch = decode
+        runner = EpisodeRunner(max_steps=1, max_new_tokens=8, initial_chunks=0,
+                               evaluation_temperature=1., cuad_structured_actions=True)
+        results = await trainer.collect_group(runner, task, policy, group_size=4, rank=0)
+        assert policy.worker is None and policy.queue.empty()
+        return results
+    results = asyncio.run(collect())
+    assert batches == [2, 2] and len(produced) == len(results) == 4
+    assert [result.steps[0] for result in results] == produced
+    assert [result.status for result in results] == ["completed", "model_protocol_failure", "completed", "completed"]
+    group = group_signal(results, group_size=4, max_steps=1, thought_tokens=4)
+    assert group.discarded_reason is None and group.rewards == [1., 0., 1., 1.]
+    assert len(group.advantages) == len(group.segments) == 4
+    assert group.advantages[1] < 0 and all(group.advantages[i] > 0 for i in (0, 2, 3))
+    assert group.segments[1][0].completion_ids == produced[1].completion_ids
+    model = torch.nn.Linear(1, 1, bias=False)
+    with torch.no_grad():
+        model.weight.fill_(-1.)
+    def scorer(value, prompt, completion):
+        return value.weight.reshape(1).expand(len(completion))
+    report = trainer.replay_group(model, group, scorer, group_size=4, max_steps=1,
+                                 thought_tokens=4, clip=.2, replay_diagnostic="off")
+    oracle = -sum(advantage * len(segments[0].completion_ids)
+                  for segments, advantage in zip(group.segments, group.advantages, strict=True)) / (4 * 1 * 4)
+    assert report["scored_segments"] == 4 and report["scored_tokens"] == 10
+    assert report["policy_loss"] == pytest.approx(oracle)
+    assert model.weight.grad.item() == pytest.approx(oracle)
+    assert not torch.cuda.is_initialized()
+
+
 def test_real_qwen3_moe_lora_replay_improves_rewarded_thought_odds():
     pytest.importorskip("peft")
     from peft import LoraConfig, get_peft_model
@@ -236,7 +347,8 @@ def test_real_gloo_global_update_and_zero_signal_momentum(tmp_path):
     assert [(tmp_path / f"result-{rank}").read_text() for rank in range(2)] == ["passed", "passed"]
 
 
-def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration(tmp_path, monkeypatch):
+@pytest.mark.parametrize("native_batch_size", [4, 2])
+def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration(tmp_path, monkeypatch, native_batch_size):
     from peft import LoraConfig, get_peft_model
     from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
     import slime_plugins.dcc.hf_native_policy as native
@@ -253,7 +365,7 @@ def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration
             (path / "tokenizer_config.json").write_text("{}")
     class Policy:
         def __init__(self, *args, **kwargs):
-            pass
+            assert kwargs["batch_size"] == native_batch_size
         def bind_task(self, *args):
             return self
         async def close(self):
@@ -286,7 +398,8 @@ def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration
         quantization="none", learning_rate=0.01, logprob_backend="original",
         head_chunk_tokens=None, thought_tokens=8, json_tokens=8,
         max_prompt_tokens=32, max_steps=2, group_size=2, clip=0.2,
-        max_grad_norm=1.0, sync_artifacts=False, save_every=1, replay_diagnostic="off")
+        max_grad_norm=1.0, sync_artifacts=False, save_every=1, replay_diagnostic="off",
+        native_batch_size=native_batch_size)
     task = SimpleNamespace(id="task")
     asyncio.run(trainer.train(args, [task], [[0], [0]], 1))
     complete = json.loads((args.output_dir / "training_complete.json").read_text())
@@ -313,6 +426,7 @@ def test_real_trainer_closes_checkpoints_and_distinguishes_zero_update_iteration
     assert state["optimizer_steps"] == 1 and state["rollout_iterations"] == 2
     saved_config = json.loads((args.output_dir / "final/training_config.json").read_text())
     assert saved_config["replay_diagnostic_mode"] == saved_config["arguments"]["replay_diagnostic"] == "off"
+    assert saved_config["arguments"]["native_batch_size"] == native_batch_size
     assert not torch.cuda.is_initialized()
 
 

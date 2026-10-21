@@ -67,6 +67,16 @@ Timed-out native generations are drained and their actual late completions
 remain owned in the closed journals. No retry, sibling filtering or denominator
 change is performed.
 
+`--native-batch-size N` sets the maximum queued requests per physical native
+rollout batch on each rank. It accepts a positive integer and defaults to `4`,
+preserving the existing behavior. For example, `--group-size 4 --native-batch-size 2`
+still collects all four episodes, including model failures, using batches of at
+most two requests. It does not change the group advantage calculation, fixed
+GRPO denominator, thought/JSON/turn budgets, or replay batching. The value is
+saved in the training arguments. Changing physical batches can change padding,
+RNG consumption, trajectories and queue time; CPU queue tests do not establish
+that a particular GPU configuration fits in memory or runs faster.
+
 For a separate throughput experiment, `--native-mixed-schema-batching` lets
 queued native requests with different public schemas share a thought batch
 and a JSON batch. The pinned xgrammar processor creates a separate grammar
