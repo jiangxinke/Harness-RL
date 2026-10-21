@@ -241,7 +241,10 @@ def load_policy_model(model_name: str, *, adapter: str | None = None, trainable:
         load_kwargs = nf4_load_kwargs()
     else:
         config = AutoConfig.from_pretrained(model_name)
-        if getattr(config, "num_experts", 0) > 0:
+        # Transformers 4.57 uses unfused expert ModuleLists and forwards this
+        # newer keyword to the model constructor, where it raises TypeError.
+        # Keep grouped-mm on versions exposing its explicit configuration API.
+        if getattr(config, "num_experts", 0) > 0 and hasattr(config, "_experts_implementation"):
             load_kwargs["experts_implementation"] = "grouped_mm"
     torch.cuda.set_device(rank)
     tokenizer = AutoTokenizer.from_pretrained(model_name)

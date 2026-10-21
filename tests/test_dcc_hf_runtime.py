@@ -42,7 +42,7 @@ def test_warmstart_checkpoint_records_the_explicitly_loaded_base(tmp_path, monke
 
     def cpu_loader(name, **kwargs):
         kwargs.pop("device_map")
-        kwargs.pop("experts_implementation")
+        kwargs.pop("experts_implementation", None)
         kwargs["dtype"] = torch.float32
         return original_loader(name, **kwargs)
 
@@ -53,6 +53,40 @@ def test_warmstart_checkpoint_records_the_explicitly_loaded_base(tmp_path, monke
     destination = tmp_path / "new-checkpoint"
     restored.save_pretrained(destination)
     assert json.loads((destination / "adapter_config.json").read_text())["base_model_name_or_path"] == str(source)
+
+
+@pytest.mark.parametrize("trainable", [False, True])
+def test_real_unquantized_moe_loader_accepts_installed_transformers_api(tmp_path, monkeypatch, trainable):
+    from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen3MoeConfig, Qwen3MoeForCausalLM
+
+    config = Qwen3MoeConfig(vocab_size=48, hidden_size=16, intermediate_size=24,
+        moe_intermediate_size=8, num_hidden_layers=1, num_attention_heads=2,
+        num_key_value_heads=1, head_dim=8, num_experts=4, num_experts_per_tok=2)
+    source = tmp_path / "tiny-real-moe"
+    Qwen3MoeForCausalLM(config).save_pretrained(source)
+    original_loader = AutoModelForCausalLM.from_pretrained
+    observed = {}
+
+    def cpu_device_loader(name, **kwargs):
+        # Only substitute the device: unsupported constructor keywords must
+        # reach the real installed loader and must not be hidden by this test.
+        observed.update(kwargs)
+        kwargs["device_map"] = {"": "cpu"}
+        return original_loader(name, **kwargs)
+
+    monkeypatch.setattr(torch.cuda, "set_device", lambda rank: None)
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", lambda name: SimpleNamespace(pad_token_id=0))
+    monkeypatch.setattr(AutoModelForCausalLM, "from_pretrained", cpu_device_loader)
+    model, _ = _POLICY.load_policy_model(str(source), trainable=trainable, lora_rank=2)
+    assert ("experts_implementation" in observed) is hasattr(config, "_experts_implementation")
+    assert observed["dtype"] is torch.bfloat16
+    assert model.device.type == "cpu"
+    if trainable:
+        assert all("lora_" in name for name, parameter in model.named_parameters() if parameter.requires_grad)
+    with torch.no_grad():
+        output = model(input_ids=torch.tensor([[1, 2, 3]]), use_cache=False)
+    assert torch.isfinite(output.logits).all()
+    assert not torch.cuda.is_initialized()
 
 _SPEC = importlib.util.spec_from_file_location(
     "dcc_train_runtime_tests", Path(__file__).resolve().parents[1] / "scripts/dcc_train.py"
