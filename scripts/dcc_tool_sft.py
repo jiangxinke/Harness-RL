@@ -557,6 +557,16 @@ def train(args):
     phase_normalized = getattr(args, "native_phase_normalized_loss", False)
     mixture_loss = getattr(args, "native_completion_json_mixture_loss", False)
     task_coverage = getattr(args, "native_global_stage_task_coverage", False)
+    task_first = getattr(args, "native_task_first_coverage", False)
+    positive_final_first = getattr(args, "native_positive_final_first", False)
+    if task_first and task_coverage:
+        raise ValueError("Native task coverage modes are mutually exclusive")
+    if positive_final_first and not task_first:
+        raise ValueError("Positive-final-first curriculum requires native task-first coverage")
+    if task_first and (not getattr(args, "native_thinking", False) or args.adapter):
+        raise ValueError("Native task-first coverage requires fresh native LoRA training")
+    if task_first and getattr(args, "web_stage_profile", None) is not None:
+        raise ValueError("Native task-first coverage owns its explicit per-task stage schedule")
     if phase_normalized and mixture_loss:
         raise ValueError("Native loss modes are mutually exclusive")
     if (phase_normalized or mixture_loss) and not getattr(args, "native_thinking", False):
@@ -570,6 +580,12 @@ def train(args):
         def sampler_factory(*values, **options):
             return GlobalStageTaskCoverageSampler(
                 *values, sampler_class=MixedSampler, batch_sampler=sample_batch, **options)
+    if task_first:
+        from dcc_task_first_coverage import GlobalTaskFirstSampler, TASK_FIRST_CONFIGURATION
+
+        def sampler_factory(*values, **options):
+            return GlobalTaskFirstSampler(*values, sampler_class=MixedSampler,
+                batch_sampler=sample_batch, positive_final_first=positive_final_first, **options)
     native_data = None
     if getattr(args, "native_thinking", False):
         from dcc_native_sft import prepare_native_training
@@ -595,9 +611,13 @@ def train(args):
               if key not in {"model", "adapter", "records", "cuad_train_data", "cuad_tool_records", "output_dir", "retrieval_profile",
                              "native_thinking", "native_train_profile", "native_expected_source", "web_stage_profile",
                              "native_phase_normalized_loss", "native_completion_json_mixture_loss",
-                             "native_global_stage_task_coverage"}}
+                             "native_global_stage_task_coverage", "native_task_first_coverage",
+                             "native_positive_final_first"}}
     if task_coverage:
         config["sampler_configuration"] = dict(STAGE_TASK_COVERAGE_CONFIGURATION)
+    if task_first:
+        config["sampler_configuration"] = dict(TASK_FIRST_CONFIGURATION,
+                                               positive_final_first_enabled=positive_final_first)
     if getattr(args, "web_stage_profile", None) is not None:
         config["web_stage_profile"] = args.web_stage_profile
     if native_data is not None:
@@ -646,7 +666,7 @@ def train(args):
                cuad_tool_stages=dict(Counter({stage: sum(len(stages.get(stage, [])) for categories in sampler.cuad_tools.values() for stages in categories.values()) for stage in CUAD_STAGES})),
                cuad_missing_stages=sampler.cuad_missing_stages,
                effective_web_fraction=sampler.web_fraction, skipped=dict(sampler.skips), trainable_parameters=sum(p.numel() for p in parameters),
-               **({"sampler_buckets": sampler.bucket_summary()} if task_coverage else {}))
+               **({"sampler_buckets": sampler.bucket_summary()} if task_coverage or task_first else {}))
         optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, weight_decay=0.0)
 
         def save(name, step):
@@ -671,7 +691,7 @@ def train(args):
 
         for step in range(1, args.steps + 1):
             begin = time.monotonic()
-            examples = (sampler.next_batch(args.samples_per_step) if task_coverage
+            examples = (sampler.next_batch(args.samples_per_step) if task_coverage or task_first
                         else sample_batch(sampler, args.samples_per_step))
             model.train()
             optimizer.zero_grad(set_to_none=True)
@@ -694,12 +714,14 @@ def train(args):
                    samples=[{"task_id": e.task_id, "stage": e.stage, "category": e.category,
                              "prompt_tokens": len(e.prompt), "completion_tokens": len(e.completion)} for e in examples],
                    stage_counts=dict(counts), skipped=dict(sampler.skips),
+                   **({"global_sampler_coverage": sampler.coverage_summary()} if task_first else {}),
                    **({"native_loss_telemetry": step_telemetry} if mixture_loss else {}))
             if args.save_every and step % args.save_every == 0:
                 save(f"step_{step:04d}", step)
         save("final", args.steps)
         record(event="finished", optimizer_steps=args.steps, stage_counts=dict(counts), unique_task_ids=len(ids),
                skipped=dict(sampler.skips), elapsed=time.monotonic() - started,
+               **({"global_sampler_coverage": sampler.coverage_summary()} if task_first else {}),
                **({"native_loss_summary": loss_summary} if mixture_loss else {}))
         finalize_training(log, args.steps, world_size=world, distributed=dist)
     if world > 1:
@@ -710,8 +732,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--native-thinking", action="store_true",
                         help="Train fresh LoRA on fully validated recorded native Thinking Web/CUAD rollouts")
-    parser.add_argument("--native-global-stage-task-coverage", action="store_true",
+    samplers = parser.add_mutually_exclusive_group()
+    samplers.add_argument("--native-global-stage-task-coverage", action="store_true",
                         help="Opt in to global domain/polarity/stage task decks; reweights categories; fresh runs only")
+    samplers.add_argument("--native-task-first-coverage", action="store_true",
+                        help="Uniform native task decks before stage selection, with explicit domain/polarity quotas")
+    parser.add_argument("--native-positive-final-first", action="store_true",
+                        help="With task-first coverage, expose each positive CUAD task's real final on its first draw")
     native_losses = parser.add_mutually_exclusive_group()
     native_losses.add_argument("--native-phase-normalized-loss", action="store_true",
                                help="Opt in to SFT loss 0.2*thought_mean + 0.8*JSON_mean on real native IDs")
@@ -757,6 +784,12 @@ def main():
         parser.error("Native loss modes require --native-thinking")
     if args.native_global_stage_task_coverage and not args.native_thinking:
         parser.error("Global task coverage requires --native-thinking")
+    if args.native_task_first_coverage and (not args.native_thinking or args.adapter):
+        parser.error("Task-first coverage requires fresh --native-thinking training")
+    if args.native_positive_final_first and not args.native_task_first_coverage:
+        parser.error("Positive-final-first curriculum requires --native-task-first-coverage")
+    if args.native_task_first_coverage and args.web_stage_profile is not None:
+        parser.error("Task-first coverage owns its per-task stage schedule")
     if min(args.steps, args.lora_rank, args.max_prompt_tokens, args.max_new_tokens, args.batch_tokens,
            args.samples_per_step, args.initial_chunks) < 1 or args.save_every < 0:
         parser.error("training steps, ranks and token budgets must be positive; save-every must be nonnegative")
