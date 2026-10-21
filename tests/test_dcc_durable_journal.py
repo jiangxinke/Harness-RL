@@ -344,3 +344,78 @@ def test_real_collector_writer_failure_never_closes_generation_and_releases_engi
         assert not (example.root / "generation/generation_closed_rank0.json").exists()
     finally:
         example.tearDown()
+
+
+@pytest.mark.parametrize("cleanup", ["journal", "native_collection"])
+def test_same_background_exception_cleanup_is_bounded_in_real_child(cleanup):
+    import subprocess
+    import sys
+    # The child executes actual writers and actual cleanup. Its kernel timer
+    # bounds the old self-copy loop without risking the pytest worker itself.
+    child = r'''
+import asyncio
+import json
+from pathlib import Path
+import signal
+import sys
+import tempfile
+root = Path(sys.argv[1])
+sys.path[:0] = [str(root / "scripts"), str(root / "slime")]
+from dcc_collect_native_train import Journal, _finish_collection
+from slime_plugins.dcc.durable_journal import close_durable_journals
+from slime_plugins.dcc.native_thinking_eval import NativeThinkingPolicy, NativeTraceJournal
+with tempfile.TemporaryDirectory(prefix="dcc-error-identity-") as temporary:
+    path = Path(temporary)
+    journal = NativeTraceJournal(path / "native.jsonl")
+    # An actual UTF-8 encoder error in the background writer, not a fake close.
+    journal({"trace_id": "\ud800"})
+    journal._worker.join(timeout=2)
+    assert not journal._worker.is_alive()
+    primary = None
+    try:
+        journal({"trace_id": "next"})
+    except UnicodeEncodeError as error:
+        primary = error
+    assert primary is journal._error
+    primary.add_note("original background writer diagnostic")
+    healthy = Journal(path / "healthy.jsonl")
+    healthy.write({"id": 1})
+    class Base:
+        closed = False
+        async def close(self):
+            self.closed = True
+    base = Base()
+    native = object.__new__(NativeThinkingPolicy)
+    native.base, native.trace_sink = base, journal
+    signal.setitimer(signal.ITIMER_REAL, .5)
+    if sys.argv[2] == "journal":
+        close_durable_journals([journal, healthy], failure=primary)
+    else:
+        asyncio.run(_finish_collection(native, [healthy], [], primary))
+        assert base.closed
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    assert primary.__notes__ == ["original background writer diagnostic"]
+    assert healthy.count == 1 and healthy.stream.closed and not healthy._worker.is_alive()
+    assert journal.stream.closed
+    for _ in range(2):
+        try:
+            journal.close()
+        except UnicodeEncodeError as error:
+            assert error is primary
+        else:
+            raise AssertionError("A failed writer must fail every close")
+    assert not (path / "generation_closed_rank0.json").exists()
+    print(json.dumps(dict(complete=True, same_exception_identity=True,
+        engine_released=base.closed, healthy_records=healthy.count,
+        journal_and_healthy_closed=True, completion_marker=False)))
+'''
+    result = subprocess.run([sys.executable, "-I", "-B", "-c", child,
+                             str(Path(__file__).resolve().parents[1]), cleanup],
+        capture_output=True, text=True, timeout=15,
+        env=dict(os.environ, CUDA_VISIBLE_DEVICES="", PYTHONDONTWRITEBYTECODE="1"))
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    report = json.loads(result.stdout)
+    assert report["complete"] and report["same_exception_identity"]
+    assert report["healthy_records"] == 1 and report["journal_and_healthy_closed"]
+    assert report["completion_marker"] is False
+    assert report["engine_released"] is (cleanup == "native_collection")

@@ -74,8 +74,10 @@ async def _finish_collection(native, journals, workers, failure):
     if errors:
         primary = failure if failure is not None else errors.pop(0)
         for error in errors:
+            if error is primary:
+                continue
             primary.add_note(f"Collection cleanup also failed: {type(error).__name__}: {error}")
-            for note in getattr(error, "__notes__", ()):
+            for note in tuple(getattr(error, "__notes__", ())):
                 primary.add_note(note)
         close_durable_journals(journals, failure=primary)
         if failure is None:
