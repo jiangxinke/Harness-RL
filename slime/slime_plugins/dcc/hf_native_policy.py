@@ -18,6 +18,7 @@ from .hf_native_structured import compile_native_structured_schema, native_struc
 from .web_whitespace import web_bounded_whitespace_configuration
 from .episode import ModelProtocolFailure, PolicyCompletion
 from .hf_policy import _chat_tokens, encode_messages
+from .hf_compute import compute_context, model_compute_profile
 from .prompt_history import PromptHistoryBudgetExceeded
 
 PROTOCOL = "hf-native-two-stage-thought-only-policy-v1"
@@ -100,6 +101,7 @@ class NativeHFPolicy:
             "backend": "hf", "supported_benchmark": "cuad-and-widesearch",
             "web_bounded_whitespace": web_bounded_whitespace_configuration(web_bounded_whitespace),
             "web_schema_policy": "existing-public-schema-and-review-decoder; original-schema-postvalidation",
+            "compute_profile": model_compute_profile(model),
             "separate_from_vllm_native_v3": True}
 
     async def __call__(self, *args, **kwargs):
@@ -178,9 +180,10 @@ class NativeHFPolicy:
             use_cache=True, return_dict_in_generate=False)
         # Explicit False prevents Transformers 4.57 from restoring the model's
         # penalties/top-p/forced tokens into otherwise neutral default fields.
-        output = self.model.generate(input_ids=ids, attention_mask=attention,
-            generation_config=config, use_model_defaults=False,
-            logits_processor=LogitsProcessorList([LogitsProcessor(grammar)] if grammar is not None else []))
+        with compute_context(self.model):
+            output = self.model.generate(input_ids=ids, attention_mask=attention,
+                generation_config=config, use_model_defaults=False,
+                logits_processor=LogitsProcessorList([LogitsProcessor(grammar)] if grammar is not None else []))
         rows = []
         for row in output[:, width:].tolist():
             end = next((i + 1 for i, value in enumerate(row) if value in stop_ids), len(row))

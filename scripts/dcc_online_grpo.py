@@ -31,6 +31,8 @@ from slime_plugins.dcc import EpisodeRunner, load_tasks
 from slime_plugins.dcc.durable_journal import OrderedDurableJSONLWriter, close_durable_journals
 from slime_plugins.dcc.hf_chunked_logprobs import resolve_logprob_backend
 from slime_plugins.dcc.hf_policy import encode_messages, load_policy_model
+from slime_plugins.dcc.hf_compute import (COMPUTE_PROFILES, compute_profile_configuration,
+    precision_observation, validate_model_compute_profile)
 from slime_plugins.dcc.online_grpo import ALGORITHM, apply_policy_update, group_signal, thought_policy_loss
 from slime_plugins.dcc.retrieval import load_retrieval_profile
 
@@ -158,6 +160,7 @@ def configuration(args, plan, tasks, world_size):
         source_commit=args.source_commit, world_size=world_size,
         arguments={key: str(value) if isinstance(value, Path) else value
                    for key, value in vars(args).items()},
+        compute_profile=compute_profile_configuration(getattr(args, "compute_profile", "legacy")),
         training_split_only=True, sft_auxiliary=False, offline_preferences=False,
         behavior_policy=dict(thought="raw softmax T=1 top_p=1 top_k=0", json="greedy xgrammar"),
         policy_loss_tokens="sampled thought only, including actual closing token",
@@ -214,7 +217,11 @@ async def train(args, tasks, plan, world_size):
     try:
         record(event="start", **config)
         model, tokenizer = load_policy_model(args.model, adapter=args.adapter,
-            trainable=True, rank=local, lora_rank=args.lora_rank, quantization=args.quantization)
+            trainable=True, rank=local, lora_rank=args.lora_rank, quantization=args.quantization,
+            compute_profile=getattr(args, "compute_profile", "legacy"))
+        validate_model_compute_profile(model, getattr(args, "compute_profile", "legacy"))
+        config["precision"] = precision_observation(model)
+        record(event="precision", **config["precision"])
         validate_grpo_dropout(model, rl_steps=args.steps)
         named = [(name, p) for name, p in model.named_parameters() if p.requires_grad]
         if not named or any("lora_" not in name for name, _ in named):
@@ -347,6 +354,7 @@ def main(argv=None):
     parser.add_argument("--auto-read-sources", type=int, choices=(0, 1, 2), default=2)
     parser.add_argument("--lora-rank", type=int, default=16)
     parser.add_argument("--quantization", choices=("none", "nf4"), default="nf4")
+    parser.add_argument("--compute-profile", choices=COMPUTE_PROFILES, default="legacy")
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--clip", type=float, default=0.2)

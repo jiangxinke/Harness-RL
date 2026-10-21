@@ -121,7 +121,7 @@ def test_real_runner_journals_and_cuad_score_keep_every_failure(evaluator, tmp_p
     assert evaluator.observed == [(task.id, "validation") for task in all_tasks]
     assert [row["status"] for row in predictions] == ["completed", "model_protocol_failure", "context_budget_failure"]
     assert all("reward" not in row and not (evaluator.SCORE_FIELDS & row["metrics"].keys()) for row in predictions)
-    assert evaluator.loads[0][1] == dict(adapter=None, trainable=False, rank=0, quantization="nf4")
+    assert evaluator.loads[0][1] == dict(adapter=None, trainable=False, rank=0, quantization="nf4", compute_profile="legacy")
     report = evaluator.score(args, all_tasks)
     assert report["tasks"] == report["metric_task_denominator"] == 3
     assert report["prediction_coverage"] == 1 and report["complete"] is False

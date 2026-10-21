@@ -33,6 +33,8 @@ from slime_plugins.dcc.durable_journal import OrderedDurableJSONLWriter, close_d
 from slime_plugins.dcc.evaluation import evaluate_results
 from slime_plugins.dcc.hf_native_policy import NativeHFPolicy, PROTOCOL
 from slime_plugins.dcc.hf_policy import load_policy_model
+from slime_plugins.dcc.hf_compute import (COMPUTE_PROFILES, adapter_compute_profile,
+    compute_profile_configuration, precision_observation, validate_compute_profile, validate_model_compute_profile)
 from slime_plugins.dcc.metrics import cuad_task_metrics
 from slime_plugins.dcc.online_grpo import ALGORITHM
 
@@ -75,17 +77,6 @@ def public_task_identity(tasks):
     return hashlib.blake2b(canonical, digest_size=16).hexdigest()
 
 
-def precision_observation(model):
-    """Observe base and adapter storage dtypes after the shared HF loader."""
-    base, adapter = {}, {}
-    for name, parameter in model.named_parameters():
-        counts = adapter if "lora_" in name else base
-        dtype = str(parameter.dtype)
-        counts[dtype] = counts.get(dtype, 0) + parameter.numel()
-    return dict(base_parameter_dtypes=base, adapter_parameter_dtypes=adapter,
-                quantization_report=getattr(model, "dcc_quantization_report", None))
-
-
 def adapter_condition(adapter):
     if not adapter:
         return dict(adapter=None, policy="base")
@@ -94,7 +85,8 @@ def adapter_condition(adapter):
               if (root / "training_config.json").is_file() else {})
     checkpoint = (json.loads((root / "checkpoint_complete.json").read_text(encoding="utf-8"))
                   if (root / "checkpoint_complete.json").is_file() else {})
-    training = dict(algorithm=config.get("algorithm"), training_source_commit=config.get("source_commit"),
+    training = dict(compute_profile=adapter_compute_profile(adapter), precision=config.get("precision"),
+        algorithm=config.get("algorithm"), training_source_commit=config.get("source_commit"),
         rollout_iterations=config.get("rollout_iterations"), optimizer_updates=config.get("optimizer_updates"),
         checkpoint_complete=checkpoint.get("complete") is True,
         checkpoint_optimizer_steps=checkpoint.get("optimizer_steps"))
@@ -112,6 +104,7 @@ def adapter_condition(adapter):
 
 
 def manifest(args, tasks):
+    compute = validate_compute_profile(getattr(args, "compute_profile", "legacy"), adapter=args.adapter)
     profile = {"thinking": dict(do_sample=True, temperature=0.6, top_p=0.95, top_k=20),
                "greedy": dict(do_sample=False, temperature=1.0, top_p=1.0, top_k=0)}[args.profile]
     retrieval = (json.loads(Path(args.retrieval_profile).read_text(encoding="utf-8"))
@@ -120,7 +113,8 @@ def manifest(args, tasks):
         runtime="independent-HF; separate from vLLM native v3 and Slime/Megatron",
         model=args.model, precision=dict(quantization=args.quantization,
             load_dtype="bfloat16", nf4_compute_dtype="bfloat16" if args.quantization == "nf4" else None,
-            kbit_preparation=args.quantization == "nf4", inference_loader="hf_policy.load_policy_model"),
+            kbit_preparation=args.quantization == "nf4", inference_loader="hf_policy.load_policy_model",
+            compute_profile=compute),
         thought_sampling_profile=args.profile, thought_sampling=profile,
         json_sampling="greedy-neutral-xgrammar-structural; public-schema-postvalidation",
         seed=args.seed, seed_method="(seed + crc32(utf8(task_id))) mod 2**32; reset per episode",
@@ -164,7 +158,9 @@ async def generate(args, tasks):
         traces = OrderedDurableJSONLWriter(args.output_dir / f"native_traces_rank{rank}.jsonl")
         writers.append(traces)
         model, tokenizer = load_policy_model(args.model, adapter=args.adapter,
-            trainable=False, rank=args.device_index, quantization=args.quantization)
+            trainable=False, rank=args.device_index, quantization=args.quantization,
+            compute_profile=getattr(args, "compute_profile", "legacy"))
+        validate_model_compute_profile(model, getattr(args, "compute_profile", "legacy"))
         model.eval()
         runner = make_runner(args)
         policy = NativeHFPolicy(model, tokenizer, thought_tokens=args.thought_tokens,
@@ -239,6 +235,11 @@ def score(args, tasks):
                 or done.get("source_commit") != args.source_commit or done.get("shard_index") != rank
                 or done.get("version") != VERSION or done.get("rollout_scored") is not False
                 or not isinstance(done.get("precision"), dict) or done["precision"] != generation_precision
+                or done["precision"].get("compute_profile") != expected["comparison"]["precision"]["compute_profile"]
+                or done["precision"].get("compute_context", {}).get("autocast_enabled")
+                    != expected["comparison"]["precision"]["compute_profile"]["autocast"]
+                or done["precision"].get("compute_context", {}).get("autocast_dtype")
+                    != expected["comparison"]["precision"]["compute_profile"]["autocast_dtype"]
                 or done.get("tasks") != len(assigned)):
             raise ValueError("Evaluation shards differ in configuration, ownership or completed coverage")
         rows = read_jsonl(args.output_dir / f"predictions_rank{rank}.jsonl")
@@ -271,6 +272,9 @@ def score(args, tasks):
                             separators=(",", ":")).encode("utf-8")
     report["scoring_reference_identity"] = hashlib.blake2b(references, digest_size=16).hexdigest()
     if args.adapter:
+        training_precision = expected["condition"]["training"]["precision"]
+        if training_precision is not None and training_precision != generation_precision:
+            raise ValueError("Adapter evaluation precision differs from its recorded training precision")
         if args.base_output_dir is None:
             raise ValueError("Adapter scoring requires --base-output-dir for an actual matched base run")
         baseline = json.loads((args.base_output_dir / "report.json").read_text(encoding="utf-8"))
@@ -279,6 +283,8 @@ def score(args, tasks):
                 or baseline.get("packages") != generation_packages
                 or baseline.get("precision", {}).get("base_parameter_dtypes") != generation_precision["base_parameter_dtypes"]
                 or baseline.get("precision", {}).get("quantization_report") != generation_precision["quantization_report"]
+                or baseline.get("precision", {}).get("compute_profile") != generation_precision["compute_profile"]
+                or baseline.get("precision", {}).get("compute_context") != generation_precision["compute_context"]
                 or baseline.get("generation_complete") is not True or baseline.get("scored_after_journals_closed") is not True
                 or baseline.get("prediction_coverage") != 1 or baseline.get("tasks") != len(tasks)
                 or baseline.get("scoring_reference_identity") != report["scoring_reference_identity"]
@@ -305,6 +311,7 @@ def parser():
     result.add_argument("--split", choices=("train", "validation", "test"))
     result.add_argument("--profile", choices=("thinking", "greedy"), default="thinking")
     result.add_argument("--quantization", choices=("nf4", "none"), default="nf4")
+    result.add_argument("--compute-profile", choices=COMPUTE_PROFILES, default="legacy")
     result.add_argument("--shard-index", type=int, default=0)
     result.add_argument("--shards", type=int, default=1)
     result.add_argument("--device-index", type=int, default=0)

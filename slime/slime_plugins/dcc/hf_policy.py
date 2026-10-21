@@ -228,7 +228,9 @@ class HFPolicy:
         return values
 
 
-def load_policy_model(model_name: str, *, adapter: str | None = None, trainable: bool = False, rank: int = 0, lora_rank: int = 8, quantization: str = "none"):
+def load_policy_model(model_name: str, *, adapter: str | None = None, trainable: bool = False, rank: int = 0, lora_rank: int = 8, quantization: str = "none", compute_profile: str = "legacy"):
+    from .hf_compute import configure_compute_profile, validate_compute_profile, validate_adapter_precision
+    validate_compute_profile(compute_profile, adapter=adapter)
     from peft import LoraConfig, PeftModel, get_peft_model
     from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
@@ -297,6 +299,9 @@ def load_policy_model(model_name: str, *, adapter: str | None = None, trainable:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     if report is not None:
         model.dcc_quantization_report = report
+    configure_compute_profile(model, compute_profile)
+    if adapter:
+        validate_adapter_precision(model, adapter)
     return model, tokenizer
 
 
@@ -309,7 +314,9 @@ def completion_logprobs(model, prompt_ids: list[int], completion_ids: list[int])
     """
     ids = torch.tensor([prompt_ids + completion_ids], device=model.device)
     length = len(completion_ids)
-    output = model(input_ids=ids, use_cache=False, logits_to_keep=length + 1)
+    from .hf_compute import compute_context
+    with compute_context(model):
+        output = model(input_ids=ids, use_cache=False, logits_to_keep=length + 1)
     logits = output.logits[0, :-1].float()
     target = ids[0, -length:]
     return logits.gather(-1, target.unsqueeze(-1)).squeeze(-1) - logits.logsumexp(-1)

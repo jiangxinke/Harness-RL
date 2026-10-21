@@ -9,8 +9,8 @@ This is an independent HF/NF4 LoRA runtime, separate from Slime/Megatron and the
 existing BF16 vLLM native evaluation protocol. Start with a bounded pilot and
 compare base and trained adapters under this exact HF precision, harness, token
 budgets and evaluation sampling. Scores from older vLLM runs are not matched
-controls for this runtime. Web is rejected before loading weights; its native
-schema backend needs a separate integration.
+controls for this runtime. The trainer and matched evaluator reject Web before
+loading weights pending verification of its TRAIN reward contract.
 
 Install `configs/dcc/requirements-online-grpo.txt` in the separate quantized
 environment. Set paths locally; none is embedded in the code:
@@ -56,6 +56,25 @@ gradient oracle, failure coverage, and real Gloo synchronization. The policy
 checks include actual Hugging Face generation and xgrammar. These checks do
 not establish NF4 GPU correctness or benchmark improvement; both require the
 actual pilot and a matched base comparison.
+
+The optional `--compute-profile bf16-autocast-v1` applies the same BF16
+autocast context to sampling, old/current replay and evaluation. The default
+`legacy` preserves the original computation. Base storage follows the loader,
+LoRA master weights remain FP32, and log-softmax uses FP32. Checkpoints record
+the selected context and actual registered parameter dtypes; adapter reload
+and matched evaluation reject changed profiles or precision. Older adapters
+without profile metadata retain `legacy`. Use the same option for training
+and both evaluation arms. This profile does not promise BF16 KV tensors or
+lower memory for every quantized operator: bitsandbytes may return its input
+dtype. Real GPU throughput and memory must be measured before scaling a run.
+
+With nonzero retrieval context, the source-character budget reserves original
+ranked hit cores before expanding their surroundings. If the core union exceeds
+the cap, whole cores are retained greedily by rank; later overlapping or shorter
+cores can still fit. Expansion can no longer displace an already retained core.
+Zero context keeps the original retrieval behavior. This changes visible
+evidence and must be held fixed between base and adapter evaluation; evidence
+coverage alone is not a benchmark score.
 
 
 The matching evaluator uses the same HF loader for base and adapter, including

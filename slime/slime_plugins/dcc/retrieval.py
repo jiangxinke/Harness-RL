@@ -239,7 +239,7 @@ def expand_document_context(
     document_tools: DocumentTools, observation: dict[str, Any], *,
     context_chars: int = 800, max_chars: int = 16000,
 ) -> dict[str, Any]:
-    """Expand ranked hits on both sides, merge overlap, and cap source characters.
+    """Preserve ranked core hits, then expand within the source-character cap.
 
     This opt-in repair for clauses crossing chunk boundaries uses source offsets
     only. It never looks at answers or task metadata. The character cap counts
@@ -254,27 +254,40 @@ def expand_document_context(
     if context_chars == 0:
         return observation
     source = document_tools.document
-    windows: list[dict[str, Any]] = []
-    for hit in observation["hits"]:
-        start, end = hit["start"], hit["end"]
-        if type(start) is not int or type(end) is not int or not 0 <= start < end <= len(source) or hit["text"] != source[start:end]:
-            raise ValueError("retrieval hit must identify an exact source interval")
-        lower, upper = max(0, start - context_chars), min(len(source), end + context_chars)
+    def add_window(windows, lower, upper, score):
         touching = [i for i, window in enumerate(windows) if lower <= window["end"] and upper >= window["start"]]
         merged_lower = min([lower] + [windows[i]["start"] for i in touching])
         merged_upper = max([upper] + [windows[i]["end"] for i in touching])
         used = sum(window["end"] - window["start"] for i, window in enumerate(windows) if i not in touching)
         if used + merged_upper - merged_lower > max_chars:
-            # Prefer the higher-ranked windows already returned. A later hit
-            # may still fit through overlap, so continue rather than stopping.
-            continue
+            return None
         merged = {"start": merged_lower, "end": merged_upper,
-                  "text": source[merged_lower:merged_upper], "score": hit["score"]}
+                  "text": source[merged_lower:merged_upper], "score": score}
+        updated = list(windows)
         if touching:
             first = touching[0]
             merged["score"] = windows[first]["score"]
-            windows[first] = merged
-            windows = [window for i, window in enumerate(windows) if i not in touching[1:]]
+            updated[first] = merged
+            updated = [window for i, window in enumerate(updated) if i not in touching[1:]]
         else:
-            windows.append(merged)
+            updated.append(merged)
+        return updated
+
+    windows: list[dict[str, Any]] = []
+    retained = []
+    for hit in observation["hits"]:
+        start, end = hit["start"], hit["end"]
+        if type(start) is not int or type(end) is not int or not 0 <= start < end <= len(source) or hit["text"] != source[start:end]:
+            raise ValueError("retrieval hit must identify an exact source interval")
+        proposed = add_window(windows, start, end, hit["score"])
+        if proposed is not None:
+            windows = proposed
+            retained.append(hit)
+    # Reserve every core before expanding. If cores alone exceed the cap,
+    # retain whole cores greedily in rank order; later overlaps may still fit.
+    for hit in retained:
+        lower, upper = max(0, hit["start"] - context_chars), min(len(source), hit["end"] + context_chars)
+        proposed = add_window(windows, lower, upper, hit["score"])
+        if proposed is not None:
+            windows = proposed
     return {**observation, "hits": windows}

@@ -10,6 +10,13 @@ from torch.utils.checkpoint import checkpoint
 
 
 def completion_logprobs_chunked(model, prompt_ids, completion_ids, *, head_chunk_tokens=128):
+    from .hf_compute import compute_context
+    with compute_context(model):
+        return _completion_logprobs_chunked(model, prompt_ids, completion_ids,
+                                           head_chunk_tokens=head_chunk_tokens)
+
+
+def _completion_logprobs_chunked(model, prompt_ids, completion_ids, *, head_chunk_tokens=128):
     if type(head_chunk_tokens) is not int or head_chunk_tokens < 1:
         raise ValueError("Positive integer head chunk size required")
     if not prompt_ids or not completion_ids:
