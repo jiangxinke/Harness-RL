@@ -305,6 +305,15 @@ async def generate(
 ) -> list[Any]:
     """Run one token-correct production StackPlanner episode for slime."""
 
+    # Slime's final CLI arguments and per-sample sampling can override config.
+    # Check both before building an adapter or requesting any generated tokens.
+    if not evaluation and (getattr(args, "rollout_top_p", 1.0) != 1.0
+                           or sampling_params.get("top_p", 1.0) != 1.0):
+        raise ValueError(
+            "The built-in StackPlanner rollout currently requires top_p=1.0; "
+            "it does not preserve the exact nucleus token metadata needed for training. "
+            "A custom_generate_function may implement its own top-p replay support."
+        )
     del sampling_params
     config = _load_training_config()
     prompt_text = _prompt_text(
