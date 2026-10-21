@@ -218,6 +218,145 @@ def test_real_grammar_masks_illegal_tokens_and_accepts_eos_after_complete_json(t
         prefix = torch.cat((prefix, torch.tensor([[token]])), dim=1)
 
 
+def test_mixed_schemas_batch_once_and_keep_each_request_schema(tokenizer):
+    schemas = [web_final_schema(['name'], [WEB_URL]), web_final_schema(['name'], [WEB_OTHER])]
+    answers = [{'answer': [{'name': 'A', 'citations': [url]}]} for url in (WEB_URL, WEB_OTHER)]
+    finals = [final_ids(tokenizer, text=json.dumps(answer)) for answer in answers]
+    traces = []
+    value = policy(tokenizer, thoughts=[[END_THINK], [10065, END_THINK]], finals=finals,
+                   mixed_schema_batching=True, trace_sink=traces.append)
+    async def run():
+        try:
+            return await asyncio.gather(*[
+                value.bind_task(f'row-{i}').generate_structured(messages(str(i)), json_schema=schema,
+                    max_new_tokens=260, temperature=1.) for i, schema in enumerate(schemas)])
+        finally:
+            await value.close()
+    results = asyncio.run(run())
+    assert len(value.model.calls) == 2  # One thought and one JSON batch, not four serial calls.
+    assert all(call['input_ids'].shape[0] == 2 for call in value.model.calls)
+    processor = value.model.calls[1]['logits_processor'][0]
+    assert len(processor.compiled_grammars) == 2
+    assert [json.loads(result.text) for result in results] == answers
+    assert [trace['task_id'] for trace in traces] == ['row-0', 'row-1']
+    assert [trace['json_public_schema'] for trace in traces] == schemas
+
+
+def test_real_per_row_grammars_cannot_use_sibling_citation(tokenizer):
+    from xgrammar.contrib.hf import LogitsProcessor
+    value = policy(tokenizer, mixed_schema_batching=True)
+    urls = ['https://example.org/a', 'https://example.org/b']
+    schemas = [web_final_schema(['name'], [url]) for url in urls]
+    grammars = [compile_native_structured_schema(value.compiler, schema) for schema in schemas]
+    processor = LogitsProcessor(grammars)
+    texts = [web_dump({'answer': [{'name': 'A', 'citations': [url]}]}) for url in urls]
+    tokens = [final_ids(tokenizer, text=text) for text in texts]
+    assert len(tokens[0]) == len(tokens[1])
+    prefix = torch.tensor([[10065], [10065]])
+    divergent = False
+    for left, right in zip(*tokens, strict=True):
+        masked = processor(prefix, torch.zeros((2, 151670)))
+        assert torch.isfinite(masked[0, left]) and torch.isfinite(masked[1, right])
+        if left != right:
+            divergent = True
+            assert torch.isneginf(masked[0, right]) and torch.isneginf(masked[1, left])
+        prefix = torch.cat((prefix, torch.tensor([[left], [right]])), dim=1)
+    assert divergent
+
+
+def test_mixed_schema_filtering_and_failed_thought_keep_row_alignment(tokenizer):
+    schemas = [web_final_schema(['name'], [url]) for url in (WEB_URL, WEB_OTHER, WEB_URL)]
+    answer = {'answer': [{'name': 'B', 'citations': [WEB_OTHER]}]}
+    traces = []
+    value = policy(tokenizer, thoughts=[[END_THINK], [10065] * 4],
+        finals=[final_ids(tokenizer, text=json.dumps(answer))], mixed_schema_batching=True,
+        trace_sink=traces.append)
+    results = value._generate_batch([messages('x' * 3000), messages('B'), messages('C')], schemas,
+                                   ['overflow', 'B', 'C'])
+    assert isinstance(results[0], PromptHistoryBudgetExceeded)
+    assert json.loads(results[1].text) == answer
+    assert isinstance(results[2], ModelProtocolFailure)
+    assert [trace['task_id'] for trace in traces] == ['B', 'C']
+    assert [trace['json_public_schema'] for trace in traces] == schemas[1:]
+    assert value.model.calls[0]['input_ids'].shape[0] == 2
+    assert value.model.calls[1]['input_ids'].shape[0] == 1
+
+
+def test_actual_hf_generate_mixed_schemas_preserves_behavior_and_row_ownership(tokenizer):
+    from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
+    config = Qwen3MoeConfig(vocab_size=151670, hidden_size=8, intermediate_size=12,
+        moe_intermediate_size=4, num_hidden_layers=1, num_attention_heads=2,
+        num_key_value_heads=1, head_dim=4, num_experts=4, num_experts_per_tok=2,
+        attention_dropout=0., max_position_embeddings=4096)
+    model = Qwen3MoeForCausalLM(config).eval()
+    model.generation_config = GenerationConfig(eos_token_id=[151645, 151643])
+    urls = ['https://example.org/a', 'https://example.org/b']
+    schemas = [web_final_schema(['name'], [url]) for url in urls]
+    answers = [{'answer': [{'name': name, 'citations': [url]}]} for name, url in zip(['A', 'BB'], urls)]
+    finals = [final_ids(tokenizer, text=web_dump(answer)) for answer in answers]
+    state, calls, traces = {}, [], []
+    original_generate = model.generate
+    def fixture_logits(module, args, output):
+        result = torch.full_like(output, -10000.)
+        for row, tokens in enumerate(state['tokens']):
+            target = tokens[min(state['cursor'], len(tokens) - 1)]
+            result[row, ..., target] = 10000.
+        state['cursor'] += 1
+        return result
+    model.lm_head.register_forward_hook(fixture_logits)
+    def generate(**kwargs):
+        thought = END_THINK in _call_generation_config(kwargs).eos_token_id
+        state.update(tokens=[[END_THINK], [END_THINK]] if thought else finals, cursor=0)
+        calls.append((thought, kwargs['input_ids'].shape[0]))
+        return original_generate(**kwargs)
+    model.generate = generate
+    value = NativeHFPolicy(model, tokenizer, thought_tokens=4, json_tokens=256,
+        max_prompt_tokens=2048, mixed_schema_batching=True,
+        capture_thought_logprobs=True, trace_sink=traces.append)
+    results = value._generate_batch([messages('A'), messages('Longer BB')], schemas, ['A', 'BB'])
+    assert calls == [(True, 2), (False, 2)]
+    assert [json.loads(result.text) for result in results] == answers
+    assert [result.thought_logprobs for result in results] == [[0.], [0.]]
+    assert [trace['task_id'] for trace in traces] == ['A', 'BB']
+    assert [trace['json_public_schema'] for trace in traces] == schemas
+
+
+def test_default_rejects_schema_list_before_sampling(tokenizer):
+    value = policy(tokenizer)
+    with pytest.raises(ValueError, match='Opt-in mixed-schema'):
+        value._generate_batch([messages()], [cuad_final_schema()])
+    assert value.model.calls == []
+
+
+def test_cancelled_queued_schema_never_starts_generation(tokenizer, monkeypatch):
+    import threading
+    schemas = [web_final_schema(['name'], [url]) for url in (WEB_URL, WEB_OTHER)]
+    value = policy(tokenizer)
+    started, release = threading.Event(), threading.Event()
+    calls = []
+    def generate(messages_batch, schema, task_ids):
+        calls.append(task_ids)
+        started.set()
+        assert release.wait(5)
+        return [NativeHFCompletion(text='{"answer":[]}') for _ in messages_batch]
+    monkeypatch.setattr(value, '_generate_batch', generate)
+    async def run():
+        workers = [asyncio.create_task(value.generate_structured(messages(str(i)), json_schema=schema,
+            max_new_tokens=260, temperature=1., _task_id=str(i))) for i, schema in enumerate(schemas)]
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            workers[1].cancel()
+            release.set()
+            return await asyncio.gather(*workers, return_exceptions=True)
+        finally:
+            release.set()
+            await value.close()
+    results = asyncio.run(run())
+    assert calls == [['0']]
+    assert isinstance(results[0], NativeHFCompletion)
+    assert isinstance(results[1], asyncio.CancelledError)
+
+
 @pytest.mark.parametrize('profile,do_sample,temperature,top_p,top_k', [
     ('greedy', False, 1.0, 1.0, 0), ('thinking', True, 0.6, 0.95, 20),
 ])

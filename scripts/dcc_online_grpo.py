@@ -277,7 +277,8 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
         policy = NativeHFPolicy(model, tokenizer, thought_tokens=args.thought_tokens,
             json_tokens=args.json_tokens, max_prompt_tokens=args.max_prompt_tokens,
             sampling_profile="raw", trace_sink=lambda value: enqueue(traces, value),
-            capture_thought_logprobs=True)
+            capture_thought_logprobs=True,
+            mixed_schema_batching=getattr(args, "native_mixed_schema_batching", False))
         runner = make_runner(args)
         # Identical initial replicas; independent sampled trajectories afterwards.
         torch.manual_seed(args.seed + rank * 100003)
@@ -414,6 +415,8 @@ def main(argv=None):
     parser.add_argument("--web-draws-per-cycle", type=int, default=1)
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--group-size", type=int, default=2)
+    parser.add_argument("--native-mixed-schema-batching", action="store_true",
+                        help="Batch native requests with distinct schemas using one grammar matcher per row")
     parser.add_argument("--thought-tokens", type=int, default=4096)
     parser.add_argument("--json-tokens", type=int, default=4096)
     parser.add_argument("--max-prompt-tokens", type=int, default=16384)

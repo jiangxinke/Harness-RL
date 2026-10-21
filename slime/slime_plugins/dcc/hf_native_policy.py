@@ -84,7 +84,8 @@ class NativeHFPolicy:
     def __init__(self, model, tokenizer, *, thought_tokens=8192, json_tokens=4096,
                  max_prompt_tokens=16384, max_model_len=None, batch_size=4,
                  sampling_profile="raw", allow_truncation=False, trace_sink=None,
-                 web_bounded_whitespace=False, capture_thought_logprobs=False):
+                 web_bounded_whitespace=False, capture_thought_logprobs=False,
+                 mixed_schema_batching=False):
         from transformers import GenerationConfig
         import xgrammar as xgr
 
@@ -95,7 +96,10 @@ class NativeHFPolicy:
             raise ValueError("Positive integer token and batch budgets required")
         if type(capture_thought_logprobs) is not bool or (capture_thought_logprobs and sampling_profile != "raw"):
             raise ValueError("Actual behavior scores require explicit raw thought sampling")
+        if type(mixed_schema_batching) is not bool:
+            raise ValueError("Mixed-schema batching must be an explicit boolean")
         self.capture_thought_logprobs = capture_thought_logprobs
+        self.mixed_schema_batching = mixed_schema_batching
         self._last_thought_logprobs = None
         self.model, self.tokenizer = model, tokenizer
         self.thought_tokens, self.json_tokens = thought_tokens, json_tokens
@@ -126,6 +130,7 @@ class NativeHFPolicy:
             "policy_gradient": "real-stage-one-IDs-only; deterministic-JSON-mask-zero",
             "failure_policy": "retain-actual-thought-IDs-with-reward-zero; no-forced-close-or-retry",
             "backend": "hf", "supported_benchmark": "cuad-and-widesearch",
+            "mixed_schema_batching": mixed_schema_batching,
             "web_bounded_whitespace": web_bounded_whitespace_configuration(web_bounded_whitespace),
             "web_schema_policy": "existing-public-schema-and-review-decoder; original-schema-postvalidation",
             "compute_profile": model_compute_profile(model),
@@ -171,11 +176,19 @@ class NativeHFPolicy:
             groups = defaultdict(list)
             for request in requests:
                 if not request[3].done():
-                    groups[json.dumps(request[1], sort_keys=True)].append(request)
+                    key = None if self.mixed_schema_batching else json.dumps(request[1], sort_keys=True)
+                    groups[key].append(request)
             for group in groups.values():
+                # An earlier schema group may run past a sibling deadline.
+                # Do not start GPU work for requests already cancelled while
+                # waiting; running work still follows the existing drain path.
+                group = [request for request in group if not request[3].done()]
+                if not group:
+                    continue
                 try:
+                    schemas = [item[1] for item in group] if self.mixed_schema_batching else group[0][1]
                     values = await asyncio.to_thread(self._generate_batch,
-                        [item[0] for item in group], group[0][1], [item[2] for item in group])
+                        [item[0] for item in group], schemas, [item[2] for item in group])
                     for request, value in zip(group, values, strict=True):
                         if not request[3].done():
                             if isinstance(value, Exception):
@@ -232,7 +245,7 @@ class NativeHFPolicy:
 
     @torch.inference_mode()
     def _generate_batch(self, messages_batch, json_schema, task_ids=None):
-        native_structured_schema_kind(json_schema)
+        schemas = self._batch_schemas(json_schema, len(messages_batch))
         prompts, selected, results = [], [], [None] * len(messages_batch)
         for i, messages in enumerate(messages_batch):
             full = _chat_tokens(self.tokenizer, messages)
@@ -248,14 +261,27 @@ class NativeHFPolicy:
             prompts.append(prompt)
             selected.append(i)
         if selected:
-            values = self._generate_encoded_batch(prompts, json_schema,
+            selected_schemas = [schemas[i] for i in selected] if isinstance(json_schema, list) else json_schema
+            values = self._generate_encoded_batch(prompts, selected_schemas,
                 [task_ids[i] for i in selected] if task_ids is not None else None)
             for i, value in zip(selected, values, strict=True):
                 results[i] = value
         return results
 
+    def _batch_schemas(self, json_schema, count):
+        if isinstance(json_schema, list):
+            if not self.mixed_schema_batching or len(json_schema) != count:
+                raise ValueError("Opt-in mixed-schema batch needs exactly one public schema per request")
+            schemas = json_schema
+        else:
+            schemas = [json_schema] * count
+        for schema in schemas:
+            native_structured_schema_kind(schema)
+        return schemas
+
     def _generate_encoded_batch(self, prompts, json_schema, task_ids):
         from jsonschema import Draft202012Validator
+        schemas = self._batch_schemas(json_schema, len(prompts))
         self.model.eval()
         thought_started = time.monotonic()
         thoughts = self._phase(prompts, phase="thought")
@@ -266,12 +292,18 @@ class NativeHFPolicy:
         finals = [[] for _ in prompts]
         json_seconds = None
         if valid:
-            key = json.dumps(json_schema, sort_keys=True)
-            if key not in self.grammars:
-                self.grammars[key] = compile_native_structured_schema(self.compiler, json_schema,
-                    web_bounded_whitespace=self.web_bounded_whitespace)
+            grammars = []
+            for i in valid:
+                key = json.dumps(schemas[i], sort_keys=True)
+                if key not in self.grammars:
+                    self.grammars[key] = compile_native_structured_schema(self.compiler, schemas[i],
+                        web_bounded_whitespace=self.web_bounded_whitespace)
+                grammars.append(self.grammars[key])
             json_started = time.monotonic()
-            generated = self._phase([prompts[i] + thoughts[i] for i in valid], phase="json", grammar=self.grammars[key])
+            # xgrammar owns a separate matcher per row. Never union schemas:
+            # each answer keeps only its own columns, read URLs and citations.
+            grammar = grammars if isinstance(json_schema, list) else grammars[0]
+            generated = self._phase([prompts[i] + thoughts[i] for i in valid], phase="json", grammar=grammar)
             json_seconds = time.monotonic() - json_started
             for i, tokens in zip(valid, generated, strict=True):
                 finals[i] = tokens
@@ -285,7 +317,7 @@ class NativeHFPolicy:
             else:
                 text = self.tokenizer.decode(final[:-1], skip_special_tokens=False)
                 try:
-                    Draft202012Validator(json_schema).validate(_strict_json(text))
+                    Draft202012Validator(schemas[i]).validate(_strict_json(text))
                 except Exception:
                     reason, text = "json_not_complete_or_schema_valid", ""
             status = reason or "completed"
@@ -308,7 +340,7 @@ class NativeHFPolicy:
                     "batch_phase_elapsed_seconds": {"thought": thought_seconds,
                         "json": json_seconds if i in valid else None},
                     "thought_sampling_profile": self.sampling_profile,
-                    "json_public_schema": json_schema})
+                    "json_public_schema": schemas[i]})
             results.append(ModelProtocolFailure(reason, completion=completion, protocol=PROTOCOL, trace_id=trace_id)
                            if reason is not None else completion)
         return results

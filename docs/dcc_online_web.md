@@ -66,3 +66,22 @@ context failure retains every outcome and discards the whole gradient group.
 Timed-out native generations are drained and their actual late completions
 remain owned in the closed journals. No retry, sibling filtering or denominator
 change is performed.
+
+For a separate throughput experiment, `--native-mixed-schema-batching` lets
+queued native requests with different public schemas share a thought batch
+and a JSON batch. The pinned xgrammar processor creates a separate grammar
+matcher for each row. Each row keeps its own required columns and read-source
+citation enum, followed by validation against that row's original public
+schema. Prompt-budget rejections and thoughts without a real closing token
+retain their row ownership when the remaining rows enter the JSON phase.
+The default remains schema-separated batching. The flag is recorded in the
+training arguments. Different padding, RNG consumption and concurrent KV
+storage can change sampled trajectories and peak memory; verify the selected
+configuration on the actual GPU before scaling it.
+
+The episode deadline covers queue waiting as well as execution. Allow enough
+outer watchdog time for the configured group size, and use the explicit
+thought/JSON/turn budgets to bound policy work. A queue timeout alone does not
+show a model error. Requests cancelled while waiting for another schema group
+are checked again before submission and do not start new generation. Already
+running work is still drained and retained with its actual ownership.
