@@ -85,8 +85,8 @@ def load_approved(profile_path, source_root, expected_source, tokenizer):
     receipt = validate_source_receipt(
         _strict_json((Path(source_root) / ".dcc-native-source.json").read_text()), expected_source)
     profile = _strict_json(Path(profile_path).read_text())
-    from dcc_review_training import JOINT_CACHED_CUAD_PROFILE
-    require(profile.get("version") != JOINT_CACHED_CUAD_PROFILE,
+    from dcc_review_training import JOINT_CACHED_CUAD_TRAIN_PROFILES
+    require(profile.get("version") not in JOINT_CACHED_CUAD_TRAIN_PROFILES,
             "Joint cached Web/CUAD profile is training-only; use original separate collection profiles")
     from dcc_review_training import approved_web_profile, approved_cuad_profile, bind_profile_source
     web = approved_web_profile(profile, WebSchemaProfile)
@@ -231,8 +231,8 @@ async def generate(tasks, native, output, *, collection_id, profile, schema_prof
                    rank=0, world_size=1, concurrency=1, timeout_seconds=900,
                    web_tools_factory=None):
     """Generate one fixed shard; no parameter or branch can load TRAIN labels."""
-    from dcc_review_training import JOINT_CACHED_CUAD_PROFILE
-    require(profile.get("version") != JOINT_CACHED_CUAD_PROFILE,
+    from dcc_review_training import JOINT_CACHED_CUAD_TRAIN_PROFILES
+    require(profile.get("version") not in JOINT_CACHED_CUAD_TRAIN_PROFILES,
             "Joint cached Web/CUAD profile is training-only; use original separate collection profiles")
     require(isinstance(native, NativeThinkingPolicy), "Use the actual NativeThinkingPolicy")
     from dcc_review_training import approved_cuad_profile, approved_web_profile
@@ -354,8 +354,8 @@ async def generate(tasks, native, output, *, collection_id, profile, schema_prof
 
 def read_closed(output, *, profile, receipt, world_size, cached_source_registry=None):
     """Verify all rank closures/journal joins before selector can open labels."""
-    from dcc_review_training import JOINT_CACHED_CUAD_PROFILE
-    require(profile.get("version") != JOINT_CACHED_CUAD_PROFILE,
+    from dcc_review_training import JOINT_CACHED_CUAD_TRAIN_PROFILES
+    require(profile.get("version") not in JOINT_CACHED_CUAD_TRAIN_PROFILES,
             "Joint cached Web/CUAD profile is training-only; use original separate collection profiles")
     output = Path(output)
     from dcc_review_training import approved_cuad_profile, approved_web_profile

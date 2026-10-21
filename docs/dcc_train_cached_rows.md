@@ -78,3 +78,35 @@ profile cannot use this joint route. The collector and selector reject this
 training-only profile; collect and close the two domains separately under their
 original profiles. Prospective preference collection and DPO keep rejecting
 cached Web histories.
+
+## Joint training with CUAD task-bound contiguous v2
+
+Use `dcc-native-train-profile-web32k-cached-rows-cuad-taskbound-contiguous-v4`
+only when the separately collected CUAD input uses
+`dcc-native-train-profile-cuad-taskbound-contiguous-v2` and its exact
+`cuad-train-retrieval-taskbound-contiguous-v2` binding. This is a separate SFT
+loader profile. The previous joint profile continues to require CUAD v1.
+
+As with the original joint route, preserve the underlying static16k cached Web
+`identity` and `web` objects, set `web_profile_version` to
+`dcc-native-train-profile-web32k-cached-rows-v3`, and copy the complete original
+CUAD `cuad` and `cuad_identity` objects without changing their collection source
+commit, generation seed or retrieval profile bytes. Enumerate the exact sorted
+`cuad_identity_differences` using the existing allowlist. The Web sidecar retains
+its original static16k profile version and collection source receipt. Each
+native trace is validated against its own domain identity and original receipt;
+the joint training overlay never replaces either collection receipt.
+
+The matching training overlay must name the new joint profile, its own
+`collection_overlay_id`, `baseline_source_unchanged: false`, and the complete
+current `web_cached_rows` configuration. Both native input files are required
+and must pass validation before sampling or loading model weights. CUAD v2 still
+requires the explicit trusted CUAD schema profile, exact public task/tool replay,
+original native prompt/completion IDs, complete source user messages visible in
+the decoded actual prompt, and exact raw document offsets/text before contiguous
+source spans can be joined. No native validation or grounding gate changes.
+
+This profile does not enable collection, selection, prospective preferences or
+DPO. Collect and select both domains separately under their original profiles;
+the joint profile is rejected by those collection and selection entry points.
+Cached Web histories remain unsupported by prospective preferences and DPO.
