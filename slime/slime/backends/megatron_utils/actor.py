@@ -187,9 +187,11 @@ class MegatronTrainRayActor(TrainRayActor):
         # empty cache after initialization
         clear_memory()
 
-        if self.args.offload_train:
-            # recover to actor in the end.
+        # Auxiliary checkpoints are loaded into the live model. Restore the
+        # actor before the first rollout sync, including non-offloaded training.
+        if self._active_model_tag != "actor":
             self._switch_model("actor")
+        if self.args.offload_train:
             self.sleep()
 
         self.rollout_engines = None
