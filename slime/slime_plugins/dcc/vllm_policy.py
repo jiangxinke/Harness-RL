@@ -330,13 +330,18 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
                      web_structured_actions=False, web_explicit_review=False,
                      web_bounded_whitespace=False, web_navigation_ledger=False, web_research_checkpoints=False, web_data_discovery_guidance=False, web_multi_citation=False, web_cached_rows=False,
                      quantization="none", fp8_validation_dir=None,
-                     bf16_attention_only_lora=False, bf16_lora_validation_dir=None):
+                     bf16_attention_only_lora=False, bf16_lora_validation_dir=None,
+                     bf16_latency_inventory=False):
     """Load BF16 or explicit FP8 vLLM inference without changing the HF trainer.
 
     Save ``policy.provenance`` alongside prediction manifests in a new external
     output directory. A backend change must never resume an existing HF run.
     GPU ownership and CUDA_VISIBLE_DEVICES are managed by the caller.
     """
+    if type(bf16_latency_inventory) is not bool:
+        raise TypeError("bf16_latency_inventory must be a bool")
+    if bf16_latency_inventory and (quantization != "none" or tensor_parallel_size != 1):
+        raise ValueError("BF16 latency inventory requires quantization=none and TP=1")
     if type(bf16_attention_only_lora) is not bool:
         raise TypeError("bf16_attention_only_lora must be a bool")
     if bf16_attention_only_lora and (quantization != "none" or tensor_parallel_size != 1):
@@ -449,6 +454,9 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
         engine_kwargs["worker_cls"] = WORKER_CLASS
         binding = worker_binding(adapter=metadata["path"] if metadata else None, model_config=config.to_dict(),
                                  audit_dir=bf16_lora_validation_dir)
+    if bf16_latency_inventory:
+        from .bf16_attention_guard import LATENCY_WORKER_EXTENSION
+        engine_kwargs["worker_extension_cls"] = LATENCY_WORKER_EXTENSION
     with binding, _engine_environment():
         if asynchronous:
             from vllm.engine.arg_utils import AsyncEngineArgs
@@ -491,6 +499,10 @@ def load_vllm_policy(model_name, *, adapter=None, batch_size=8, max_prompt_token
         from .bf16_attention_guard import VALIDATION_LAYOUT, runtime_identity
         provenance.update(bf16_attention_only_lora=True, bf16_lora_validation=dict(VALIDATION_LAYOUT),
                           runtime_code_identity=runtime_identity())
+    if bf16_latency_inventory:
+        from .bf16_attention_guard import LATENCY_INVENTORY_RPC
+        provenance["bf16_latency_inventory"] = dict(
+            worker_extension=engine_kwargs["worker_extension_cls"], rpc=LATENCY_INVENTORY_RPC)
     if evaluation_sampling != EvaluationSampling():
         provenance["sampling"] = "explicit evaluation sampling; explicit EOS; generation_config=vllm"
     if web_structured_final:

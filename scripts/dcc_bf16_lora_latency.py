@@ -34,33 +34,6 @@ def build_workload(tokenizer, lengths, batch_size):
                          for _ in range(batch_size)]} for length in lengths]
 
 
-def inspect_model(model):
-    """Runs in the actual worker via the pinned vLLM public apply_model API."""
-    import torch
-    from vllm.lora.layers.base import BaseLayerWithLoRA
-    from vllm.model_executor.layers.fused_moe import FusedMoE
-    wrappers, experts, buffers, enabled = [], [], [], []
-    for name, module in model.named_modules():
-        if isinstance(module, BaseLayerWithLoRA):
-            wrappers.append({'name': name, 'type': type(module).__name__})
-        if isinstance(module, FusedMoE):
-            experts.append({'name': name, 'method': type(module.quant_method).__name__})
-        if type(module).__name__ == 'FusedMoEWithLoRA':
-            enabled.append({'name': name, 'values': module.adapter_enabled.detach().cpu().tolist()})
-            for weight in ('w1_lora_a_stacked', 'w1_lora_b_stacked', 'w2_lora_a_stacked',
-                           'w2_lora_b_stacked', 'w3_lora_a_stacked', 'w3_lora_b_stacked'):
-                tensor = getattr(module, weight)
-                buffers.append({'name': name + '.' + weight, 'shape': list(tensor.shape),
-                                'bytes': tensor.numel() * tensor.element_size()})
-    return dict(lora_wrappers=wrappers, expert_methods=experts,
-        expert_lora_wrappers=len(enabled), expert_adapter_enabled=enabled,
-        expert_lora_buffers=buffers, expert_lora_buffer_bytes=sum(row['bytes'] for row in buffers),
-        worker_cuda_allocated_bytes=torch.cuda.memory_allocated(),
-        worker_cuda_reserved_bytes=torch.cuda.memory_reserved(),
-        worker_cuda_peak_allocated_bytes=torch.cuda.max_memory_allocated(),
-        allocator_metrics_are_not_total_device_memory=True)
-
-
 def checked_outputs(outputs, prompts, completion_tokens):
     if len(outputs) != len(prompts):
         raise RuntimeError('Engine output count differs from fixed input count')
@@ -105,12 +78,14 @@ def main(argv=None):
         raise ValueError('Fresh absolute output directory required')
     # Validate the same adapter for all modes before any GPU engine construction.
     from transformers import AutoConfig
-    from slime_plugins.dcc.bf16_attention_guard import validate_attention_header, validate_worker_receipts
+    from slime_plugins.dcc.bf16_attention_guard import (LATENCY_INVENTORY_RPC,
+        validate_attention_header, validate_worker_receipts)
     header = validate_attention_header(args.adapter, AutoConfig.from_pretrained(args.model).to_dict())
     output.mkdir(parents=False, exist_ok=False)
-    manifest = dict(schema='dcc-bf16-lora-fixed-token-latency-v1', configuration=vars(args),
+    manifest = dict(schema='dcc-bf16-lora-fixed-token-latency-v2', configuration=vars(args),
                     adapter_header=header, diagnostic_only=True, benchmark_gain_claimed=False,
-                    prefix_cache_reset_before_every_call=True, source_tasks_or_labels_read=False)
+                    prefix_cache_reset_before_every_call=True, source_tasks_or_labels_read=False,
+                    worker_inventory_rpc=LATENCY_INVENTORY_RPC)
     (output/'manifest.actual.json').write_text(json.dumps(manifest, indent=2) + '\n')
     from slime_plugins.dcc.vllm_policy import load_vllm_policy
     from vllm import SamplingParams
@@ -122,7 +97,7 @@ def main(argv=None):
         max_model_len=args.max_model_len, tensor_parallel_size=1,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_num_batched_tokens=args.max_batched_tokens, seed=args.seed,
-        enforce_eager=args.enforce_eager, **options)
+        enforce_eager=args.enforce_eager, bf16_latency_inventory=True, **options)
     load_seconds = time.perf_counter() - started
     try:
         if args.mode == 'filtered':
@@ -153,7 +128,7 @@ def main(argv=None):
                     stream.write(json.dumps(row) + '\n')
                     if not row['warmup']:
                         measured.append({key: value for key, value in row.items() if key != 'outputs'})
-        inventory = engine.apply_model(inspect_model)
+        inventory = engine.collective_rpc(LATENCY_INVENTORY_RPC)
         if len(inventory) != 1:
             raise RuntimeError('Expected exactly one actual model worker')
         if args.mode == 'filtered' and inventory[0]['expert_lora_wrappers'] != 0:

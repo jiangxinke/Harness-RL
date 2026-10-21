@@ -111,3 +111,33 @@ class BF16AttentionWorker(Worker):
             diagnostic_only=True, benchmark_gain_claimed=False)
         with (audit_dir / VALIDATION_LAYOUT['worker_validation_receipt']).open('x') as stream:
             json.dump(record, stream, indent=2); stream.write('\n')
+
+
+class BF16LatencyWorkerExtension:
+    """Read-only diagnostic RPC, opt-in for all fixed-token latency arms."""
+
+    def dcc_bf16_lora_latency_inventory(self):
+        model = self.model_runner.model
+        import torch
+        from vllm.lora.layers.base import BaseLayerWithLoRA
+        from vllm.model_executor.layers.fused_moe import FusedMoE
+        wrappers, experts, buffers, enabled = [], [], [], []
+        for name, module in model.named_modules():
+            if isinstance(module, BaseLayerWithLoRA):
+                wrappers.append({'name': name, 'type': type(module).__name__})
+            if isinstance(module, FusedMoE):
+                experts.append({'name': name, 'method': type(module.quant_method).__name__})
+            if type(module).__name__ == 'FusedMoEWithLoRA':
+                enabled.append({'name': name, 'values': module.adapter_enabled.detach().cpu().tolist()})
+                for weight in ('w1_lora_a_stacked', 'w1_lora_b_stacked', 'w2_lora_a_stacked',
+                               'w2_lora_b_stacked', 'w3_lora_a_stacked', 'w3_lora_b_stacked'):
+                    tensor = getattr(module, weight)
+                    buffers.append({'name': name + '.' + weight, 'shape': list(tensor.shape),
+                                    'bytes': tensor.numel() * tensor.element_size()})
+        return dict(lora_wrappers=wrappers, expert_methods=experts,
+            expert_lora_wrappers=len(enabled), expert_adapter_enabled=enabled,
+            expert_lora_buffers=buffers, expert_lora_buffer_bytes=sum(row['bytes'] for row in buffers),
+            worker_cuda_allocated_bytes=torch.cuda.memory_allocated(),
+            worker_cuda_reserved_bytes=torch.cuda.memory_reserved(),
+            worker_cuda_peak_allocated_bytes=torch.cuda.max_memory_allocated(),
+            allocator_metrics_are_not_total_device_memory=True)

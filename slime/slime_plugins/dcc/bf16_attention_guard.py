@@ -12,6 +12,8 @@ from .fp8_attention_guard import validate_attention_header as _validate_header
 TARGETS = frozenset(('q_proj', 'v_proj', 'o_proj'))
 BINDING_KEY = 'DCC_BF16_ATTENTION_WORKER_BINDING'
 WORKER_CLASS = 'slime_plugins.dcc.bf16_attention_worker.BF16AttentionWorker'
+LATENCY_WORKER_EXTENSION = 'slime_plugins.dcc.bf16_attention_worker.BF16LatencyWorkerExtension'
+LATENCY_INVENTORY_RPC = 'dcc_bf16_lora_latency_inventory'
 VALIDATION_LAYOUT = {
     'header_validation_receipt': 'header-validation.actual.json',
     'worker_validation_receipt': 'worker-validation.actual.json',
