@@ -22,6 +22,10 @@ from .durable_journal import OrderedDurableJSONLWriter, close_durable_journals
 from .episode import _WebEvidence, ModelProtocolFailure, WIDESEARCH_EVIDENCE_GUARD_VERSION
 from .native_hf_context import (NativeHFPromptBudgetExceeded, PREFLIGHT_PROTOCOL, context_handling_configuration,
     restore_verified_native_context, unreliable_context_or_environment_group)
+from .prompt_history import PromptHistoryConfig, PromptHistoryBudgetExceeded
+from .web_train_prompt_history import (BUDGET_FIELDS, FAILURE_FIELD, FIELDS as TRAIN_HISTORY_FIELDS,
+    web_train_history_budgets, web_train_history_configuration, web_train_history_failure_fields,
+    web_train_history_fields, web_train_history_plan)
 from slime_plugins.dcc_train_literal_reward_contract import PROTOCOL, LABEL_PROTOCOL, configuration, _same
 
 WRAPPER = "dcc-hf-online-web-public-closed-literal-v2"
@@ -296,6 +300,8 @@ class OwnedEpisodePolicy:
                        error_type=type(error).__name__, error=str(error))
             if isinstance(error, NativeHFPromptBudgetExceeded):
                 row["native_hf_preflight"] = dict(error.preflight)
+                if hasattr(error, FAILURE_FIELD):
+                    row[FAILURE_FIELD] = deepcopy(getattr(error, FAILURE_FIELD))
             self.sink(row)
             if cancelled:
                 raise asyncio.CancelledError() from error
@@ -334,12 +340,26 @@ class ClosedPublicGroup:
 
 
 def verify_owned_native_group(task, results, owner_rows, traces, *, eos_ids, tokenizer,
-                              iteration, rank):
+                              iteration, rank, web_train_prompt_history_config=None, history_budgets=None):
     """Replay exact closed journal bytes, original schemas and actual token IDs."""
     from jsonschema import Draft202012Validator
     from .hf_native_policy import _strict_json
     from .hf_native_structured import native_structured_schema_kind
     from .hf_policy import _chat_tokens
+    history_config = (PromptHistoryConfig() if web_train_prompt_history_config is None
+                      else web_train_prompt_history_config)
+    if not isinstance(history_config, PromptHistoryConfig):
+        raise ValueError("An explicit Web TRAIN PromptHistoryConfig is required for ownership")
+    if history_config.enabled:
+        web_train_history_configuration(history_config)
+        if (type(history_budgets) is not dict or set(history_budgets) != set(BUDGET_FIELDS)
+                or any(type(history_budgets[key]) is not int or history_budgets[key] < 1
+                       for key in BUDGET_FIELDS)
+                or history_budgets["max_prompt_tokens"] + history_budgets["thought_tokens"]
+                    + history_budgets["json_tokens"] > history_budgets["max_model_len"]):
+            raise ValueError("Actual Web TRAIN policy budgets are required for history ownership")
+    elif history_budgets is not None:
+        raise ValueError("Web TRAIN history budgets require the explicit enabled configuration")
     if not eos_ids or END_THINK in eos_ids or len(results) < 2:
         raise ValueError("Exact native EOS IDs and complete group required")
     index = {row["trace_id"]: row for row in traces}
@@ -373,6 +393,8 @@ def verify_owned_native_group(task, results, owner_rows, traces, *, eos_ids, tok
                 if result.status not in {"infrastructure_error", "context_budget_failure"}:
                     raise ValueError("Untraced native request error requires an unreliable episode")
                 preflight = row.get("native_hf_preflight")
+                if preflight is None and FAILURE_FIELD in row:
+                    raise ValueError("Web TRAIN history failure requires its original native HF preflight")
                 if preflight is not None:
                     failure = result.metrics.get("prompt_history_failure", {})
                     trace_id = preflight.get("trace_id")
@@ -383,6 +405,26 @@ def verify_owned_native_group(task, results, owner_rows, traces, *, eos_ids, tok
                             or preflight.get("generation_submitted") is not False
                             or _chat_tokens(tokenizer, row["messages"]) != preflight.get("prompt_ids")):
                         raise ValueError("Native HF preflight error request ownership differs")
+                    if any(key in preflight for key in (*TRAIN_HISTORY_FIELDS, FAILURE_FIELD)):
+                        raise ValueError("Original native HF preflight must retain its unchanged full-request proof")
+                    if history_config.enabled:
+                        if native_structured_schema_kind(row["json_schema"]) not in {"web", "web-review"}:
+                            raise ValueError("Web TRAIN history failure requires an original Web schema")
+                        try:
+                            web_train_history_plan(tokenizer, row["messages"],
+                                config=history_config, **history_budgets)
+                        except PromptHistoryBudgetExceeded as history_error:
+                            expected_failure = web_train_history_failure_fields(row["messages"], history_error, history_config)
+                        else:
+                            raise ValueError("Web TRAIN history preflight rejected a request that can fit")
+                        if (not _same(row.get(FAILURE_FIELD), expected_failure)
+                                or not _same(preflight.get("prompt_ids"), expected_failure["original_prompt_ids"])
+                                or preflight.get("effective_prompt_limit") != history_budgets["max_prompt_tokens"]
+                                or preflight.get("thought_tokens") != history_budgets["thought_tokens"]
+                                or preflight.get("json_tokens") != history_budgets["json_tokens"]):
+                            raise ValueError("Web TRAIN history failed-plan ownership differs from recomputed request")
+                    elif FAILURE_FIELD in row:
+                        raise ValueError("Unexpected Web TRAIN history failure without explicit configuration")
                     if result.status == "context_budget_failure":
                         if (row["messages"] != failure.get("request_messages")
                                 or row["turn"] != failure.get("turn_index")
@@ -402,7 +444,26 @@ def verify_owned_native_group(task, results, owner_rows, traces, *, eos_ids, tok
                     or not 0 <= count <= len(row["completion_ids"])):
                 raise ValueError("Missing/reused/foreign completion trace ownership")
             trace = index[trace_id]
-            if (_chat_tokens(tokenizer, row["messages"]) != row["prompt_ids"]
+            if FAILURE_FIELD in row or FAILURE_FIELD in trace:
+                raise ValueError("A sampled native completion cannot carry a failed history plan")
+            if history_config.enabled:
+                if native_structured_schema_kind(row["json_schema"]) not in {"web", "web-review"}:
+                    raise ValueError("Web TRAIN history requires an original Web schema")
+                try:
+                    plan = web_train_history_plan(tokenizer, row["messages"],
+                        config=history_config, **history_budgets)
+                except PromptHistoryBudgetExceeded as error:
+                    raise ValueError("Saved Web TRAIN request has no fitting whole-turn plan") from error
+                expected_history = web_train_history_fields(row["messages"], plan.report, history_config)
+                if (not _same({key: trace.get(key) for key in TRAIN_HISTORY_FIELDS}, expected_history)
+                        or "native_web_prompt_history" in trace):
+                    raise ValueError("Web TRAIN history trace differs from recomputed original request")
+                expected_prompt = plan.prompt_ids
+            else:
+                if any(key in trace for key in (*TRAIN_HISTORY_FIELDS, "native_web_prompt_history")):
+                    raise ValueError("Unexpected Web TRAIN history without explicit configuration")
+                expected_prompt = _chat_tokens(tokenizer, row["messages"])
+            if (not _same(expected_prompt, row["prompt_ids"])
                     or trace.get("protocol") != HF_PROTOCOL or trace.get("task_id") != task.id
                     or trace.get("thought_sampling_profile") != "raw"
                     or trace.get("thought_logprobs_source") != BEHAVIOR_SCORES
@@ -480,7 +541,10 @@ class PublicGroupJournals:
             raise ValueError("Closed public outcome journal does not retain every exact episode")
         prompts = verify_owned_native_group(self.task, results, saved["request_owners"],
             saved["native_traces"], eos_ids=policy.eos_ids, tokenizer=policy.tokenizer,
-            iteration=self.iteration, rank=self.rank)
+            iteration=self.iteration, rank=self.rank,
+            **(dict(web_train_prompt_history_config=policy.web_train_prompt_history_config,
+                    history_budgets=web_train_history_budgets(policy))
+               if getattr(getattr(policy, "web_train_prompt_history_config", None), "enabled", False) else {}))
         closure = dict(version=GROUP_CLOSE, task_id=self.task.id, episodes=self.group_size,
             iteration=self.iteration, rank=self.rank, source_commit=self.source_commit,
             all_outcomes_persisted=True, policy_drained=True, native_ownership_verified=True,

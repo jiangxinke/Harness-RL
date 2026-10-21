@@ -63,6 +63,12 @@ with character-offset continuation and writes only packed windows to evidence.
 It requires `--enable-online-web`; its default is off. Strict whole-prompt
 limits remain in force, and the same cap is available in matched Web evaluation.
 
+For raw on-policy Web training, the default-off
+[`--web-train-prompt-history-whole-turns`](dcc_web_train_prompt_history.md)
+removes older complete turns when the actual token budget requires it. Group
+closure verifies the submitted prompts and sampled behavior probabilities;
+CUAD requests and the original context-failure rules retain their existing path.
+
 Install `configs/dcc/requirements-online-grpo.txt` in the separate quantized
 environment. Set paths locally; none is embedded in the code:
 

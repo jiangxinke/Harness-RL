@@ -28,6 +28,9 @@ from .native_behavior_logprobs import BEHAVIOR_LOGPROB_SOURCE, StreamingRawThoug
 from .prompt_history import PromptHistoryConfig, PromptHistoryBudgetExceeded
 from .web_hf_prompt_history import (native_web_history_configuration, native_web_history_fields,
     native_web_history_plan)
+from .web_train_prompt_history import (FAILURE_FIELD, web_train_history_budgets,
+    web_train_history_configuration, web_train_history_failure_fields,
+    web_train_history_fields, web_train_history_plan)
 
 PROTOCOL = "hf-native-two-stage-thought-only-policy-v1"
 JOINT_PROTOCOL = "hf-native-two-stage-joint-masked-JSON-policy-v1"
@@ -101,6 +104,7 @@ class NativeHFPolicy:
     joint_json_policy = False
     web_thought_budget_close = False
     prompt_history_config = PromptHistoryConfig()
+    web_train_prompt_history_config = PromptHistoryConfig()
     protocol = PROTOCOL
 
     @staticmethod
@@ -118,7 +122,7 @@ class NativeHFPolicy:
                  sampling_profile="raw", allow_truncation=False, trace_sink=None,
                  web_bounded_whitespace=False, capture_thought_logprobs=False,
                  mixed_schema_batching=False, joint_json_policy=False, web_thought_budget_close=False,
-                 prompt_history_config=None):
+                 prompt_history_config=None, web_train_prompt_history_config=None):
         from transformers import GenerationConfig
         import xgrammar as xgr
 
@@ -130,6 +134,14 @@ class NativeHFPolicy:
             raise ValueError("An explicit PromptHistoryConfig is required")
         if self.prompt_history_config.enabled and (capture_thought_logprobs or joint_json_policy or allow_truncation):
             raise ValueError("Native HF whole-turn history is Web evaluation-only; training capture, joint JSON and truncation are unsupported")
+        self.web_train_prompt_history_config = (PromptHistoryConfig() if web_train_prompt_history_config is None
+                                               else web_train_prompt_history_config)
+        if not isinstance(self.web_train_prompt_history_config, PromptHistoryConfig):
+            raise ValueError("An explicit Web TRAIN PromptHistoryConfig is required")
+        if self.web_train_prompt_history_config.enabled and (not capture_thought_logprobs
+                or sampling_profile != "raw" or joint_json_policy or allow_truncation
+                or web_thought_budget_close or self.prompt_history_config.enabled):
+            raise ValueError("Web TRAIN history requires raw behavior capture, thought-only loss and no truncation, forced close or evaluation history")
         if any(type(value) is not int or value <= 0
                for value in (thought_tokens, json_tokens, max_prompt_tokens, batch_size)):
             raise ValueError("Positive integer token and batch budgets required")
@@ -201,6 +213,9 @@ class NativeHFPolicy:
         if self.prompt_history_config.enabled:
             self.provenance.update(native_web_prompt_history=native_web_history_configuration(self.prompt_history_config),
                 policy_gradient="disabled-evaluation-only", supported_benchmark="widesearch")
+        if self.web_train_prompt_history_config.enabled:
+            self.provenance["native_web_train_prompt_history"] = web_train_history_configuration(
+                self.web_train_prompt_history_config)
 
     async def __call__(self, *args, **kwargs):
         raise ValueError("HF native policy requires generate_structured and an explicit public schema")
@@ -347,6 +362,24 @@ class NativeHFPolicy:
                 selected.append(i)
                 history_metadata.append(native_web_history_fields(messages, plan.report, self.prompt_history_config))
                 continue
+            history_failure = None
+            if (self.web_train_prompt_history_config.enabled
+                    and native_structured_schema_kind(schemas[i]) in {"web", "web-review"}):
+                try:
+                    plan = web_train_history_plan(self.tokenizer, messages,
+                        config=self.web_train_prompt_history_config, **web_train_history_budgets(self))
+                except PromptHistoryBudgetExceeded as failure:
+                    # Keep the original full-request exception and its exact old
+                    # preflight trace. Additional failed-plan proof is owned
+                    # separately and recomputed before the group may be scored.
+                    history_failure = web_train_history_failure_fields(
+                        messages, failure, self.web_train_prompt_history_config)
+                else:
+                    prompts.append(plan.prompt_ids)
+                    selected.append(i)
+                    history_metadata.append(web_train_history_fields(
+                        messages, plan.report, self.web_train_prompt_history_config))
+                    continue
             full = _chat_tokens(self.tokenizer, messages)
             if len(full) > self.max_prompt_tokens and not self.allow_truncation:
                 failure = NativeHFPromptBudgetExceeded(full, limit=self.max_prompt_tokens,
@@ -354,23 +387,29 @@ class NativeHFPolicy:
                     thought_tokens=self.thought_tokens, json_tokens=self.json_tokens,
                     sampling_profile=self.sampling_profile,
                     behavior_source=BEHAVIOR_LOGPROB_SOURCE if self.capture_thought_logprobs else None)
+                if history_failure is not None:
+                    setattr(failure, FAILURE_FIELD, history_failure)
                 # This additional diagnostic belongs only to raw TRAIN capture.
                 # Evaluation sinks retain their completion-only trace counts.
                 if self.capture_thought_logprobs and self.trace_sink is not None:
                     self.trace_sink(dict(failure.preflight))
                 results[i] = failure
                 continue
+            if history_failure is not None:
+                raise ValueError("Failed Web TRAIN history must preserve an overflowing original full request")
             prompt = encode_messages(self.tokenizer, messages, self.max_prompt_tokens,
                                      allow_truncation=self.allow_truncation)
             if prompt[-len(self.suffix_ids):] != self.suffix_ids:
                 raise ValueError("Real encoded prompts must end in the native open-thinking suffix")
             prompts.append(prompt)
             selected.append(i)
+            history_metadata.append(None)
         if selected:
             selected_schemas = [schemas[i] for i in selected] if isinstance(json_schema, list) else json_schema
             values = self._generate_encoded_batch(prompts, selected_schemas,
                 [task_ids[i] for i in selected] if task_ids is not None else None,
-                **({"history_metadata": history_metadata} if self.prompt_history_config.enabled else {}))
+                **({"history_metadata": history_metadata} if self.prompt_history_config.enabled
+                   or self.web_train_prompt_history_config.enabled else {}))
             for i, value in zip(selected, values, strict=True):
                 results[i] = value
         return results
@@ -472,7 +511,7 @@ class NativeHFPolicy:
                     trace.update(web_thought_budget_close=web_thought_budget_close_configuration(self.thought_tokens),
                         forced_thought_positions=([self.thought_tokens - 1]
                             if len(thought) == self.thought_tokens and thought[-1] == END_THINK else []))
-                if history_metadata is not None:
+                if history_metadata is not None and history_metadata[i] is not None:
                     trace.update(deepcopy(history_metadata[i]))
                 if self.joint_json_policy:
                     trace.update(json_logprobs=completion.json_logprobs,
