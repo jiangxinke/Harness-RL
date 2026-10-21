@@ -528,7 +528,11 @@ def get_reinforce_plus_plus_returns(
 
         # Step 3: Compute returns on full response kl tensor.
         full_mask = loss_masks[i]
-        assert full_mask.sum().item() > 0, f"Sequence at index {i} is fully masked."
+        # Removed/empty rows remain in the batch schedule. Keep their CP
+        # collective above, but give them no return or terminal reward.
+        if full_mask.sum().item() == 0:
+            final_returns_chunks.append(torch.zeros_like(local_kl_chunk))
+            continue
         masked_kl = full_kl_response * full_mask
         token_level_rewards = -kl_coef * masked_kl
         last_idx = full_mask.nonzero(as_tuple=True)[0][-1]
