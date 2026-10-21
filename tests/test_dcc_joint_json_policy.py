@@ -72,6 +72,48 @@ def segment_from_completion(completion):
         completion.json_public_schema, completion.json_stop_ids)
 
 
+@pytest.mark.parametrize("json_tokens", [2, 192])
+def test_weighted_replay_retains_real_complete_or_truncated_json_boundary(tiny, json_tokens):
+    """Actual HF/xgrammar behavior through replay; phase losses use the old oracle."""
+    model, _ = tiny
+    policy = make_policy(tiny, json_tokens=json_tokens)
+    torch.manual_seed(41)
+    output = policy._generate_encoded_batch([[5]], cuad_final_schema(), ["weighted-TRAIN-fixture"])[0]
+    completion = output.completion if isinstance(output, ModelProtocolFailure) else output
+    segment = segment_from_completion(completion)
+    count = segment.thought_count
+    final = segment.completion_ids[count:]
+    assert count > 0 and final
+    if json_tokens == 2:
+        assert len(final) == 2 and final[-1] not in policy.eos_ids
+    else:
+        assert final[-1] in policy.eos_ids
+    actual_old = list(segment.behavior_logprobs)
+    actual_ids = list(segment.completion_ids)
+    current = segment_scorer(segment, policy.compiler, backend="original")(
+        model, segment.prompt_ids, segment.completion_ids)
+    old = torch.tensor(actual_old)
+    budget = 4 + json_tokens
+    expected = thought_policy_loss(current[:count], old[:count], -.4,
+        group_size=2, max_steps=2, thought_tokens=budget)
+    expected += 4 * thought_policy_loss(current[count:], old[count:], -.4,
+        group_size=2, max_steps=2, thought_tokens=budget)
+    expected.backward()
+    gradients = [p.grad.detach().clone() if p.grad is not None else None for p in model.parameters()]
+    model.zero_grad(set_to_none=True)
+    signal = SimpleNamespace(segments=[[segment], []], advantages=[-.4, 0.])
+    report = trainer.replay_group(model, signal, None, group_size=2, max_steps=2,
+        thought_tokens=4, json_tokens=json_tokens, clip=.2, joint_json_policy=True,
+        grammar_compiler=policy.compiler, logprob_backend="original", replay_diagnostic="off",
+        json_surrogate_weight=4)
+    assert report["policy_loss"] == pytest.approx(expected.item(), rel=1e-6, abs=1e-8)
+    for parameter, gradient in zip(model.parameters(), gradients, strict=True):
+        assert (parameter.grad is None) == (gradient is None)
+        if gradient is not None:
+            torch.testing.assert_close(parameter.grad, gradient, rtol=2e-5, atol=2e-7)
+    assert segment.behavior_logprobs == actual_old and segment.completion_ids == actual_ids
+
+
 @pytest.mark.parametrize("allowed", [[1], [0, 2]])
 def test_masked_probability_and_gradient(allowed):
     logits = torch.tensor([[0.3, -0.1, 0.7]], requires_grad=True)

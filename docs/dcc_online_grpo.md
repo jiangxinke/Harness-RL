@@ -21,6 +21,22 @@ reference-KL term uses the same legal support. Joint metadata identifies the
 two-phase objective separately, and online Web training is rejected in this
 mode. Omitting the switch retains the original thought-only policy.
 
+The optional `--json-surrogate-weight 4` increases the JSON policy-surrogate
+coefficient in joint CUAD token GRPO. Its default is `1`, which calls the
+original loss and preserves the existing configuration identity. A nondefault
+weight must be finite and positive and requires `--joint-json-policy`; it is
+rejected with thought-only training, online Web, or episode GSPO. Set the same
+weight in CPU preflight and training.
+
+For each actual scored position, the coefficient is one for thought tokens
+and the declared weight for JSON tokens. The denominator remains
+`group_size * max_steps * (thought_tokens + json_tokens)`. Advantages, captured
+behavior scores, legal grammar support and reference KL are unchanged; KL is
+not multiplied by the JSON coefficient. Increasing the coefficient changes
+the relative phase gradients and can affect global gradient clipping and
+relative KL strength. This is a separate algorithm candidate whose benefit
+requires a matched evaluation.
+
 Use fresh rollouts, a fresh output directory and a matched base/adapter
 evaluation for this experiment. Joint replay includes JSON in the decoder
 sequence and retains packed grammar masks, increasing compute and memory.

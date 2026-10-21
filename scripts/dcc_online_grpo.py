@@ -45,6 +45,8 @@ from slime_plugins.dcc.reference_kl import (VARIANT as REFERENCE_KL_VARIANT,
     frozen_base_logprobs, reference_kl_configuration, thought_reference_kl_loss,
     validate_base_reference_model, validate_reference_kl_beta)
 from slime_plugins.dcc.native_hf_context import context_handling_configuration
+from slime_plugins.dcc.native_joint_grpo import (JSON_SURROGATE_VARIANT,
+    json_surrogate_configuration, validate_json_surrogate_weight, weighted_joint_policy_loss)
 from slime_plugins.dcc.online_web import (ONLINE_REWARD_VARIANTS, TABLE_GROUNDED_REWARD,
     online_reward_configuration)
 from slime_plugins.dcc.retrieval import load_retrieval_profile
@@ -176,7 +178,7 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
                  replay_diagnostic="full", reference_kl_beta=0, reference_base_model=None,
                  reference_source_commit=None, joint_json_policy=False, json_tokens=None,
                  grammar_compiler=None, logprob_backend="qwen3-moe-chunked", head_chunk_tokens=None,
-                 policy_surrogate="token-grpo"):
+                 policy_surrogate="token-grpo", json_surrogate_weight=1):
     """Use actual cached-generation behavior as old; replay is diagnostic only.
 
     Cached generation and teacher-forced replay may differ numerically even
@@ -187,6 +189,8 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
         raise ValueError("Replay diagnostic must be full, first or off")
     validate_reference_kl_beta(reference_kl_beta)
     validate_policy_surrogate(policy_surrogate, reference_kl_beta)
+    validate_json_surrogate_weight(json_surrogate_weight,
+        joint_json_policy=joint_json_policy, policy_surrogate=policy_surrogate)
     objective_tokens = thought_tokens
     if joint_json_policy:
         if type(json_tokens) is not int or json_tokens < 1 or grammar_compiler is None:
@@ -254,8 +258,14 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
         lo, hi = ratio.min().item(), ratio.max().item()
         ratio_min, ratio_max = min(ratio_min if ratio_min is not None else lo, lo), max(ratio_max if ratio_max is not None else hi, hi)
         clipped_tokens += ((ratio < 1 - clip) | (ratio > 1 + clip)).sum().item()
-        loss = thought_policy_loss(current, old, advantage,
-            group_size=group_size, max_steps=max_steps, thought_tokens=objective_tokens, clip=clip)
+        if json_surrogate_weight == 1:
+            loss = thought_policy_loss(current, old, advantage,
+                group_size=group_size, max_steps=max_steps, thought_tokens=objective_tokens, clip=clip)
+        else:
+            loss = weighted_joint_policy_loss(current, old, advantage,
+                thought_count=segment.thought_count, group_size=group_size, max_steps=max_steps,
+                thought_tokens=thought_tokens, json_tokens=json_tokens,
+                json_surrogate_weight=json_surrogate_weight, clip=clip)
         if reference_kl_beta > 0:
             kl = thought_reference_kl_loss(current, reference,
                 group_size=group_size, max_steps=max_steps, thought_tokens=objective_tokens)
@@ -295,6 +305,10 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
         if joint_json_policy:
             report["algorithm_variant"] = "frozen-base-reference-k3-nonzero-advantage-joint-v1"
             report["reference_kl"] = joint_reference_configuration(report["reference_kl"])
+    if json_surrogate_weight != 1:
+        report["json_surrogate"] = json_surrogate_configuration(json_surrogate_weight)
+        report["algorithm_variant"] = "+".join(filter(None,
+            (report.get("algorithm_variant"), JSON_SURROGATE_VARIANT)))
     return report
 
 
@@ -327,6 +341,10 @@ def configuration(args, plan, tasks, world_size):
 
     surrogate = getattr(args, "policy_surrogate", "token-grpo")
     validate_policy_surrogate(surrogate, getattr(args, "reference_kl_beta", 0))
+    weight = getattr(args, "json_surrogate_weight", 1)
+    validate_json_surrogate_weight(weight, joint_json_policy=getattr(args, "joint_json_policy", False),
+        policy_surrogate=surrogate, online_web=getattr(args, "enable_online_web", False),
+        benchmarks=(t.benchmark for t in tasks))
     if surrogate == "episode-gspo" and (getattr(args, "enable_online_web", False)
             or any(t.benchmark != "cuad" for t in tasks)):
         raise ValueError("episode-gspo currently supports CUAD only; online Web is unsupported")
@@ -342,7 +360,8 @@ def configuration(args, plan, tasks, world_size):
         arguments={key: str(value) if isinstance(value, Path) else value
                    for key, value in vars(args).items()
                    if (key not in {"joint_json_policy", "web_zip_member_fallback", "web_concise_reasoning"} or value)
-                   and (key != "policy_surrogate" or value != "token-grpo")},
+                   and (key != "policy_surrogate" or value != "token-grpo")
+                   and (key != "json_surrogate_weight" or value != 1)},
         compute_profile=compute_profile_configuration(getattr(args, "compute_profile", "legacy")),
         cuad_concise_reasoning=cuad_concise_reasoning_configuration(getattr(args, "cuad_concise_reasoning", False)),
         auto_read_follow_docs=auto_read_follow_docs_configuration(getattr(args, "auto_read_follow_docs", False)),
@@ -388,6 +407,11 @@ def configuration(args, plan, tasks, world_size):
         config["algorithm"] += "+" + GSPO_VARIANT
         config["algorithm_variant"] = GSPO_VARIANT
         config["policy_surrogate"] = gspo_configuration()
+    if weight != 1:
+        config["algorithm"] += "+" + JSON_SURROGATE_VARIANT
+        config["algorithm_variant"] = "+".join(filter(None,
+            (config.get("algorithm_variant"), JSON_SURROGATE_VARIANT)))
+        config["json_surrogate"] = json_surrogate_configuration(weight)
     if getattr(args, "enable_online_web", False):
         from slime_plugins.dcc.online_web import binding_protocols
         if web_reasoning["enabled"]:
@@ -503,6 +527,11 @@ def cpu_preflight(args, tasks, plan, world_size):
 async def train(args, tasks, plan, world_size, *, web_inputs=None):
     validate_policy_surrogate(getattr(args, "policy_surrogate", "token-grpo"),
                               getattr(args, "reference_kl_beta", 0))
+    validate_json_surrogate_weight(getattr(args, "json_surrogate_weight", 1),
+        joint_json_policy=getattr(args, "joint_json_policy", False),
+        policy_surrogate=getattr(args, "policy_surrogate", "token-grpo"),
+        online_web=getattr(args, "enable_online_web", False) or web_inputs is not None,
+        benchmarks=(t.benchmark for t in tasks))
     if getattr(args, "policy_surrogate", "token-grpo") == "episode-gspo" and (
             getattr(args, "enable_online_web", False) or web_inputs is not None
             or any(t.benchmark != "cuad" for t in tasks)):
@@ -646,7 +675,8 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
                 grammar_compiler=policy.compiler if getattr(args, "joint_json_policy", False) else None,
                 logprob_backend=args.logprob_backend,
                 head_chunk_tokens=args.head_chunk_tokens,
-                policy_surrogate=getattr(args, "policy_surrogate", "token-grpo"))
+                policy_surrogate=getattr(args, "policy_surrogate", "token-grpo"),
+                json_surrogate_weight=getattr(args, "json_surrogate_weight", 1))
             record(event="replay_end", iteration=iteration, seconds=time.monotonic() - replay_started,
                    scored_tokens=report["scored_tokens"], scored_segments=report["scored_segments"])
             if world_size > 1:
@@ -707,6 +737,9 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
             if "policy_surrogate" in config:
                 complete.update(algorithm_variant=config["algorithm_variant"],
                                 policy_surrogate=config["policy_surrogate"])
+            if "json_surrogate" in config:
+                complete.update(algorithm_variant=config["algorithm_variant"],
+                                json_surrogate=config["json_surrogate"])
             with (args.output_dir / "training_complete.json").open("x") as stream:
                 stream.write(json.dumps(complete, indent=2, allow_nan=False) + "\n")
     except BaseException as error:
@@ -762,6 +795,8 @@ def main(argv=None):
                         help="Batch native requests with distinct schemas using one grammar matcher per row")
     parser.add_argument("--joint-json-policy", action="store_true",
                         help="CUAD only: fresh raw-thought and grammar-masked stochastic-JSON GRPO; old greedy JSON traces are unsupported")
+    parser.add_argument("--json-surrogate-weight", type=float, default=1,
+                        help="Default 1 preserves the original loss; nondefault CUAD joint token-GRPO weights JSON policy surrogates only, with the original fixed denominator")
     parser.add_argument("--thought-tokens", type=int, default=4096)
     parser.add_argument("--json-tokens", type=int, default=4096)
     parser.add_argument("--max-prompt-tokens", type=int, default=16384)
@@ -808,6 +843,9 @@ def main(argv=None):
     try:
         validate_reference_kl_beta(args.reference_kl_beta)
         validate_policy_surrogate(args.policy_surrogate, args.reference_kl_beta)
+        validate_json_surrogate_weight(args.json_surrogate_weight,
+            joint_json_policy=args.joint_json_policy, policy_surrogate=args.policy_surrogate,
+            online_web=args.enable_online_web)
     except ValueError as error:
         parser.error(str(error))
     if args.web_train_reward_variant != TABLE_GROUNDED_REWARD and not args.enable_online_web:

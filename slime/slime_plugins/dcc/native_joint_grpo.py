@@ -16,6 +16,54 @@ from .native_hf_context import validated_thought_step
 
 ALGORITHM = "online-native-HF-joint-thought-masked-JSON-GRPO-v1"
 JSON_BEHAVIOR_SOURCE = "streaming-generation-post-xgrammar-multinomial-T1-v1"
+JSON_SURROGATE_VARIANT = "joint-JSON-weighted-token-GRPO-v1"
+
+
+def validate_json_surrogate_weight(weight, *, joint_json_policy, policy_surrogate="token-grpo",
+                                   online_web=False, benchmarks=()):
+    if type(weight) not in (int, float) or not math.isfinite(weight) or weight <= 0:
+        raise ValueError("JSON surrogate weight must be finite and positive")
+    if weight != 1 and (not joint_json_policy or policy_surrogate != "token-grpo"
+            or online_web or any(benchmark != "cuad" for benchmark in benchmarks)):
+        raise ValueError("Nondefault JSON surrogate weight requires CUAD joint JSON token-GRPO only")
+
+
+def json_surrogate_configuration(weight):
+    return dict(version=JSON_SURROGATE_VARIANT, thought_weight=1, json_weight=weight,
+        scope="token-clipped-policy-surrogate-only; reference-KL-unweighted",
+        denominator="group_size*max_steps*(thought_tokens+json_tokens)",
+        observed_length_normalization=False, behavior_and_grammar_unchanged=True)
+
+
+def weighted_joint_policy_loss(current, old, advantage, *, thought_count, group_size,
+                               max_steps, thought_tokens, json_tokens, json_surrogate_weight,
+                               clip=0.2):
+    """Weight JSON surrogates after token clipping; retain the fixed two-phase budget.
+
+    Actual phase boundaries include their real stop tokens. Empty or truncated
+    JSON contributes only its sampled positions; no missing token is filled in.
+    The weight-one runtime deliberately uses the original loss instead.
+    """
+    validate_json_surrogate_weight(json_surrogate_weight, joint_json_policy=True)
+    if current.ndim != 1 or old.shape != current.shape or not current.numel():
+        raise ValueError("Aligned nonempty one-dimensional joint logprobs required")
+    if not torch.isfinite(current).all() or not torch.isfinite(old).all():
+        raise FloatingPointError("Finite actual behavior and current joint scores required")
+    if old.requires_grad or not math.isfinite(advantage) or not 0 < clip < 1:
+        raise ValueError("Detached old scores, finite advantage and clip in (0,1) required")
+    if any(type(v) is not int or v < 1 for v in (group_size, max_steps, thought_tokens, json_tokens)):
+        raise ValueError("Positive fixed joint objective budgets required")
+    if (type(thought_count) is not int or not 0 <= thought_count <= min(thought_tokens, current.numel())
+            or current.numel() - thought_count > json_tokens):
+        raise ValueError("Actual phase boundary must fit both declared sampled budgets")
+    ratio = (current - old).exp()
+    surrogate = torch.minimum(ratio * advantage, ratio.clamp(1 - clip, 1 + clip) * advantage)
+    weights = torch.ones_like(surrogate)
+    weights[thought_count:] = json_surrogate_weight
+    loss = -(surrogate * weights).sum() / (group_size * max_steps * (thought_tokens + json_tokens))
+    if not torch.isfinite(loss):
+        raise FloatingPointError("Finite weighted joint policy loss required")
+    return loss
 
 
 class StreamingMaskedJSONLogprobs(StreamingRawThoughtLogprobs):
