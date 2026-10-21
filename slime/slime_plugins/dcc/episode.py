@@ -122,7 +122,27 @@ def _terminal_widesearch_rows(text: str) -> list[dict[str, Any]] | None:
 def parse_action(text: str, *, widesearch_rows: bool = False) -> dict[str, Any] | None:
     """Take the final action JSON, allowing a model's visible reasoning prefix."""
 
-    text = text.rsplit("</think>", 1)[-1]
+    # A literal closing tag inside valid JSON is data, not a reasoning boundary.
+    # Skip complete JSON values while locating tags so fenced payloads, JSONL
+    # rows and mixed row/action ambiguity checks keep their original contents.
+    decoder = json.JSONDecoder()
+    position = last_close = 0
+    thinking = False
+    while match := re.search(r"</?think>|[\[{]", text[position:]):
+        start = position + match.start()
+        if match[0] in ("<think>", "</think>"):
+            thinking = match[0] == "<think>"
+            position = start + len(match[0])
+            if not thinking:
+                last_close = position
+            continue
+        try:
+            _, position = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            position = start + 1
+    if thinking:
+        return None  # An example inside unfinished reasoning is not an action.
+    text = text[last_close:]
     if widesearch_rows:
         # A base model often introduces its final code block with prose. Only
         # unwrap a single, terminal block; examples embedded in reasoning are
@@ -133,7 +153,6 @@ def parse_action(text: str, *, widesearch_rows: bool = False) -> dict[str, Any] 
         rows = _terminal_widesearch_rows(text)
         if rows is not None:
             return {"answer": rows}
-    decoder = json.JSONDecoder()
     candidates = []
     row_fragments = False
     position = 0

@@ -162,6 +162,70 @@ def test_action_parser_ignores_nested_example_in_query_and_thinking():
 
 
 @pytest.mark.parametrize("fenced", [False, True])
+@pytest.mark.parametrize("prefix", [
+    "",
+    '<think>Ignore this example {"answer":["wrong </think> value"]}.</think>',
+    '<think>Compare the sources.</think>Final answer:\n',
+])
+@pytest.mark.parametrize("action", [
+    {"answer": [{"text": 'Literal </think> and "quoted" text', "confidence": 0.9}]},
+    {"tool": "search_document", "arguments": {"query": 'literal </think> {"answer":[]}'}},
+    {"plan": "Review </think> literally", "checks": "Read source", "answer": []},
+    [{"text": "A literal </think> clause", "confidence": 1.0}],
+])
+def test_action_parser_preserves_literal_thinking_close_in_complete_json(action, prefix, fenced):
+    payload = json.dumps(action)
+    if fenced:
+        payload = "```json\n" + payload + "\n```"
+    expected = {"answer": action} if isinstance(action, list) else action
+    for widesearch_rows in (False, True):
+        assert parse_action(prefix + payload, widesearch_rows=widesearch_rows) == expected
+
+
+def test_literal_thinking_close_in_contract_span_still_completes_and_scores():
+    item = task(document="A literal </think> marker is part of this agreement.")
+    item = dataclasses.replace(item, gold=[item.document])
+
+    async def policy(messages, **kwargs):
+        return PolicyCompletion(json.dumps({"answer": [{"text": item.document, "confidence": 1.0}]}))
+
+    result = asyncio.run(EpisodeRunner(max_steps=1).run(item, policy))
+    assert result.status == "completed"
+    assert result.answer == [{"text": item.document, "confidence": 1.0}]
+    assert result.reward == 1
+
+
+@pytest.mark.parametrize("fenced", [False, True])
+@pytest.mark.parametrize("prefix", ["", "<think>Review the evidence.</think>"])
+def test_widesearch_jsonl_literal_thinking_close_keeps_rows_and_ambiguity_guard(fenced, prefix):
+    rows = [
+        {"name": "Alpha </think>", "citations": ["https://fixture.example/a"]},
+        {"name": "Beta </think>", "citations": ["https://fixture.example/b"]},
+    ]
+    payload = "\n".join(json.dumps(row) for row in rows)
+    complete = "```jsonl\n" + payload + "\n```" if fenced else payload
+    assert parse_action(prefix + complete, widesearch_rows=True) == {"answer": rows}
+    assert parse_action(prefix + complete) is None
+    tool = json.dumps({"tool": "web_search", "arguments": {"query": "continue research"}})
+    for mixed in (payload + "\n" + tool, tool + "\n" + payload):
+        if fenced:
+            mixed = "```jsonl\n" + mixed + "\n```"
+        assert parse_action(prefix + mixed, widesearch_rows=True) is None
+
+
+@pytest.mark.parametrize("widesearch_rows", [False, True])
+def test_action_parser_does_not_promote_a_json_example_from_unclosed_thinking(widesearch_rows):
+    assert parse_action('<think>Example {"answer":["literal </think> example"]}',
+                        widesearch_rows=widesearch_rows) is None
+    assert parse_action('<think>Example {"answer":[]} but keep thinking.',
+                        widesearch_rows=widesearch_rows) is None
+    assert parse_action('<think>Example {"answer":["literal </think> example"]}</think>Still reasoning.',
+                        widesearch_rows=widesearch_rows) is None
+    assert parse_action('For example {"answer":["literal </think> example"]} but research continues.',
+                        widesearch_rows=True) is None
+
+
+@pytest.mark.parametrize("fenced", [False, True])
 def test_terminal_bare_answer_list_is_accepted_and_validated(fenced):
     payload = json.dumps([{"text": task().document, "confidence": 0.9}])
     if fenced:
