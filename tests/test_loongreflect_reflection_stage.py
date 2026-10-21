@@ -13,6 +13,7 @@ import yaml
 from slime.utils.types import Sample
 from slime_plugins.loongreflect import AnswerValidation, Harness, ModelTurn, ResumeDecision, RolloutTree
 from slime_plugins.loongreflect import slime_adapter as adapter
+from slime_plugins.loongreflect.core import POST_SEARCH_REFLECTION_GUIDANCE
 from slime_plugins.loongreflect.launcher import build_command, parse_args
 
 
@@ -271,6 +272,76 @@ class SampledFixtureActor(adapter.SGLangHarnessModel):
 
 def fixture_args(**kwargs):
     return SimpleNamespace(partial_rollout=False, rollout_max_response_len=8192, rollout_temperature=0.2, rollout_top_p=1.0, seq_length=32768, reflect_max_steps=8, reflect_max_tokens_per_turn=512, **kwargs)
+
+
+def test_pending_stage_is_last_user_message_and_learner_reuses_exact_prompt():
+    tokenizer = ByteTokenizer()
+    args = fixture_args(reflect_require_post_search_reflection=True)
+    actor = SampledFixtureActor(args, tokenizer, 'query', [
+        '<search>evidence</search>',
+        '<reflect>The evidence is coherent; verify any remaining uncertainty.</reflect>',
+        '<answer>done</answer>',
+    ])
+    tree = harness(actor, require_post_search_reflection=True).run('query')
+    samples = adapter.build_tree_training_samples(args, Sample(index=9, prompt='query', label='done'), tree, tokenizer)
+
+    assert tree.status == 'completed' and len(samples) == 3
+    contexts = [tree.nodes[sample.metadata['tree_node_id']].metadata['generation_context'] for sample in samples]
+    update = '<update>' + POST_SEARCH_REFLECTION_GUIDANCE + '</update>'
+    expected = tokenizer.apply_chat_template([
+        {'role': 'system', 'content': adapter.actor_prompt_for_protocol('full')},
+        {'role': 'user', 'content': 'query'},
+        {'role': 'assistant', 'content': contexts[1]},
+        {'role': 'user', 'content': POST_SEARCH_REFLECTION_GUIDANCE},
+    ]) + '<think>'
+    assert contexts[1].endswith(update)
+    assert actor.sent_prompts[1] == expected
+    assert actor.sent_prompts[1].endswith('</assistant><user>' + POST_SEARCH_REFLECTION_GUIDANCE + '</user><assistant><think>')
+    assert actor.sent_prompts[2] == actor.base_prompt + contexts[2] + '<think>'
+    assert [sample.prompt for sample in samples] == actor.sent_prompts
+    assert [bool(sum(sample.reflect_mask)) for sample in samples] == [False, True, False]
+    assert samples[1].metadata['reflect_answer_leak'] is False
+    for sample, (raw, ids, probs) in zip(samples, actor.sampled, strict=True):
+        assert sample.response == raw and sample.tokens[-sample.response_length:] == ids
+        assert sample.tokens[:-sample.response_length] == tokenizer(sample.prompt)['input_ids']
+        assert sample.rollout_log_probs == probs and sample.loss_mask == [1] * len(ids)
+        assert POST_SEARCH_REFLECTION_GUIDANCE not in sample.response
+
+
+@pytest.mark.parametrize('enabled,kind,protocol', [
+    (False, 'update', 'full'),
+    (True, 'observation', 'full'),
+    (True, 'reflect', 'full'),
+    (True, 'update', 'search_answer'),
+])
+def test_other_actor_stages_keep_exact_original_prompt(enabled, kind, protocol):
+    tokenizer = ByteTokenizer()
+    args = fixture_args(reflect_require_post_search_reflection=enabled)
+    actor = SampledFixtureActor(args, tokenizer, 'query', ['<search>evidence</search>'])
+    actor.action_protocol = protocol
+    tree = RolloutTree('query')
+    active = tree.append(0, kind, POST_SEARCH_REFLECTION_GUIDANCE)
+    trace = tree.render_path(active)
+    actor.act(trace, max_tokens=512)
+    assert actor.sent_prompts == [actor.base_prompt + adapter._trace_without_query(trace) + '<think>']
+
+
+def test_pending_stage_user_instruction_survives_context_trimming():
+    tokenizer = ByteTokenizer()
+    args = fixture_args(reflect_require_post_search_reflection=True)
+    actor = SampledFixtureActor(args, tokenizer, 'query', ['<reflect>Evidence needs one independent check.</reflect>'])
+    stage_base, _ = actor._fit_generation_prompt('', '<think>', 512, post_search_reflection=True)
+    args.rollout_max_context_len = len(tokenizer(stage_base)['input_ids']) + 512 + 48
+    tree = RolloutTree('query')
+    observation = tree.append(0, 'observation', 'long public evidence ' * 1000)
+    active = tree.append(observation, 'update', POST_SEARCH_REFLECTION_GUIDANCE)
+    turn = actor.act(tree.render_path(active), max_tokens=512)
+    prompt = actor.sent_prompts[0]
+    assert len(tokenizer(prompt)['input_ids']) + 512 <= args.rollout_max_context_len
+    assert len(turn.metadata['generation_context']) < len(adapter._trace_without_query(tree.render_path(active)))
+    assert prompt.endswith('<user>' + POST_SEARCH_REFLECTION_GUIDANCE + '</user><assistant><think>')
+    assert turn.metadata['generation_prompt'] == prompt
+    assert turn.metadata['forced_prefix'] == '<think>'
 
 
 def test_real_actor_and_converter_only_mask_independently_sampled_reflection():

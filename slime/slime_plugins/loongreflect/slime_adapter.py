@@ -18,6 +18,7 @@ from .core import (
     AnswerValidation,
     Harness,
     ModelTurn,
+    POST_SEARCH_REFLECTION_GUIDANCE,
     ProtocolError,
     ResumeDecision,
     RolloutTree,
@@ -137,7 +138,14 @@ class SGLangHarnessModel:
         self._model_turn_id += 1
         continuation = _trace_without_query(trace)
         forced_prefix = "<think>"
-        generation_prompt, continuation = self._fit_generation_prompt(continuation, forced_prefix, max_tokens)
+        post_search_reflection = (
+            getattr(self.args, "reflect_require_post_search_reflection", False)
+            and self.action_protocol == "full"
+            and continuation.endswith(f"<update>{html.escape(POST_SEARCH_REFLECTION_GUIDANCE)}</update>")
+        )
+        generation_prompt, continuation = self._fit_generation_prompt(
+            continuation, forced_prefix, max_tokens, post_search_reflection=post_search_reflection,
+        )
         generated = self._generate(
             generation_prompt,
             max_tokens=max_tokens,
@@ -168,13 +176,33 @@ class SGLangHarnessModel:
             },
         )
 
-    def _fit_generation_prompt(self, continuation: str, forced_prefix: str, max_tokens: int) -> tuple[str, str]:
+    def _fit_generation_prompt(
+        self, continuation: str, forced_prefix: str, max_tokens: int, *, post_search_reflection: bool = False,
+    ) -> tuple[str, str]:
         """Keep the exact recent tree context that fits the SGLang window."""
+
+        def render(context: str) -> str:
+            if not post_search_reflection:
+                return self.base_prompt + context + forced_prefix
+            # A trajectory update inside an open assistant message can be
+            # continued as another search. Give the existing stage request a
+            # real user boundary while retaining the tree/teacher context.
+            return self.tokenizer.apply_chat_template(
+                [
+                    {"role": "system", "content": actor_prompt_for_protocol(self.action_protocol)},
+                    {"role": "user", "content": self.query},
+                    {"role": "assistant", "content": context},
+                    {"role": "user", "content": POST_SEARCH_REFLECTION_GUIDANCE},
+                ],
+                tokenize=False,
+                add_generation_prompt=True,
+            ) + forced_prefix
+
         max_context = getattr(self.args, "rollout_max_context_len", None)
         if max_context is None:
-            return self.base_prompt + continuation + forced_prefix, continuation
+            return render(continuation), continuation
         max_prompt_tokens = max_context - max_tokens
-        base_ids = self.tokenizer(self.base_prompt + forced_prefix, add_special_tokens=False)["input_ids"]
+        base_ids = self.tokenizer(render(""), add_special_tokens=False)["input_ids"]
         if len(base_ids) > max_prompt_tokens:
             raise ValueError(f"Reflect actor base prompt leaves no room for the requested generation ({len(base_ids)} + {max_tokens} > {max_context})")
         context_ids = self.tokenizer(continuation, add_special_tokens=False)["input_ids"]
@@ -182,7 +210,7 @@ class SGLangHarnessModel:
         if len(context_ids) > keep:
             context_ids = context_ids[-keep:] if keep else []
             continuation = self.tokenizer.decode(context_ids, skip_special_tokens=False)
-        prompt = self.base_prompt + continuation + forced_prefix
+        prompt = render(continuation)
         # Token merges at string boundaries can change the combined length by a
         # small amount. Trim until the exact prompt obeys the window.
         while len(self.tokenizer(prompt, add_special_tokens=False)["input_ids"]) > max_prompt_tokens:
@@ -190,7 +218,7 @@ class SGLangHarnessModel:
                 raise ValueError("actor base prompt exceeds the generation context window")
             context_ids = context_ids[1:]
             continuation = self.tokenizer.decode(context_ids, skip_special_tokens=False)
-            prompt = self.base_prompt + continuation + forced_prefix
+            prompt = render(continuation)
         return prompt, continuation
 
     def can_resume(self, *, query: str, prefix: str, backtrack: str) -> ResumeDecision:
