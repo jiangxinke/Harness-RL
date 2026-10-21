@@ -36,7 +36,16 @@ and placeholder confidence values receive no direct loss; unmasked answer JSON
 and EOS receive per-example mean token loss. All ranks average example gradients.
 Checkpoints include initial, every eight updates, final and completion markers.
 
-Evaluation needs an explicitly separate corrected-target adapter binding and a
-fresh matched base comparison. Native accepted-only adapter approval must not
-be used for these checkpoints. Neither successful training nor reduced TRAIN
-loss establishes benchmark improvement.
+Evaluation uses `--corrected-lora-approval APPROVAL.json` together with
+`--adapter CHECKPOINT` and `--native-lora-derivative-id DERIVATIVE`. Keep the
+ordinary native-thinking and newly frozen evaluation-source receipt arguments.
+The native accepted-only and DPO approval flags are mutually exclusive with
+this approval. Saved configuration, actual attention tensor headers and the
+checkpoint's completed update count are checked again during comparison.
+The recorded `corrected_lora_binding` distinguishes collection, training and
+evaluation sources. A step-zero checkpoint can test loading; it is not a
+trained result.
+
+Compare a fresh base run against the adapted run using the same evaluation
+source, model, tasks, harness, budgets and sampling configuration. Neither
+successful training nor reduced TRAIN loss establishes benchmark improvement.

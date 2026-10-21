@@ -13,7 +13,14 @@ from .vllm_policy import _adapter_metadata
 
 def validate_native_adapter(adapter, *, source_receipt, approved_derivative_id, model_config,
                             approved_training_source_receipt=None, approved_training_protocol=None,
-                            evaluation_protocol=None, approved_dpo=None):
+                            evaluation_protocol=None, approved_dpo=None, approved_corrected=None):
+    if approved_corrected is not None:
+        if approved_dpo is not None or approved_training_source_receipt is not None or approved_training_protocol is not None:
+            raise ValueError("Corrected, DPO and native accepted-SFT declarations are mutually exclusive")
+        from .corrected_lora import validate_corrected_adapter
+        return validate_corrected_adapter(adapter, source_receipt=source_receipt,
+            approved_derivative_id=approved_derivative_id, model_config=model_config,
+            evaluation_protocol=evaluation_protocol, approved_corrected=approved_corrected)
     if approved_dpo is not None:
         if approved_training_source_receipt is not None or approved_training_protocol is not None:
             raise ValueError("DPO approval and accepted-SFT training approval are mutually exclusive")

@@ -446,11 +446,14 @@ async def _evaluate(args, *, browser_reader=None):
             or getattr(args, "native_thought_sampling", "greedy") != "greedy"
             or getattr(args, "native_lora_training_source", None) is not None
             or getattr(args, "native_lora_training_protocol", None) is not None
-            or getattr(args, "native_lora_dpo_approval", None) is not None):
+            or getattr(args, "native_lora_dpo_approval", None) is not None
+            or getattr(args, "corrected_lora_approval", None) is not None):
         from slime_plugins.dcc.native_thinking_eval import native_options
         native = native_options(args, tasks, sampling, Path(__file__).resolve().parents[1])
     from slime_plugins.dcc.native_dpo_adapter import approval_from_arguments
     dpo_approval = approval_from_arguments(args)
+    from slime_plugins.dcc.corrected_lora import approval_from_arguments as corrected_approval_from_arguments
+    corrected_approval = corrected_approval_from_arguments(args)
     history_configuration = prompt_history_from_arguments(args)
     if history_configuration.enabled and native is None:
         raise ValueError("--prompt-history-whole-turns currently requires --native-thinking")
@@ -488,6 +491,8 @@ async def _evaluate(args, *, browser_reader=None):
             manifest["native_lora_derivative_id"] = args.native_lora_derivative_id
             if dpo_approval is not None:
                 manifest["native_lora_dpo_approval"] = dpo_approval
+            if corrected_approval is not None:
+                manifest["corrected_training_approval"] = corrected_approval
             if getattr(args, "native_lora_training_source", None) is not None:
                 manifest["native_lora_training_approval"] = {
                     "source_commit": args.native_lora_training_source,
@@ -674,7 +679,8 @@ async def _evaluate(args, *, browser_reader=None):
                             approved_training_protocol=getattr(args, "native_lora_training_protocol", None),
                             prompt_history_config=history_configuration,
                             phase_timing=timing_configuration is not None,
-                            **({"approved_dpo": dpo_approval} if dpo_approval is not None else {}))
+                            **({"approved_dpo": dpo_approval} if dpo_approval is not None else {}),
+                            **({"approved_corrected": corrected_approval} if corrected_approval is not None else {}))
                     except BaseException:
                         journal.close()
                         raise
@@ -1097,6 +1103,8 @@ def main():
                         help="Caller-approved actual adapter training protocol: native v2 or explicit budgeted v3")
     parser.add_argument("--native-lora-dpo-approval",
                         help="Opt in to independently approved DPO adapter profile JSON; excludes accepted-SFT source/protocol flags")
+    parser.add_argument("--corrected-lora-approval",
+                        help="Explicit independent grounded TRAIN-reference adapter declaration JSON; excludes native accepted-SFT/DPO declarations")
     parser.add_argument("--native-source-receipt",
                         help="New frozen source root .dcc-native-source.json receipt;requires --native-thinking")
     parser.add_argument("--web-structured-final", action="store_true",
