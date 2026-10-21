@@ -62,20 +62,32 @@ def validate_source(expected, *, online_web=False):
         raise ValueError("Commit actual clean runtime sources before claiming their identity")
 
 
-def validate_train_tasks(tasks):
+def validate_train_tasks(tasks, *, require_labels=True):
     if not tasks or len({t.id for t in tasks}) != len(tasks):
         raise ValueError("Nonempty unique TRAIN tasks required")
     for task in tasks:
-        if task.split != "train" or not isinstance(task.gold, list):
+        if task.split != "train" or (require_labels and not isinstance(task.gold, list)):
             raise ValueError("Only TRAIN tasks with explicit reward labels are allowed")
         if task.benchmark != "cuad":
             raise ValueError("This online pilot supports CUAD only; Web requires its own native schema backend")
 
 
-def task_plan(tasks, *, steps, world_size, seed):
-    """Fixed TRAIN gold strata; CUAD negatives get one of every four draws."""
-    validate_train_tasks(tasks)
+def task_plan(tasks, *, steps, world_size, seed, sampling="stratified-3to1"):
+    """Original gold strata or a label-blind shuffled deck of TRAIN indices."""
+    if sampling not in {"stratified-3to1", "uniform"}:
+        raise ValueError("Unknown CUAD task sampling mode")
+    # A uniform public task plan must not inspect reward labels. The training
+    # entrypoint still validates that every task has explicit TRAIN labels.
+    validate_train_tasks(tasks, require_labels=sampling != "uniform")
     rng = random.Random(seed)
+    if sampling == "uniform":
+        flat, deck = [], []
+        for _ in range(steps * world_size):
+            if not deck:
+                deck = list(range(len(tasks)))
+                rng.shuffle(deck)
+            flat.append(deck.pop())
+        return [flat[index:index + world_size] for index in range(0, len(flat), world_size)]
     positive = [i for i, task in enumerate(tasks) if task.gold]
     negative = [i for i, task in enumerate(tasks) if not task.gold]
     if not positive:
@@ -89,6 +101,21 @@ def task_plan(tasks, *, steps, world_size, seed):
     flat = [draw("negative", negative) if negative and index % 4 == 0
             else draw("positive", positive) for index in range(steps * world_size)]
     return [flat[index:index + world_size] for index in range(0, len(flat), world_size)]
+
+
+def cuad_task_sampling_configuration(sampling):
+    if sampling == "stratified-3to1":
+        return dict(mode=sampling, stratification="TRAIN gold-label negative-vs-positive",
+            negative_stride=4, positive_fallback_when_no_negatives=True,
+            seeded_independent_decks=True, outcome_based_resampling=False,
+            label_dependent=True, without_replacement_per_deck_cycle=True)
+    if sampling == "uniform":
+        return dict(mode=sampling, stratification=None, negative_stride=None,
+            positive_fallback_when_no_negatives=False, seeded_independent_decks=False,
+            outcome_based_resampling=False, label_dependent=False,
+            without_replacement_per_deck_cycle=True,
+            deck_scope="all-CUAD-TRAIN-task-indices", seeded_shuffled_deck=True)
+    raise ValueError("Unknown CUAD task sampling mode")
 
 
 def make_web_tools(args):
@@ -218,9 +245,8 @@ def configuration(args, plan, tasks, world_size):
         web_tool_limits=dict(max_page_chars=web.max_page_chars,
                              max_text_window_chars=web.max_text_window_chars),
         training_split_only=True, sft_auxiliary=False, offline_preferences=False,
-        cuad_task_selection=dict(stratification="TRAIN gold-label negative-vs-positive",
-            negative_stride=4, positive_fallback_when_no_negatives=True,
-            seeded_independent_decks=True, outcome_based_resampling=False),
+        cuad_task_selection=cuad_task_sampling_configuration(
+            getattr(args, "cuad_task_sampling", "stratified-3to1")),
         behavior_policy=dict(thought="raw softmax T=1 top_p=1 top_k=0", json="greedy xgrammar",
             old_logprob_source="streaming-generation-raw-logits-v1",
             teacher_forced_replay_is_behavior=False),
@@ -235,7 +261,9 @@ def configuration(args, plan, tasks, world_size):
         from slime_plugins.dcc.online_web import binding_protocols
         config["online_web"] = dict(enabled=True, protocols=binding_protocols(),
             web_deck="public-ID-only-shuffled-cycles",
-            cuad_plan="existing-TRAIN-gold-positive-negative-stratification",
+            cuad_plan=("existing-TRAIN-gold-positive-negative-stratification"
+                       if config["cuad_task_selection"]["mode"] == "stratified-3to1"
+                       else "uniform-label-blind-CUAD-TRAIN-index-deck"),
             draws_per_cycle=dict(cuad=args.cuad_draws_per_cycle,
                                  widesearch=args.web_draws_per_cycle),
             labels="deserialized-only-after-own-group-durable-close")
@@ -449,6 +477,9 @@ def main(argv=None):
     parser.add_argument("--web-binding", type=Path)
     parser.add_argument("--cuad-draws-per-cycle", type=int, default=1)
     parser.add_argument("--web-draws-per-cycle", type=int, default=1)
+    parser.add_argument("--cuad-task-sampling", choices=("stratified-3to1", "uniform"),
+                        default="stratified-3to1",
+                        help="Original TRAIN gold strata (default), or a label-blind shuffled deck of all CUAD TRAIN task indices")
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--group-size", type=int, default=2)
     parser.add_argument("--native-batch-size", type=int, default=4,
@@ -516,12 +547,15 @@ def main(argv=None):
         web_inputs = WebTrainingInputs(*web_paths, source_commit=args.source_commit)
         plan = mixed_task_plan(tasks, web_inputs.tasks, steps=args.steps, world_size=world_size,
             seed=args.seed, cuad_draws_per_cycle=args.cuad_draws_per_cycle,
-            web_draws_per_cycle=args.web_draws_per_cycle, cuad_plan=task_plan)
+            web_draws_per_cycle=args.web_draws_per_cycle,
+            cuad_plan=partial(task_plan, sampling=args.cuad_task_sampling))
         tasks = tasks + web_inputs.tasks
     else:
         if any(web_paths) or args.cuad_draws_per_cycle != 1 or args.web_draws_per_cycle != 1:
             parser.error("Web inputs and mixture settings require --enable-online-web")
-        plan = task_plan(tasks, steps=args.steps, world_size=world_size, seed=args.seed)
+        validate_train_tasks(tasks)
+        plan = task_plan(tasks, steps=args.steps, world_size=world_size, seed=args.seed,
+                         sampling=args.cuad_task_sampling)
     if args.cpu_preflight:
         print(json.dumps(cpu_preflight(args, tasks, plan, world_size), ensure_ascii=False, allow_nan=False))
     else:

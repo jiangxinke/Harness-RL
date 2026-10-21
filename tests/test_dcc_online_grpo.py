@@ -119,6 +119,133 @@ def load_trainer():
     return trainer
 
 
+def test_default_task_plan_matches_frozen_original_training_draws():
+    trainer = load_trainer()
+    tasks = [SimpleNamespace(id=f"task-{index}", benchmark="cuad", split="train",
+                             gold=["span"] if index < 3 else []) for index in range(5)]
+    # Captured from the original 13919869 training source, before this option.
+    expected = [[3, 1, 2, 0, 4, 2], [0, 1, 3, 0, 1, 2],
+                [4, 0, 2, 1, 4, 0], [2, 1, 3, 0, 1, 2]]
+    assert trainer.task_plan(tasks, steps=4, world_size=6, seed=79) == expected
+    assert trainer.task_plan(tasks, steps=4, world_size=6, seed=79,
+                             sampling="stratified-3to1") == expected
+    assert trainer.task_plan(tasks[:3], steps=3, world_size=2, seed=47) == [[1, 0], [2, 1], [2, 0]]
+    with pytest.raises(ValueError, match="positive"):
+        trainer.task_plan(tasks[3:], steps=1, world_size=2, seed=47)
+
+
+def test_uniform_task_plan_is_label_blind_and_visits_every_index_per_deck():
+    import random
+    trainer = load_trainer()
+    class PublicTask:
+        benchmark, split = "cuad", "train"
+        def __init__(self, index):
+            self.id = f"public-task-{index}"
+        @property
+        def gold(self):
+            raise AssertionError("Uniform selection must not access gold labels")
+        @property
+        def reward(self):
+            raise AssertionError("Uniform selection must not access outcomes")
+        @property
+        def metadata(self):
+            raise AssertionError("Uniform selection must not access private metadata")
+    tasks = [PublicTask(index) for index in range(7)]
+    state = random.getstate()
+    plan = trainer.task_plan(tasks, steps=6, world_size=3, seed=79, sampling="uniform")
+    flat = [index for row in plan for index in row]
+    assert random.getstate() == state  # Only the explicit local RNG is used.
+    assert len(plan) == 6 and all(len(row) == 3 for row in plan)
+    assert sorted(flat[:7]) == sorted(flat[7:14]) == list(range(7))
+    assert len(set(flat[14:])) == 4
+    assert plan == trainer.task_plan(tasks, steps=6, world_size=3, seed=79, sampling="uniform")
+    serial = trainer.task_plan(tasks, steps=18, world_size=1, seed=79, sampling="uniform")
+    assert flat == [row[0] for row in serial]
+    assert plan != trainer.task_plan(tasks, steps=6, world_size=3, seed=80, sampling="uniform")
+
+
+@pytest.mark.parametrize("tasks", [[],
+    [SimpleNamespace(id="heldout", benchmark="cuad", split="validation")],
+    [SimpleNamespace(id="same", benchmark="cuad", split="train")] * 2])
+def test_uniform_plan_still_rejects_invalid_or_heldout_task_identity(tasks):
+    with pytest.raises(ValueError):
+        load_trainer().task_plan(tasks, steps=1, world_size=1, seed=79, sampling="uniform")
+
+
+@pytest.mark.parametrize("enable_web", [False, True])
+def test_uniform_cli_reaches_cuad_and_mixed_plans_with_accurate_metadata(monkeypatch, enable_web):
+    from slime_plugins.dcc.data import Task
+    from slime_plugins.dcc import online_web
+    trainer = load_trainer()
+    # The default stratified planner rejects this all-negative pool. Uniform
+    # must reach both entrypoint branches without requiring a positive label.
+    cuad = [Task(f"negative-{index}", "cuad", "train", "Q", "contract", []) for index in range(5)]
+    web_tasks = [Task(f"web-{index}", "widesearch", "train", "Q", gold=None) for index in range(2)]
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setattr(trainer, "load_tasks", lambda _: cuad)
+    monkeypatch.setattr(trainer, "validate_source", lambda *args, **kwargs: None)
+    monkeypatch.setattr(online_web, "WebTrainingInputs", lambda *args, **kwargs: SimpleNamespace(tasks=web_tasks))
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Planner CLI tests must not load a model or initialize CUDA")
+    monkeypatch.setattr(trainer, "load_policy_model", forbidden)
+    monkeypatch.setattr(torch.cuda, "set_device", forbidden)
+    observed = []
+    async def capture(args, tasks, plan, world_size, *, web_inputs):
+        config = trainer.configuration(args, plan, tasks, world_size)
+        observed.append(config)
+        flat = [index for row in plan for index in row]
+        expected = trainer.task_plan(cuad, steps=5 if enable_web else 10,
+                                    world_size=1, seed=args.seed, sampling="uniform")
+        assert (flat[::2] if enable_web else flat) == [row[0] for row in expected]
+        if enable_web:
+            assert all(index >= len(cuad) for index in flat[1::2])
+            assert config["online_web"]["cuad_plan"] == "uniform-label-blind-CUAD-TRAIN-index-deck"
+        else:
+            assert web_inputs is None
+        assert tasks == (cuad + web_tasks if enable_web else cuad)
+        assert config["cuad_task_selection"] == {
+            "mode": "uniform", "stratification": None, "negative_stride": None,
+            "positive_fallback_when_no_negatives": False, "seeded_independent_decks": False,
+            "outcome_based_resampling": False, "label_dependent": False,
+            "without_replacement_per_deck_cycle": True,
+            "deck_scope": "all-CUAD-TRAIN-task-indices", "seeded_shuffled_deck": True}
+        assert config["arguments"]["cuad_task_sampling"] == "uniform"
+        assert config["planned_task_ids"] == [[tasks[index].id for index in row] for row in plan]
+        assert config["objective_denominator"] == args.group_size * args.max_steps * args.thought_tokens
+    monkeypatch.setattr(trainer, "train", capture)
+    extra = (["--enable-online-web", "--web-train-data", "public.jsonl",
+              "--web-train-labels", "labels.jsonl", "--web-binding", "binding.json"] if enable_web else [])
+    assert trainer.main(["--model", "CPU-fixture", "--train-data", "unused.jsonl",
+        "--output-dir", "unused-output", "--source-commit", "0" * 40,
+        "--steps", "5", "--cuad-task-sampling", "uniform", *extra]) == 0
+    assert len(observed) == 1 and not torch.cuda.is_initialized()
+
+
+def test_uniform_training_still_requires_explicit_reward_labels(monkeypatch):
+    from slime_plugins.dcc.data import Task
+    trainer = load_trainer()
+    monkeypatch.setattr(trainer, "load_tasks", lambda _: [Task("unlabelled", "cuad", "train", "Q", "contract", gold=None)])
+    monkeypatch.setattr(trainer, "validate_source", lambda _: None)
+    with pytest.raises(ValueError, match="explicit reward labels"):
+        trainer.main(["--model", "CPU-fixture", "--train-data", "unused.jsonl",
+            "--output-dir", "unused-output", "--source-commit", "0" * 40,
+            "--cuad-task-sampling", "uniform"])
+    assert not torch.cuda.is_initialized()
+
+
+def test_invalid_cuad_sampling_cli_is_rejected_before_inputs_or_cuda(monkeypatch):
+    trainer = load_trainer()
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Invalid sampling may not read inputs or initialize CUDA")
+    monkeypatch.setattr(trainer, "load_tasks", forbidden)
+    monkeypatch.setattr(torch.cuda, "set_device", forbidden)
+    with pytest.raises(SystemExit) as error:
+        trainer.main(["--model", "CPU-fixture", "--train-data", "unused.jsonl",
+            "--output-dir", "unused-output", "--source-commit", "0" * 40,
+            "--cuad-task-sampling", "unknown"])
+    assert error.value.code == 2 and not torch.cuda.is_initialized()
+
+
 @pytest.mark.parametrize("batch_args,expected,concise", [([], 4, False),
     (["--native-batch-size", "2", "--cuad-concise-reasoning"], 2, True)])
 def test_native_batch_cli_keeps_logical_group_and_token_budgets(monkeypatch, batch_args, expected, concise):
@@ -147,6 +274,9 @@ def test_native_batch_cli_keeps_logical_group_and_token_budgets(monkeypatch, bat
         "--max-steps", "2", *batch_args]) == 0
     assert len(observed) == 1
     assert observed[0]["arguments"]["native_batch_size"] == expected
+    assert observed[0]["cuad_task_selection"]["mode"] == "stratified-3to1"
+    assert observed[0]["cuad_task_selection"]["negative_stride"] == 4
+    assert observed[0]["cuad_task_selection"]["label_dependent"] is True
     assert observed[0]["objective_denominator"] == 4 * 2 * 8
     assert observed[0]["algorithm"] == "online-native-HF-thought-only-GRPO-v2"
     assert observed[0]["context_failure_handling"]["version"] == "hf-native-context-sampled-prefix-v2"

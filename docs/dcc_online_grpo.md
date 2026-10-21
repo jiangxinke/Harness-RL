@@ -174,9 +174,22 @@ quoted or backslash-containing column keys are rejected before sampling, as in
 the existing pinned backend. Web TRAIN groups are explicitly opt-in and require a source/data/reward binding
 as documented in `dcc_online_web.md`. The matching CUAD evaluator remains CUAD-only.
 
-TRAIN task selection retains the original seeded positive/negative decks with
-a three-to-one positive-to-negative schedule when both exist. This uses TRAIN
-gold labels for stratification and is recorded explicitly; it is not public-only
-selection or outcome-based resampling. Phase events separately record collection,
+TRAIN task selection defaults to `--cuad-task-sampling stratified-3to1`, retaining
+the original seeded positive/negative decks and the exact three-to-one
+positive-to-negative draw schedule when both exist. This uses TRAIN gold labels
+for stratification and is recorded explicitly.
+
+The optional `--cuad-task-sampling uniform` samples every CUAD TRAIN task index
+once in a seeded shuffled deck before starting the next deck. Selection does
+not inspect labels, rewards or outcomes, and it supports an all-negative TRAIN
+pool. The training entrypoint still requires explicit TRAIN reward labels for
+scoring. The option also applies to the CUAD draws in mixed CUAD/Web training;
+Web selection and the CUAD/Web draw ratio are unchanged. The configuration
+records the selected mode, whether it uses labels, and the actual planned task
+IDs. Uniform sampling is a distribution-matching experiment; it is not evidence
+of improved benchmark performance. Compare it with the default while holding
+the seed, budgets, learning rate and all other training choices fixed.
+
+Neither mode resamples tasks based on outcomes. Phase events separately record collection,
 reward signal, replay, optimizer application and checkpoint publication. Closed
 native traces include batch thought/JSON elapsed time; absent JSON is null.
