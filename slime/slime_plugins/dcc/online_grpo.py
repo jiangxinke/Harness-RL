@@ -1,0 +1,126 @@
+"""Thought-only online policy gradient for the optional native HF runtime.
+
+The thought is sampled from the raw model; the schema-constrained JSON is a
+deterministic environment continuation. Its tokens must never receive a raw
+policy loss. Model failures retain sampled thoughts and zero reward.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import math
+
+import torch
+
+
+ALGORITHM = "online-native-HF-thought-only-GRPO-v1"
+
+
+@dataclass(frozen=True)
+class ThoughtSegment:
+    prompt_ids: list[int]
+    completion_ids: list[int]
+
+
+@dataclass(frozen=True)
+class GroupSignal:
+    segments: list[list[ThoughtSegment]]
+    advantages: list[float]
+    rewards: list[float]
+    reward_std: float
+    discarded_reason: str | None = None
+
+
+def group_signal(results, *, group_size, max_steps, thought_tokens):
+    """Keep model failures in the group, reject unreliable environment groups.
+
+    Do not use EpisodeResult.trainable_steps: evaluation protocol failures are
+    intentionally excluded there, but excluding them from this stochastic
+    policy objective would condition the baseline on successful generations.
+    """
+    if len(results) != group_size or group_size < 2:
+        raise ValueError("A complete same-task group of at least two episodes is required")
+    if any(type(v) is not int or v < 1 for v in (max_steps, thought_tokens)):
+        raise ValueError("Positive fixed thought/turn budgets required")
+    if len({(r.task_id, r.benchmark, r.split) for r in results}) != 1:
+        raise ValueError("All episodes in a GRPO group must use the same task")
+    if any(r.split != "train" for r in results):
+        raise ValueError("Only TRAIN episodes may provide policy gradients")
+    rewards = [float(r.reward) for r in results]
+    if any(not math.isfinite(r) or not 0 <= r <= 1 for r in rewards):
+        raise ValueError("Finite rewards in [0, 1] required")
+    unreliable = {"infrastructure_error", "context_budget_failure"}
+    if any(r.status in unreliable for r in results):
+        return GroupSignal([[] for _ in results], [0.0] * group_size, rewards, 0.0,
+                           "unreliable_environment_or_context_group")
+    allowed = {"completed", "max_steps", "invalid_answer", "evidence_failure", "model_protocol_failure"}
+    all_segments = []
+    for result in results:
+        if result.status not in allowed or len(result.steps) > max_steps:
+            raise ValueError("Unknown episode status or excess model turns")
+        if result.status != "completed" and result.reward != 0:
+            raise ValueError("Unsuccessful model episodes must retain zero reward")
+        segments = []
+        for step in result.steps:
+            count = getattr(step, "thought_token_count", None)
+            if (type(count) is not int or not 0 <= count <= thought_tokens
+                    or count > len(step.completion_ids) or not step.prompt_ids):
+                raise ValueError("Native completion must retain actual thought token boundaries")
+            thought = list(step.completion_ids[:count])
+            if any(type(token) is not int or token < 0 for token in thought + step.prompt_ids):
+                raise ValueError("Actual nonnegative integer token IDs required")
+            if thought:
+                segments.append(ThoughtSegment(list(step.prompt_ids), thought))
+        if not segments:
+            return GroupSignal([[] for _ in results], [0.0] * group_size, rewards, 0.0,
+                               "missing_sampled_thought_group")
+        all_segments.append(segments)
+    # Equal represented rewards must be exactly zero even at float32 values
+    # such as 0.1, rather than a subtraction/epsilon amplification artifact.
+    if max(rewards) == min(rewards):
+        return GroupSignal(all_segments, [0.0] * group_size, rewards, 0.0)
+    mean = math.fsum(rewards) / group_size
+    std = math.sqrt(math.fsum((r - mean) ** 2 for r in rewards) / group_size)
+    advantages = [(r - mean) / (std + 1e-4) for r in rewards]
+    return GroupSignal(all_segments, advantages, rewards, std)
+
+
+def thought_policy_loss(current, old, advantage, *, group_size, max_steps, thought_tokens, clip=0.2):
+    """Token-clipped GRPO with a fixed budget denominator.
+
+    No division by observed response length or by observed successful turns:
+    short/failed thoughts and longer successful thoughts share the same weight.
+    """
+    if current.ndim != 1 or old.shape != current.shape or not current.numel():
+        raise ValueError("Aligned nonempty one-dimensional thought logprobs required")
+    if old.requires_grad or not math.isfinite(advantage) or not 0 < clip < 1:
+        raise ValueError("Detached old scores, finite advantage and clip in (0,1) required")
+    if any(type(v) is not int or v < 1 for v in (group_size, max_steps, thought_tokens)):
+        raise ValueError("Positive fixed objective budgets required")
+    if current.numel() > thought_tokens:
+        raise ValueError("Thought scores exceed the declared sampled thought budget")
+    ratio = (current - old).exp()
+    surrogate = torch.minimum(ratio * advantage, ratio.clamp(1 - clip, 1 + clip) * advantage)
+    return -surrogate.sum() / (group_size * max_steps * thought_tokens)
+
+
+def apply_policy_update(parameters, optimizer, *, world_size=1, distributed=None, max_grad_norm=1.0):
+    """Average replicas and skip Adam completely when the global gradient is zero.
+
+    Adam momentum can change weights on a zero-signal batch if step() is called;
+    those changes must not be recorded as new policy-gradient learning.
+    """
+    if not parameters or world_size < 1 or not math.isfinite(max_grad_norm) or max_grad_norm <= 0:
+        raise ValueError("Trainable parameters, valid world size and gradient bound required")
+    for parameter in parameters:
+        if parameter.grad is None:
+            parameter.grad = torch.zeros_like(parameter)
+        if world_size > 1:
+            distributed.all_reduce(parameter.grad, op=distributed.ReduceOp.SUM)
+            parameter.grad.div_(world_size)
+    norm = torch.nn.utils.clip_grad_norm_(parameters, max_grad_norm)
+    if not torch.isfinite(norm):
+        raise FloatingPointError("Non-finite online gradient; checkpoint refused")
+    applied = bool(norm.item() > 0)
+    if applied:
+        optimizer.step()
+    return norm.item(), applied

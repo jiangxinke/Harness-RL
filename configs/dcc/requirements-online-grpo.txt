@@ -1,0 +1,5 @@
+-r requirements-quantized.txt
+# Optional two-stage HF CUAD policy. The default Slime and vLLM paths do not
+# import this backend or require these dependencies.
+xgrammar==0.1.25
+pydantic>=2,<3
