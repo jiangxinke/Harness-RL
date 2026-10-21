@@ -83,8 +83,8 @@ def validate_train_tasks(tasks, *, require_labels=True):
 
 
 def task_plan(tasks, *, steps, world_size, seed, sampling="stratified-3to1"):
-    """Original gold strata or a label-blind shuffled deck of TRAIN indices."""
-    if sampling not in {"stratified-3to1", "uniform"}:
+    """Original strata, opt-in capped span weights, or a label-blind TRAIN deck."""
+    if sampling not in {"stratified-3to1", "uniform", "stratified-3to1-span-cap5"}:
         raise ValueError("Unknown CUAD task sampling mode")
     # A uniform public task plan must not inspect reward labels. The training
     # entrypoint still validates that every task has explicit TRAIN labels.
@@ -108,6 +108,14 @@ def task_plan(tasks, *, steps, world_size, seed, sampling="stratified-3to1"):
             decks[name] = list(pool)
             rng.shuffle(decks[name])
         return decks[name].pop()
+    if sampling == "stratified-3to1-span-cap5":
+        weights = [min(len(tasks[index].gold), 5) for index in positive]
+        # One local seeded RNG drives both strata. Positive draws may repeat;
+        # negative draws still exhaust a shuffled deck before its next cycle.
+        flat = [draw("negative", negative) if negative and index % 4 == 0
+                else rng.choices(positive, weights=weights, k=1)[0]
+                for index in range(steps * world_size)]
+        return [flat[index:index + world_size] for index in range(0, len(flat), world_size)]
     flat = [draw("negative", negative) if negative and index % 4 == 0
             else draw("positive", positive) for index in range(steps * world_size)]
     return [flat[index:index + world_size] for index in range(0, len(flat), world_size)]
@@ -125,6 +133,15 @@ def cuad_task_sampling_configuration(sampling):
             outcome_based_resampling=False, label_dependent=False,
             without_replacement_per_deck_cycle=True,
             deck_scope="all-CUAD-TRAIN-task-indices", seeded_shuffled_deck=True)
+    if sampling == "stratified-3to1-span-cap5":
+        return dict(mode=sampling, stratification="TRAIN gold-label negative-vs-positive",
+            negative_stride=4, positive_fallback_when_no_negatives=True,
+            label_dependent=True, outcome_based_resampling=False,
+            positive_sampling="weighted-with-replacement",
+            positive_weight="min(TRAIN gold span count, 5)", positive_span_count_cap=5,
+            positive_cap_recomputed=False,
+            negative_sampling="shuffled-without-replacement-per-deck-cycle",
+            seeded_rng="single-random.Random(seed)-shared-by-both-strata")
     raise ValueError("Unknown CUAD task sampling mode")
 
 
@@ -381,6 +398,8 @@ def configuration(args, plan, tasks, world_size):
             web_deck="public-ID-only-shuffled-cycles",
             cuad_plan=("existing-TRAIN-gold-positive-negative-stratification"
                        if config["cuad_task_selection"]["mode"] == "stratified-3to1"
+                       else "TRAIN-gold-stratified-3to1-positive-span-cap5-with-replacement-negative-deck"
+                       if config["cuad_task_selection"]["mode"] == "stratified-3to1-span-cap5"
                        else "uniform-label-blind-CUAD-TRAIN-index-deck"),
             draws_per_cycle=dict(cuad=args.cuad_draws_per_cycle,
                                  widesearch=args.web_draws_per_cycle),
@@ -727,9 +746,10 @@ def main(argv=None):
                         help="Online Web TRAIN only: original whole-table grounding (default), or per-row TP eligibility with full prediction/gold denominators")
     parser.add_argument("--cuad-draws-per-cycle", type=int, default=1)
     parser.add_argument("--web-draws-per-cycle", type=int, default=1)
-    parser.add_argument("--cuad-task-sampling", choices=("stratified-3to1", "uniform"),
+    parser.add_argument("--cuad-task-sampling",
+                        choices=("stratified-3to1", "uniform", "stratified-3to1-span-cap5"),
                         default="stratified-3to1",
-                        help="Original TRAIN gold strata (default), or a label-blind shuffled deck of all CUAD TRAIN task indices")
+                        help="Original TRAIN gold strata (default), a label-blind uniform deck, or opt-in 3:1 strata with positive min(gold span count,5) weights and replacement")
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--group-size", type=int, default=2)
     parser.add_argument("--advantage-normalization", choices=("std", "centered"), default="std",

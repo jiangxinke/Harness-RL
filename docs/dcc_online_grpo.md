@@ -301,7 +301,33 @@ IDs. Uniform sampling is a distribution-matching experiment; it is not evidence
 of improved benchmark performance. Compare it with the default while holding
 the seed, budgets, learning rate and all other training choices fixed.
 
-Neither mode resamples tasks based on outcomes. Phase events separately record collection,
+The separate opt-in `--cuad-task-sampling stratified-3to1-span-cap5` retains
+the three-positive/one-negative schedule, with a negative draw at every fourth
+flat position starting at zero. Positive tasks are sampled **with replacement**,
+with weight `min(len(task.gold), 5)`; a positive can repeat before other positives
+are visited. Negative tasks keep a shuffled deck and are drawn without
+replacement within each deck cycle. When no negatives exist, every draw is
+positive; an all-negative pool is rejected, as with the default stratified mode.
+This mode requires explicit TRAIN labels and applies to CUAD-only training or
+the existing CUAD portion of mixed training, without changing Web admission,
+selection or the CUAD/Web ratio.
+
+The cap of five was derived from the positive TRAIN gold-span-count 95th
+percentile during the sampling audit. It is a fixed cap, **not recomputed** for a
+different input file. Gold-span count measures label multiplicity, not measured
+prompt length or difficulty. A single local `random.Random(seed)` drives both
+the positive weighted draws and negative deck shuffles. Positive draws consume
+RNG state, so the specific negative ordering can differ from the default;
+negative deck exhaustion and seed reproducibility still hold. The new mode's
+configuration records its label dependence, cap, replacement policies, shared
+RNG and actual planned IDs. Metadata for the original two modes is unchanged.
+
+Capped span sampling changes the training distribution. It is an experimental
+candidate, not a bug fix or evidence of improved ability. Keep the harness,
+evaluation tasks, budgets and scoring fixed when comparing it with another
+training run. It remains disabled unless this sampling mode is selected.
+
+None of these modes resamples tasks based on outcomes. Phase events separately record collection,
 reward signal, replay, optimizer application and checkpoint publication. Closed
 native traces include batch thought/JSON elapsed time; absent JSON is null.
 

@@ -271,6 +271,118 @@ def test_uniform_plan_still_rejects_invalid_or_heldout_task_identity(tasks):
         load_trainer().task_plan(tasks, steps=1, world_size=1, seed=79, sampling="uniform")
 
 
+def test_span_cap5_draws_follow_real_weight_boundaries_with_replacement(monkeypatch):
+    import random
+    trainer = load_trainer()
+    tasks = [SimpleNamespace(id=f"positive-{count}", benchmark="cuad", split="train",
+                             gold=["span"] * count) for count in (1, 4, 5, 55)]
+    # Exercise Random.choices itself at each categorical interval boundary.
+    # The 55-span task must have exactly the same weight as the 5-span task.
+    points = iter((0., 1 / 15 - 1e-9, 1 / 15, 5 / 15 - 1e-9,
+                   5 / 15, 10 / 15 - 1e-9, 10 / 15, 1 - 1e-9))
+    seeds = []
+    class FixedRandom(random.Random):
+        def __init__(self, seed):
+            super().__init__(seed)
+            seeds.append(seed)
+        def random(self):
+            return next(points)
+    monkeypatch.setattr(trainer.random, "Random", FixedRandom)
+    plan = trainer.task_plan(tasks, steps=2, world_size=4, seed=79,
+                             sampling="stratified-3to1-span-cap5")
+    assert plan == [[0, 0, 1, 1], [2, 2, 3, 3]]
+    assert seeds == [79]  # A single local RNG; repeated positives are allowed.
+
+
+def test_span_cap5_seed_schedule_and_negative_deck_cycles_are_reproducible():
+    import random
+    trainer = load_trainer()
+    tasks = [SimpleNamespace(id=f"task-{index}", benchmark="cuad", split="train",
+                             gold=["span"] * count)
+             for index, count in enumerate((1, 3, 9, 0, 0, 0))]
+    state = random.getstate()
+    plan = trainer.task_plan(tasks, steps=16, world_size=3, seed=79,
+                             sampling="stratified-3to1-span-cap5")
+    flat = [index for row in plan for index in row]
+    negatives = flat[::4]
+    assert len(plan) == 16 and all(len(row) == 3 for row in plan)
+    assert all(index >= 3 for index in negatives)
+    assert all(index < 3 for offset, index in enumerate(flat) if offset % 4)
+    assert len(negatives) == 12  # Exactly three positive draws per negative.
+    assert all(sorted(negatives[start:start + 3]) == [3, 4, 5]
+               for start in range(0, len(negatives), 3))
+    assert plan == trainer.task_plan(tasks, steps=16, world_size=3, seed=79,
+                                    sampling="stratified-3to1-span-cap5")
+    assert flat == [row[0] for row in trainer.task_plan(tasks, steps=48, world_size=1,
+        seed=79, sampling="stratified-3to1-span-cap5")]
+    assert plan != trainer.task_plan(tasks, steps=16, world_size=3, seed=80,
+                                    sampling="stratified-3to1-span-cap5")
+    assert random.getstate() == state
+
+
+@pytest.mark.parametrize("tasks,match", [
+    ([SimpleNamespace(id="negative", benchmark="cuad", split="train", gold=[])], "positive"),
+    ([SimpleNamespace(id="heldout", benchmark="cuad", split="validation", gold=["span"])], "TRAIN"),
+    ([SimpleNamespace(id="unlabelled", benchmark="cuad", split="train", gold=None)], "labels")])
+def test_span_cap5_preserves_train_label_and_positive_admission(tasks, match):
+    with pytest.raises(ValueError, match=match):
+        load_trainer().task_plan(tasks, steps=1, world_size=1, seed=79,
+                                 sampling="stratified-3to1-span-cap5")
+
+
+@pytest.mark.parametrize("enable_web", [False, True])
+def test_span_cap5_cli_records_actual_sampling_in_cuad_and_mixed_training(monkeypatch, enable_web):
+    from slime_plugins.dcc.data import Task
+    from slime_plugins.dcc import online_web
+    trainer = load_trainer()
+    cuad = [Task(f"cuad-{index}", "cuad", "train", "Q", "contract", ["span"] * count)
+            for index, count in enumerate((1, 8, 0, 0))]
+    web_tasks = [Task(f"web-{index}", "widesearch", "train", "Q", gold=None) for index in range(2)]
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setattr(trainer, "load_tasks", lambda _: cuad)
+    monkeypatch.setattr(trainer, "validate_source", lambda *args, **kwargs: None)
+    monkeypatch.setattr(online_web, "WebTrainingInputs", lambda *args, **kwargs: SimpleNamespace(tasks=web_tasks))
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Sampling CLI tests must not load a model or initialize CUDA")
+    monkeypatch.setattr(trainer, "load_policy_model", forbidden)
+    monkeypatch.setattr(torch.cuda, "set_device", forbidden)
+    observed = []
+    async def capture(args, tasks, plan, world_size, *, web_inputs):
+        config = trainer.configuration(args, plan, tasks, world_size)
+        observed.append(config)
+        flat = [index for row in plan for index in row]
+        expected = trainer.task_plan(cuad, steps=8 if enable_web else 16, world_size=1,
+                                     seed=args.seed, sampling="stratified-3to1-span-cap5")
+        assert (flat[::2] if enable_web else flat) == [row[0] for row in expected]
+        if enable_web:
+            assert all(index >= len(cuad) for index in flat[1::2])
+            assert config["online_web"]["cuad_plan"] == (
+                "TRAIN-gold-stratified-3to1-positive-span-cap5-with-replacement-negative-deck")
+        else:
+            assert web_inputs is None
+        assert config["cuad_task_selection"] == {
+            "mode": "stratified-3to1-span-cap5",
+            "stratification": "TRAIN gold-label negative-vs-positive",
+            "negative_stride": 4, "positive_fallback_when_no_negatives": True,
+            "label_dependent": True, "outcome_based_resampling": False,
+            "positive_sampling": "weighted-with-replacement",
+            "positive_weight": "min(TRAIN gold span count, 5)", "positive_span_count_cap": 5,
+            "positive_cap_recomputed": False,
+            "negative_sampling": "shuffled-without-replacement-per-deck-cycle",
+            "seeded_rng": "single-random.Random(seed)-shared-by-both-strata"}
+        assert config["arguments"]["cuad_task_sampling"] == "stratified-3to1-span-cap5"
+        assert config["planned_task_ids"] == [[tasks[index].id for index in row] for row in plan]
+        assert config["objective_denominator"] == args.group_size * args.max_steps * args.thought_tokens
+        assert args.group_size == 2 and args.max_steps == 2 and args.thought_tokens == 4096
+    monkeypatch.setattr(trainer, "train", capture)
+    extra = (["--enable-online-web", "--web-train-data", "public.jsonl",
+              "--web-train-labels", "labels.jsonl", "--web-binding", "binding.json"] if enable_web else [])
+    assert trainer.main(["--model", "CPU-fixture", "--train-data", "unused.jsonl",
+        "--output-dir", "unused-output", "--source-commit", "0" * 40,
+        "--steps", "8", "--cuad-task-sampling", "stratified-3to1-span-cap5", *extra]) == 0
+    assert len(observed) == 1 and not torch.cuda.is_initialized()
+
+
 @pytest.mark.parametrize("enable_web", [False, True])
 def test_uniform_cli_reaches_cuad_and_mixed_plans_with_accurate_metadata(monkeypatch, enable_web):
     from slime_plugins.dcc.data import Task
