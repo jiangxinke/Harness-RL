@@ -30,7 +30,7 @@ async def test_web_search_returns_ddg_compatible_results() -> None:
     }
 
     with (
-        patch.object(tools, "_get_tool_config", return_value={"base_url": "http://node-2:8000", "max_results": 3}),
+        patch.object(tools, "_get_tool_config", return_value={"base_url": "http://retrieval.test:8000", "max_results": 3}),
         patch("deerflow.community.search_r1.tools.httpx.AsyncClient") as client_cls,
     ):
         client_cls.return_value.__aenter__.return_value.post = AsyncMock(return_value=response)
@@ -48,7 +48,7 @@ async def test_web_search_returns_ddg_compatible_results() -> None:
         }
     ]
     call = client_cls.return_value.__aenter__.return_value.post.call_args
-    assert call.args == ("http://node-2:8000/retrieve",)
+    assert call.args == ("http://retrieval.test:8000/retrieve",)
     assert call.kwargs["json"] == {"queries": ["Ada Lovelace"], "topk": 3, "return_scores": True}
 
 
