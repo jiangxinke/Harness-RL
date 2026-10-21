@@ -99,6 +99,7 @@ def web_tool_configuration(runner):
 
 def runner_configuration(args):
     """Read actual shared runner settings, including complete versioned guards."""
+    from slime_plugins.dcc.cuad_reasoning import cuad_concise_reasoning_configuration
     from slime_plugins.dcc.web_structured import (web_structured_actions_configuration,
         web_structured_configuration, web_multi_citation_configuration)
     from slime_plugins.dcc.web_review import web_explicit_review_configuration
@@ -113,6 +114,7 @@ def runner_configuration(args):
               "timeout_seconds", "auto_read_sources", "retrieval_context_chars", "retrieval_max_context_chars",
               "retrieval_task_bound_expansion", "cuad_structured_actions")
     return {"shared_factory": "dcc_online_grpo.make_runner", "episode_prompt": EPISODE_PROMPT_VERSION,
+            "cuad_concise_reasoning": cuad_concise_reasoning_configuration(runner.cuad_concise_reasoning),
             "prompt_encoding": PROMPT_ENCODING_VERSION, "evidence_guard": WIDESEARCH_EVIDENCE_GUARD_VERSION,
             "web_reader": WEB_READER_VERSION, **{key: getattr(runner, key) for key in scalar},
             "retrieval_profile": asdict(runner.retrieval_profile) if runner.retrieval_profile else None,

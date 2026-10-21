@@ -112,3 +112,15 @@ are null; `first` maxima describe that one segment, not the entire group.
 Actual behavior-versus-current maxima and ratio ranges/clip fractions retain
 their complete loss-scored coverage in every mode. This saves diagnostic work;
 it does not establish a training-quality improvement or measured GPU speedup.
+
+`--cuad-concise-reasoning` is an optional CUAD prompt intervention, disabled
+by default. It asks the model to locate candidate clauses using source IDs or
+character ranges already shown in observations, avoid copying long contract
+passages in reasoning, and copy qualifying spans only in the final answer.
+It does not calculate new offsets, change retrieval, change the JSON schema,
+force a thinking close, or increase the token budget. Web prompts are unchanged.
+The training configuration and evaluation comparison record its enabled state
+and prompt version. A matched base/adapter evaluation must use the same setting;
+an adapter evaluated with this option cannot use an old baseline without it.
+Treat it as an experimental option until a separate TRAIN-only comparison
+establishes its effect on completion, correctness and generated length.

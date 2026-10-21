@@ -28,6 +28,7 @@ import torch.distributed as dist
 from dcc_training_io import prepare_training_output, publish_checkpoint
 from dcc_train import validate_grpo_dropout
 from slime_plugins.dcc import EpisodeRunner, load_tasks
+from slime_plugins.dcc.cuad_reasoning import cuad_concise_reasoning_configuration
 from slime_plugins.dcc.durable_journal import OrderedDurableJSONLWriter, close_durable_journals
 from slime_plugins.dcc.hf_chunked_logprobs import resolve_logprob_backend
 from slime_plugins.dcc.hf_policy import encode_messages, load_policy_model
@@ -97,6 +98,7 @@ def make_runner(args):
         retrieval_max_context_chars=args.retrieval_max_context_chars,
         retrieval_task_bound_expansion=args.retrieval_task_bound_expansion,
         cuad_structured_actions=True,
+        cuad_concise_reasoning=getattr(args, "cuad_concise_reasoning", False),
         auto_read_sources=args.auto_read_sources,
         web_structured_actions=True, web_structured_final=True,
         web_explicit_review=True, web_navigation_ledger=True,
@@ -203,6 +205,7 @@ def configuration(args, plan, tasks, world_size):
         arguments={key: str(value) if isinstance(value, Path) else value
                    for key, value in vars(args).items()},
         compute_profile=compute_profile_configuration(getattr(args, "compute_profile", "legacy")),
+        cuad_concise_reasoning=cuad_concise_reasoning_configuration(getattr(args, "cuad_concise_reasoning", False)),
         training_split_only=True, sft_auxiliary=False, offline_preferences=False,
         cuad_task_selection=dict(stratification="TRAIN gold-label negative-vs-positive",
             negative_stride=4, positive_fallback_when_no_negatives=True,
@@ -450,6 +453,8 @@ def main(argv=None):
     parser.add_argument("--retrieval-context-chars", type=int, default=1200)
     parser.add_argument("--retrieval-max-context-chars", type=int, default=12000)
     parser.add_argument("--retrieval-task-bound-expansion", action="store_true")
+    parser.add_argument("--cuad-concise-reasoning", action="store_true",
+                        help="Opt in to brief CUAD reasoning using only observed source identifiers/character ranges; answer spans and schema are unchanged")
     parser.add_argument("--auto-read-sources", type=int, choices=(0, 1, 2), default=2)
     parser.add_argument("--lora-rank", type=int, default=16)
     parser.add_argument("--quantization", choices=("none", "nf4"), default="nf4")

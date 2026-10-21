@@ -134,11 +134,11 @@ def test_real_runner_journals_and_cuad_score_keep_every_failure(evaluator, tmp_p
 
 def test_sharding_preserves_task_seeds_and_base_adapter_configuration(evaluator, tmp_path):
     all_tasks = tasks(evaluator)
-    base = arguments(evaluator, tmp_path / "base", profile="greedy")
+    base = arguments(evaluator, tmp_path / "base", profile="greedy", cuad_concise_reasoning=True)
     asyncio.run(evaluator.generate(base, all_tasks))
     evaluator.score(base, all_tasks)
     adapter = arguments(evaluator, tmp_path / "adapter", adapter="invented-online-final-adapter",
-                        base_output_dir=base.output_dir, shards=2, profile="greedy")
+                        base_output_dir=base.output_dir, shards=2, profile="greedy", cuad_concise_reasoning=True)
     for rank in (1, 0):
         adapter.shard_index = rank
         asyncio.run(evaluator.generate(adapter, all_tasks))
@@ -150,6 +150,7 @@ def test_sharding_preserves_task_seeds_and_base_adapter_configuration(evaluator,
     report = evaluator.score(adapter, all_tasks)
     assert report["tasks"] == 3 and len(report["shard_receipts"]) == 2
     assert report["comparison"]["thought_sampling_profile"] == "greedy"
+    assert report["comparison"]["cuad_concise_reasoning"]["enabled"] is True
     assert report["matched_base"]["failure_zero_macro_f1_delta"] == 0
     assert report["matched_base"]["complete"] is False  # Context failure retained, never hidden.
     assert all(policy.options["sampling_profile"] == "greedy" for policy in evaluator.policies)
@@ -179,7 +180,7 @@ def test_cli_generate_and_score_only_do_not_load_gpu_for_scoring(evaluator, tmp_
     data.write_text("".join(json.dumps(task.to_dict()) + "\n" for task in tasks(evaluator)))
     output = tmp_path / "eval"
     command = ["--model", "invented-CPU-model", "--data", str(data), "--output-dir", str(output),
-               "--source-commit", "a" * 40, "--max-steps", "1"]
+               "--source-commit", "a" * 40, "--max-steps", "1", "--cuad-concise-reasoning"]
     assert evaluator.main(command) == 0
     assert len(evaluator.loads) == 1
     (output / "report.json").unlink()
@@ -288,7 +289,8 @@ def test_merge_refuses_extra_duplicate_and_heterogeneous_shards(evaluator, tmp_p
 
 
 @pytest.mark.parametrize("setting,replacement", [("seed", 999), ("thought_tokens", 5), ("profile", "greedy"),
-    ("initial_chunks", 1), ("retrieval_context_chars", 100), ("model", "different-CPU-model"), ("quantization", "none")])
+    ("initial_chunks", 1), ("retrieval_context_chars", 100), ("model", "different-CPU-model"), ("quantization", "none"),
+    ("cuad_concise_reasoning", True)])
 def test_adapter_scoring_requires_actual_matching_base(evaluator, tmp_path, setting, replacement):
     all_tasks = tasks(evaluator)[:2]
     base = arguments(evaluator, tmp_path / "base")

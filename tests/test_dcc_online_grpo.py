@@ -119,8 +119,9 @@ def load_trainer():
     return trainer
 
 
-@pytest.mark.parametrize("batch_args,expected", [([], 4), (["--native-batch-size", "2"], 2)])
-def test_native_batch_cli_keeps_logical_group_and_token_budgets(monkeypatch, batch_args, expected):
+@pytest.mark.parametrize("batch_args,expected,concise", [([], 4, False),
+    (["--native-batch-size", "2", "--cuad-concise-reasoning"], 2, True)])
+def test_native_batch_cli_keeps_logical_group_and_token_budgets(monkeypatch, batch_args, expected, concise):
     from slime_plugins.dcc.data import Task
     trainer = load_trainer()
     task = Task("synthetic-train", "cuad", "train", "Find the clause", document="clause", gold=["clause"])
@@ -138,6 +139,7 @@ def test_native_batch_cli_keeps_logical_group_and_token_budgets(monkeypatch, bat
         assert args.native_batch_size == expected and args.group_size == 4
         assert (args.thought_tokens, args.json_tokens, args.max_steps) == (8, 16, 2)
         assert web_inputs is None
+        assert trainer.make_runner(args).cuad_concise_reasoning is concise
     monkeypatch.setattr(trainer, "train", capture)
     assert trainer.main(["--model", "CPU-fixture", "--train-data", "unused.jsonl",
         "--output-dir", "unused-output", "--source-commit", "0" * 40,
@@ -146,6 +148,7 @@ def test_native_batch_cli_keeps_logical_group_and_token_budgets(monkeypatch, bat
     assert len(observed) == 1
     assert observed[0]["arguments"]["native_batch_size"] == expected
     assert observed[0]["objective_denominator"] == 4 * 2 * 8
+    assert observed[0]["cuad_concise_reasoning"]["enabled"] is concise
     assert not torch.cuda.is_initialized()
 
 

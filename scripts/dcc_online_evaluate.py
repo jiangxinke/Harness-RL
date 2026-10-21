@@ -29,6 +29,7 @@ import torch
 
 from dcc_online_grpo import make_runner, validate_source
 from slime_plugins.dcc import load_tasks
+from slime_plugins.dcc.cuad_reasoning import cuad_concise_reasoning_configuration
 from slime_plugins.dcc.durable_journal import OrderedDurableJSONLWriter, close_durable_journals
 from slime_plugins.dcc.evaluation import evaluate_results
 from slime_plugins.dcc.hf_native_policy import NativeHFPolicy, PROTOCOL
@@ -125,6 +126,7 @@ def manifest(args, tasks):
         retrieval_max_context_chars=args.retrieval_max_context_chars,
         retrieval_task_bound_expansion=args.retrieval_task_bound_expansion,
         auto_read_sources=args.auto_read_sources, cuad_structured_actions=True,
+        cuad_concise_reasoning=cuad_concise_reasoning_configuration(getattr(args, "cuad_concise_reasoning", False)),
         episodes_per_task=1,
         allow_prompt_truncation=False, full_task_ids=[task.id for task in tasks],
         public_task_identity=public_task_identity(tasks),
@@ -326,6 +328,8 @@ def parser():
     result.add_argument("--retrieval-context-chars", type=int, default=1200)
     result.add_argument("--retrieval-max-context-chars", type=int, default=12000)
     result.add_argument("--retrieval-task-bound-expansion", action="store_true")
+    result.add_argument("--cuad-concise-reasoning", action="store_true",
+                        help="Opt in to concise CUAD source-offset reasoning; must match base and adapter evaluation")
     result.add_argument("--auto-read-sources", type=int, choices=(0, 1, 2), default=2)
     mode = result.add_mutually_exclusive_group()
     mode.add_argument("--score-only", action="store_true", help="Merge and score every closed shard without loading a model")
