@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import timedelta
+from functools import partial
 import json
 import math
 import os
@@ -37,6 +38,7 @@ from slime_plugins.dcc.hf_compute import (COMPUTE_PROFILES, compute_profile_conf
 from slime_plugins.dcc.online_grpo import ALGORITHM, apply_policy_update, group_signal, thought_policy_loss
 from slime_plugins.dcc.native_hf_context import context_handling_configuration
 from slime_plugins.dcc.retrieval import load_retrieval_profile
+from slime_plugins.dcc.tools import WebTools
 
 
 def validate_source(expected, *, online_web=False):
@@ -89,6 +91,10 @@ def task_plan(tasks, *, steps, world_size, seed):
     return [flat[index:index + world_size] for index in range(0, len(flat), world_size)]
 
 
+def make_web_tools(args):
+    return WebTools(max_text_window_chars=getattr(args, "web_text_window_chars", None))
+
+
 def make_runner(args):
     return EpisodeRunner(
         max_steps=args.max_steps, max_new_tokens=args.thought_tokens + args.json_tokens,
@@ -101,6 +107,7 @@ def make_runner(args):
         cuad_structured_actions=True,
         cuad_concise_reasoning=getattr(args, "cuad_concise_reasoning", False),
         auto_read_sources=args.auto_read_sources,
+        web_tools_factory=partial(make_web_tools, args),
         web_structured_actions=True, web_structured_final=True,
         web_explicit_review=True, web_navigation_ledger=True,
         web_research_checkpoints=True, web_data_discovery_guidance=True,
@@ -201,12 +208,15 @@ async def collect_group(runner, task, policy, *, group_size, rank):
 
 
 def configuration(args, plan, tasks, world_size):
+    web = make_web_tools(args)
     config = dict(algorithm=ALGORITHM, runtime="independent-HF; not Slime/Megatron",
         source_commit=args.source_commit, world_size=world_size,
         arguments={key: str(value) if isinstance(value, Path) else value
                    for key, value in vars(args).items()},
         compute_profile=compute_profile_configuration(getattr(args, "compute_profile", "legacy")),
         cuad_concise_reasoning=cuad_concise_reasoning_configuration(getattr(args, "cuad_concise_reasoning", False)),
+        web_tool_limits=dict(max_page_chars=web.max_page_chars,
+                             max_text_window_chars=web.max_text_window_chars),
         training_split_only=True, sft_auxiliary=False, offline_preferences=False,
         cuad_task_selection=dict(stratification="TRAIN gold-label negative-vs-positive",
             negative_stride=4, positive_fallback_when_no_negatives=True,
@@ -458,6 +468,8 @@ def main(argv=None):
     parser.add_argument("--cuad-concise-reasoning", action="store_true",
                         help="Opt in to brief CUAD reasoning using only observed source identifiers/character ranges; answer spans and schema are unchanged")
     parser.add_argument("--auto-read-sources", type=int, choices=(0, 1, 2), default=2)
+    parser.add_argument("--web-text-window-chars", type=int,
+                        help="Optional positive fetch_url body-window limit; cached source and original cached-row JSON budget are unchanged")
     parser.add_argument("--lora-rank", type=int, default=16)
     parser.add_argument("--quantization", choices=("none", "nf4"), default="nf4")
     parser.add_argument("--compute-profile", choices=COMPUTE_PROFILES, default="legacy")
@@ -480,6 +492,7 @@ def main(argv=None):
     if (any(value < 1 for value in (args.steps, args.max_steps, args.thought_tokens, args.json_tokens,
             args.max_prompt_tokens, args.lora_rank, args.plan_world_size, args.native_batch_size))
             or args.group_size < 2 or args.save_every < 0
+            or (args.web_text_window_chars is not None and args.web_text_window_chars < 1)
             or not math.isfinite(args.learning_rate) or args.learning_rate <= 0
             or not math.isfinite(args.max_grad_norm) or args.max_grad_norm <= 0
             or not math.isfinite(args.episode_timeout) or args.episode_timeout <= 0

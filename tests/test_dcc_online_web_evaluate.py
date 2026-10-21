@@ -79,7 +79,7 @@ def evaluator(monkeypatch):
     original_runner = value.make_runner
     def runner(args):
         result = original_runner(args)
-        result.web_tools_factory = Web
+        result.web_tools_factory = lambda: Web(max_text_window_chars=getattr(args, "web_text_window_chars", None))
         original = result.run
         async def run(task, policy, **kwargs):
             assert task.gold is None and set(task.metadata) == {"evaluation"}
@@ -295,7 +295,7 @@ def test_corrupt_or_unclosed_native_evidence_rejected_before_scoring(evaluator, 
     assert not evaluator.metric_calls
 
 
-@pytest.mark.parametrize("difference", ["seed", "max_steps", "profile", "public_prompt", "references", "reference_rules", "source_metadata", "search_backend", "web_timeout", "search_endpoint", "proxy", "search_locale", "search_cache"])
+@pytest.mark.parametrize("difference", ["seed", "max_steps", "profile", "public_prompt", "references", "reference_rules", "source_metadata", "search_backend", "web_timeout", "search_endpoint", "proxy", "search_locale", "search_cache", "web_text_window_chars"])
 def test_base_adapter_comparison_rejects_mismatches(evaluator, tmp_path, monkeypatch, difference):
     tasks = references(("success",))
     base = arguments(evaluator, tmp_path / "base")
@@ -331,6 +331,8 @@ def test_base_adapter_comparison_rejects_mismatches(evaluator, tmp_path, monkeyp
     elif difference == "search_cache":
         from slime_plugins.dcc import search_provider
         monkeypatch.setattr(search_provider, "_CACHE_SECONDS", 1)
+    elif difference == "web_text_window_chars":
+        adapter.web_text_window_chars = 6000
     asyncio.run(evaluator.generate(adapter, public))
     with pytest.raises(ValueError):
         evaluator.score(adapter, tasks)
@@ -347,6 +349,7 @@ def test_actual_tool_configuration_binds_limits_without_recording_secrets(evalua
     assert config["search_backend"] == "public_web" and config["web_timeout_seconds"] == 15
     assert config["search_count_default"] == 8 and config["search_count_bounds"] == [1, 10]
     assert config["max_page_chars"] == 14000 and config["public_download_max_bytes"] == 5_000_000
+    assert config["max_text_window_chars"] == 14000
     assert config["search_headers"]["Accept-Language"] == "en-US,en;q=0.9"
     assert len(config["implementation_identities"]) == 3 and config["api_key_configured"] is None
     serialized = json.dumps(config)

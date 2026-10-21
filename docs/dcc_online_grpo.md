@@ -113,6 +113,18 @@ Zero context keeps the original retrieval behavior. This changes visible
 evidence and must be held fixed between base and adapter evaluation; evidence
 coverage alone is not a benchmark score.
 
+The optional positive integer `--web-text-window-chars` limits only the body
+text returned by ordinary `fetch_url` reads. When omitted, the window inherits
+the original `max_page_chars` value, which is 14000 in the shared native runner.
+Downloaded text remains complete in the episode cache. Source offsets,
+`next_start`, navigation metadata, citation checks and scoring are unchanged.
+Cached-row selection retains its original 14000-character serialized JSON
+budget, including literal records and provenance, even with a smaller body
+window. The trainer and native Web evaluator record the effective body window
+separately from that original budget. Base and adapter Web evaluation must use
+the same window; the comparison rejects a mismatch. A 6000-character window is
+a TRAIN pilot candidate, not a demonstrated improvement or a new default.
+
 
 The matching evaluator uses the same HF loader for base and adapter, including
 NF4 preparation and nonquantized base dtypes. Use a fresh output for each arm.

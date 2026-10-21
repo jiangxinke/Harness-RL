@@ -331,6 +331,8 @@ def parser():
     result.add_argument("--cuad-concise-reasoning", action="store_true",
                         help="Opt in to concise CUAD source-offset reasoning; must match base and adapter evaluation")
     result.add_argument("--auto-read-sources", type=int, choices=(0, 1, 2), default=2)
+    result.add_argument("--web-text-window-chars", type=int,
+                        help="Optional positive fetch_url body-window limit; must match base and adapter Web evaluation")
     mode = result.add_mutually_exclusive_group()
     mode.add_argument("--score-only", action="store_true", help="Merge and score every closed shard without loading a model")
     mode.add_argument("--generate-only", action="store_true",
@@ -346,6 +348,7 @@ def main(argv=None):
                    args.max_prompt_tokens, args.max_steps, args.retrieval_context_chars,
                    args.retrieval_max_context_chars))
             or not 0 <= args.shard_index < args.shards or args.device_index < 0 or args.initial_chunks < 0
+            or (args.web_text_window_chars is not None and args.web_text_window_chars < 1)
             or not math.isfinite(args.episode_timeout) or args.episode_timeout <= 0):
         arguments.error("Invalid source identity, shard, device or episode budget")
     validate_source(args.source_commit)

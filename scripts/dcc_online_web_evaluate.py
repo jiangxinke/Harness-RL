@@ -78,7 +78,8 @@ def web_tool_configuration(runner):
             for key in ("SSL_CERT_FILE", "SSL_CERT_DIR")},
         api_key_configured=bool(os.environ.get("SERPER_API_KEY" if web.backend == "serper"
             else "BRAVE_SEARCH_API_KEY")) if web.backend in {"serper", "brave"} else None,
-        max_page_chars=web.max_page_chars, browser_reader=None if web.browser_reader is None
+        max_page_chars=web.max_page_chars, max_text_window_chars=web.max_text_window_chars,
+        browser_reader=None if web.browser_reader is None
             else f"{type(web.browser_reader).__module__}.{type(web.browser_reader).__qualname__}",
         search_query_max_chars=1000,
         search_count_default=inspect.signature(web.web_search).parameters["count"].default,
@@ -372,6 +373,7 @@ def main(argv=None):
             or any(value < 1 for value in (args.shards, args.thought_tokens, args.json_tokens,
                    args.max_prompt_tokens, args.max_steps, args.retrieval_context_chars, args.retrieval_max_context_chars))
             or not 0 <= args.shard_index < args.shards or args.device_index < 0 or args.initial_chunks < 0
+            or (args.web_text_window_chars is not None and args.web_text_window_chars < 1)
             or not math.isfinite(args.episode_timeout) or args.episode_timeout <= 0
             or args.split == "train"):
         arguments.error("Valid source/shard/budgets and held-out validation/test split required")

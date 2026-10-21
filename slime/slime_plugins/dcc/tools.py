@@ -806,12 +806,17 @@ def extract_page(content: bytes, content_type: str, encoding: str = "utf-8", *,
 class WebTools:
     """Search public indexes or an operator-configured web-search API."""
 
-    def __init__(self, *, backend: str | None = None, max_page_chars: int = 14000, browser_reader=None, web_cached_rows=False) -> None:
+    def __init__(self, *, backend: str | None = None, max_page_chars: int = 14000, browser_reader=None, web_cached_rows=False, max_text_window_chars: int | None = None) -> None:
+        if max_text_window_chars is not None and (type(max_text_window_chars) is not int or max_text_window_chars < 1):
+            raise ValueError("max_text_window_chars must be a positive integer or None")
         from .web_rows import web_cached_rows_configuration
 
         self.web_cached_rows = web_cached_rows_configuration(web_cached_rows)["enabled"]
         self.backend = backend or os.environ.get("DCC_SEARCH_BACKEND", "public_web")
         self.max_page_chars = max_page_chars
+        # Limit ordinary body windows without shrinking cached-row provenance
+        # JSON or discarding any downloaded source text.
+        self.max_text_window_chars = max_page_chars if max_text_window_chars is None else max_text_window_chars
         self.sources: dict[str, dict[str, str]] = {}
         self.pages: dict[str, str] = {}
         self.page_links: dict[str, list[dict[str, str]]] = {}
@@ -1066,7 +1071,7 @@ class WebTools:
         start = max(0, int(start))
         if start >= len(text):
             return {"url": url, "error": "Read offset is beyond this page. Use start=0 to reread it or fetch another source.", "total_characters": len(text)}
-        end = min(len(text), start + self.max_page_chars)
+        end = min(len(text), start + self.max_text_window_chars)
         result = {"url": url, "text": text[start:end], "start": start, "end": end, "total_characters": len(text), "truncated": end < len(text), "next_start": end if end < len(text) else None}
         if url in self.page_browser:
             result["browser_read"] = self.page_browser[url]
