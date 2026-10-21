@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -352,6 +353,63 @@ def test_adapter_provenance_separates_training_and_evaluation_source(evaluator, 
     assert config["condition"]["training"]["algorithm"] == actual_algorithm
     assert config["condition"]["training"]["optimizer_updates"] == updates
     assert config["condition"]["online_policy_gradient_updates_recorded"] is marked_online
+
+
+def completed_online_metadata(*, joint_json_policy, reference_kl_beta=0):
+    from dcc_online_grpo import configuration
+    args = SimpleNamespace(model="invented-CPU-model", source_commit="b" * 40,
+        group_size=4, max_steps=2, thought_tokens=4, json_tokens=256,
+        joint_json_policy=joint_json_policy, reference_kl_beta=reference_kl_beta)
+    config = configuration(args, [], [], 1)
+    config.update(rollout_iterations=4, optimizer_updates=2)
+    return config, dict(complete=True, optimizer_steps=2)
+
+
+@pytest.mark.parametrize("joint_json_policy", [False, True])
+@pytest.mark.parametrize("reference_kl_beta", [0, 0.02])
+def test_actual_online_algorithm_metadata_records_completed_updates(
+        evaluator, tmp_path, joint_json_policy, reference_kl_beta):
+    # Use the actual trainer's declarations, without model acquisition or rollout.
+    config, checkpoint = completed_online_metadata(joint_json_policy=joint_json_policy,
+                                                   reference_kl_beta=reference_kl_beta)
+    adapter = tmp_path / "invented-adapter"
+    adapter.mkdir()
+    (adapter / "training_config.json").write_text(json.dumps(config))
+    (adapter / "checkpoint_complete.json").write_text(json.dumps(checkpoint))
+    condition = evaluator.adapter_condition(str(adapter))
+    assert condition["training"]["algorithm"] == config["algorithm"]
+    assert condition["training"]["training_source_commit"] == "b" * 40
+    assert condition["online_policy_gradient_updates_recorded"] is True
+    assert not torch.cuda.is_initialized()
+
+
+@pytest.mark.parametrize("joint_json_policy", [False, True])
+@pytest.mark.parametrize("config_changes,checkpoint_changes", [
+    ({"optimizer_updates": 0}, {"optimizer_steps": 0}),
+    ({"optimizer_updates": True}, {"optimizer_steps": True}),
+    ({"rollout_iterations": 0}, {}),
+    ({"rollout_iterations": True}, {}),
+    ({"source_commit": "b" * 39}, {}),
+    ({"source_commit": "g" * 40}, {}),
+    ({}, {"complete": False}),
+    ({}, {"optimizer_steps": 1}),
+    ({"sft_auxiliary": True}, {}),
+    ({"sft_auxiliary": None}, {}),
+    ({"offline_preferences": True}, {}),
+    ({"offline_preferences": None}, {}),
+    ({"algorithm": "offline-DPO-control"}, {}),
+    ({"algorithm": "online-native-HF-joint-thought-masked-JSON-GRPO-v1+unknown"}, {}),
+])
+def test_online_metadata_still_requires_matching_receipt_and_no_sft_or_dpo(
+        evaluator, tmp_path, joint_json_policy, config_changes, checkpoint_changes):
+    config, checkpoint = completed_online_metadata(joint_json_policy=joint_json_policy)
+    config.update(config_changes)
+    checkpoint.update(checkpoint_changes)
+    adapter = tmp_path / "invented-adapter"
+    adapter.mkdir()
+    (adapter / "training_config.json").write_text(json.dumps(config))
+    (adapter / "checkpoint_complete.json").write_text(json.dumps(checkpoint))
+    assert evaluator.adapter_condition(str(adapter))["online_policy_gradient_updates_recorded"] is False
 
 
 def test_shared_loader_cpu_preparation_preserves_nonquantized_and_lora_dtypes(monkeypatch, tmp_path):

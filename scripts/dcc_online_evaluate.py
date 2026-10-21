@@ -27,7 +27,7 @@ sys.path[:0] = [str(Path(__file__).resolve().parent),
 
 import torch
 
-from dcc_online_grpo import make_runner, validate_source
+from dcc_online_grpo import REFERENCE_KL_VARIANT, make_runner, validate_source
 from slime_plugins.dcc import load_tasks
 from slime_plugins.dcc.cuad_reasoning import cuad_concise_reasoning_configuration
 from slime_plugins.dcc.web_auto_read import auto_read_follow_docs_configuration
@@ -38,9 +38,13 @@ from slime_plugins.dcc.hf_policy import load_policy_model
 from slime_plugins.dcc.hf_compute import (COMPUTE_PROFILES, adapter_compute_profile,
     compute_profile_configuration, precision_observation, validate_compute_profile, validate_model_compute_profile)
 from slime_plugins.dcc.metrics import cuad_task_metrics
+from slime_plugins.dcc.native_joint_grpo import ALGORITHM as JOINT_ALGORITHM
 from slime_plugins.dcc.online_grpo import ALGORITHM
 
 VERSION = "dcc-online-matched-HF-CUAD-evaluation-v1"
+ONLINE_ALGORITHMS = (ALGORITHM, JOINT_ALGORITHM,
+    ALGORITHM + "+" + REFERENCE_KL_VARIANT,
+    JOINT_ALGORITHM + "+frozen-base-reference-k3-nonzero-advantage-joint-v1")
 SCORE_FIELDS = {"f1", "precision", "recall", "no_answer_correct", "tp", "fp", "fn",
                 "verbatim_span_fraction"}
 
@@ -93,7 +97,7 @@ def adapter_condition(adapter):
         checkpoint_complete=checkpoint.get("complete") is True,
         checkpoint_optimizer_steps=checkpoint.get("optimizer_steps"))
     updates, iterations = training["optimizer_updates"], training["rollout_iterations"]
-    recorded = (training["algorithm"] == ALGORITHM
+    recorded = (training["algorithm"] in ONLINE_ALGORITHMS
         and isinstance(training["training_source_commit"], str)
         and re.fullmatch(r"[0-9a-f]{40}", training["training_source_commit"]) is not None
         and type(updates) is int and updates > 0 and type(iterations) is int and iterations > 0
