@@ -88,6 +88,11 @@ def normalize_group_rewards_by_rollout(
             episode_rewards.append(sibling_rewards[0])
 
         rewards = torch.tensor(episode_rewards, dtype=torch.float)
+        # Center differences from one observation, rather than the potentially
+        # rounded common offset. Otherwise identical FP32 rewards (e.g. eight
+        # 0.8s) can acquire an artificial advantage after division by 1e-6.
+        # Subtracting an anchor preserves genuine small reward differences.
+        rewards = rewards - rewards[0]
         rewards = rewards - rewards.mean()
         # torch.std's unbiased estimate is undefined for a singleton group.
         # Its only centered advantage is exactly zero.
