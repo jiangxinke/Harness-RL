@@ -28,7 +28,7 @@ from html import unescape
 from html.parser import HTMLParser
 from typing import Any
 
-WEB_READER_VERSION = "bounded-http-csv-tsv-v10"
+WEB_READER_VERSION = "bounded-http-csv-tsv-v11"
 
 _HTTP_FAILURE_CACHE_SIZE = 128
 
@@ -1073,6 +1073,11 @@ class WebTools:
             return {"url": url, "error": "Read offset is beyond this page. Use start=0 to reread it or fetch another source.", "total_characters": len(text)}
         end = min(len(text), start + self.max_text_window_chars)
         result = {"url": url, "text": text[start:end], "start": start, "end": end, "total_characters": len(text), "truncated": end < len(text), "next_start": end if end < len(text) else None}
+        from .web_api_help import worldbank_metadata_diagnostic
+
+        diagnostic = worldbank_metadata_diagnostic(result)
+        if diagnostic is not None:
+            result["api_diagnostic"] = diagnostic
         if url in self.page_browser:
             result["browser_read"] = self.page_browser[url]
         if url in self.page_links:

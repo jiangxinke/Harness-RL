@@ -401,6 +401,16 @@ Unsupported downloads fail without exposing partial evidence. This observation
 change uses reader version `bounded-http-csv-tsv-v10`; compare base and adapter
 with matching versions and preserve older runs' original reader provenance.
 
+Reader version `bounded-http-csv-tsv-v11` also diagnoses complete World Bank
+indicator-definition JSON responses. Its `api_diagnostic` explains that these
+are metadata rather than country/year observations and supplies a public
+country-before-indicator API path template. This is navigation help: the reader
+does not request the template, rewrite the model's URL, register it as a source,
+or alter the returned text. Partial windows, ordinary observation rows and
+ambiguous responses receive no diagnostic. Download limits and citation checks
+remain in force. Compare base and adapter with the same reader version; a
+working diagnostic alone does not establish better model answers.
+
 Automatic reading seeks up to `--auto-read-sources` successful new pages after each search, while all successful, empty and failed reads count toward the unchanged four-attempt episode limit. Errors remain visible in the observation and grant no evidence. Sources exceeding the 5 MB download limit are rejected explicitly instead of returning an incomplete byte prefix.
 
 

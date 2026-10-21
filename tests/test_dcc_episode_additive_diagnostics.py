@@ -238,6 +238,7 @@ class NativeCancellationObservationTests(unittest.IsolatedAsyncioTestCase):
         engine = Engine()
         sampling = SimpleNamespace(to_dict=lambda: {})
         native = object.__new__(NativeThinkingPolicy)
+        native.phase_timing = False
         native.budget = SimpleNamespace(legacy=True, thought_sampling=sampling)
         native.base = SimpleNamespace(model=engine, lora_request=None, evaluation_sampling=sampling,
             _active_requests=set(), tokenizer=SimpleNamespace(decode=lambda *args, **kwargs: "synthetic"))
@@ -269,7 +270,8 @@ class NativeCancellationObservationTests(unittest.IsolatedAsyncioTestCase):
             if emit_snapshot is None:
                 completion = await task
             else:
-                await trace_id_ready.wait()
+                async with asyncio.timeout(5):
+                    await trace_id_ready.wait()
                 task.cancel()
                 with self.assertRaises(asyncio.CancelledError):
                     await task
