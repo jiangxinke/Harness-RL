@@ -143,7 +143,9 @@ def load_reviewed_rows(dataset, approval, tokenizer, *, training_source_commit, 
     require(len(payload) == manifest['rows_bytes'] and digest(payload) == manifest['rows_blake2b_256'],
             'Target bytes differ from the independently reviewed dataset manifest')
     identity = manifest['parent_profile']['identity']
-    require(len(tokenizer) == identity['tokenizer_vocabulary_size']
+    # HF __len__ can rebuild Rust added-token vocabulary metadata; call once.
+    vocabulary = len(tokenizer)
+    require(vocabulary == identity['tokenizer_vocabulary_size']
             and tokenizer.chat_template == identity['chat_template']
             and tokenizer.eos_token_id == identity['primary_eos_token_id'],
             'Actual local tokenizer differs from original public collection identity')
@@ -162,7 +164,7 @@ def load_reviewed_rows(dataset, approval, tokenizer, *, training_source_commit, 
         verify_conditioning(parent['original_prompt_ids'], parent['actual_thought_ids'],
                             row['prompt_ids'], eos_ids=identity['eos_token_ids'])
         all_ids = row['prompt_ids'] + row['target_ids']
-        require(all(type(token) is int and 0 <= token < len(tokenizer) for token in all_ids),
+        require(all(type(token) is int and 0 <= token < vocabulary for token in all_ids),
                 'Dataset token IDs exceed actual tokenizer vocabulary')
         spans = [value['text'] for value in strict_json(row['target_text'])['answer']]
         require(set(spans) == {value['target_text'] for value in row['span_mappings']},
