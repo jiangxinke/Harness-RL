@@ -65,7 +65,12 @@ reader timeout, actual tool/search/query implementation identities, default and
 maximum search result counts, query/fetch/extraction budgets, language headers,
 provider routing, cache/cooldown settings, and digests of any configured search
 endpoint/effective urllib proxies/TLS environment enter the matching
-configuration. Credentials and API keys are never recorded. There are no
+configuration. The package manifest also records installed `pypdf`,
+`trafilatura` and `lxml` versions, or `null` when a distribution is absent;
+these entries must match across generation shards and both comparison arms.
+Optional packages may be absent from both arms; a matching manifest does not
+establish that a package imports or extracts a particular page successfully.
+Credentials and API keys are never recorded. There are no
 additional locale or search-budget environment knobs in this implementation;
 the fixed limits are tied to the recorded implementation source. The example
 explicitly selects public_web with a 15-second reader timeout for both arms

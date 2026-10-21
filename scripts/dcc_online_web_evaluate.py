@@ -140,7 +140,8 @@ def manifest(args, tasks):
                 "thinking": dict(do_sample=True, temperature=.6, top_p=.95, top_k=20),
                 "greedy": dict(do_sample=False, temperature=1., top_p=1., top_k=0)}[args.profile]
     packages = {}
-    for name in ("torch", "transformers", "peft", "bitsandbytes", "xgrammar", "pandas"):
+    for name in ("torch", "transformers", "peft", "bitsandbytes", "xgrammar", "pandas",
+                 "pypdf", "trafilatura", "lxml"):
         try:
             packages[name] = version(name)
         except PackageNotFoundError:

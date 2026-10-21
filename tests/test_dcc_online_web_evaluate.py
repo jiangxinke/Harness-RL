@@ -273,6 +273,46 @@ def test_base_adapter_match_across_shards_and_actual_strict_proxy_semantics(eval
     assert len(evaluator.loads) == 3 and not torch.cuda.is_initialized()
 
 
+@pytest.mark.parametrize("package", ["pypdf", "trafilatura", "lxml"])
+@pytest.mark.parametrize("base_version,adapter_version", [
+    ("CPU-present-v1", "CPU-present-v1"), (None, None),
+    ("CPU-present-v1", "CPU-present-v2"),
+    (None, "CPU-present-v1"), ("CPU-present-v1", None)])
+def test_web_tool_package_versions_and_availability_must_match(
+        evaluator, tmp_path, monkeypatch, package, base_version, adapter_version):
+    import importlib.metadata as metadata
+    original_version = metadata.version
+    versions = dict.fromkeys(("pypdf", "trafilatura", "lxml"), "CPU-present-v1")
+    versions[package] = base_version
+    def version(name):
+        if name not in versions:
+            return original_version(name)
+        if versions[name] is None:
+            raise metadata.PackageNotFoundError(name)
+        return versions[name]
+    monkeypatch.setattr(metadata, "version", version)
+    tasks = references(("success",))
+    base = arguments(evaluator, tmp_path / "base")
+    public = generate(evaluator, base, tasks, tmp_path)
+    baseline = evaluator.score(base, tasks)
+    assert {name: baseline["packages"][name] for name in versions} == versions
+    versions[package] = adapter_version
+    adapter = arguments(evaluator, tmp_path / "trained",
+        adapter=make_adapter(tmp_path / "adapter"), base_output_dir=base.output_dir)
+    asyncio.run(evaluator.generate(adapter, public))
+    config = json.loads((adapter.output_dir / "config_rank0.json").read_text())
+    assert {name: config["packages"][name] for name in versions} == versions
+    if base_version == adapter_version:
+        report = evaluator.score(adapter, tasks)
+        assert report["matched_base"]["f1_by_row_delta"] == 0
+    else:
+        scored = len(evaluator.metric_calls)
+        with pytest.raises(ValueError, match="Base and adapter differ"):
+            evaluator.score(adapter, tasks)
+        assert len(evaluator.metric_calls) == scored
+    assert not torch.cuda.is_initialized()
+
+
 @pytest.mark.parametrize("mutation", ["missing_done", "open_journals", "orphan_trace", "duplicate_trace",
     "step_trace", "owner_schema", "owner_token", "answer", "task_seed", "scored_rollout"])
 def test_corrupt_or_unclosed_native_evidence_rejected_before_scoring(evaluator, tmp_path, mutation):
