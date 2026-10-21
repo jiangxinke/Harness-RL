@@ -363,3 +363,53 @@ def test_malformed_selected_pair_is_rejected_as_validation_error(adopted):
     approval["training_configuration"]["collections"][0]["selected_pairs"] = [None]
     with pytest.raises(ValueError, match="selected pair ownership"):
         validate_dpo_approval(approval)
+
+
+@pytest.fixture
+def balanced_adopted(adopted, tmp_path):
+    """Save a real tiny adapter through the optional two-domain draw loop."""
+    from slime_plugins.dcc.native_dpo_sampling import DOMAIN_BALANCED_PAIR_SAMPLING
+    _, legacy_approval, options = adopted
+    rows, metadata = merge_training_collections(_two_collection_fixture(legacy_approval))
+    cfg = deepcopy(legacy_approval["training_configuration"])
+    cfg.update(metadata)
+    value = _LOOP.model()
+    output = tmp_path / "balanced-DPO"
+    run_dpo_loop(value, _LOOP.SavedTokenizer(), rows, ReferenceIdentity(**cfg["reference"]),
+        output=output, steps=1, pairs_per_step=8, seed=47, config=cfg,
+        pair_sampling=DOMAIN_BALANCED_PAIR_SAMPLING)
+    adapter = output / "final"
+    saved = json.loads((adapter / "training_config.json").read_text())
+    approval = {"version": DPO_APPROVAL, "training_configuration": saved,
+                "checkpoint_optimizer_steps": 1}
+    return adapter, approval, dict(options, approved_dpo=approval)
+
+
+def test_balanced_saved_configuration_passes_actual_adapter_adoption(balanced_adopted):
+    from slime_plugins.dcc.native_dpo_sampling import balanced_pair_sampling_configuration
+    adapter, approval, options = balanced_adopted
+    metadata, binding = validate_native_adapter(adapter, **options)
+    assert metadata["config"]["r"] == 16 and binding["tensor_pairs"] == 3
+    saved = binding["caller_approved_dpo"]["training_configuration"]
+    assert saved == approval["training_configuration"]
+    assert saved["pair_sampling"] == balanced_pair_sampling_configuration(seed=47, global_draws=8)
+    # This legacy field means equal draw weights when repetitions are explicit.
+    assert saved["gradient_weighting"] == "global-equal-pair"
+    assert not torch.cuda.is_initialized()
+
+
+@pytest.mark.parametrize("damage", ["domain_weights", "denominator", "seed"])
+def test_balanced_adoption_rejects_even_matching_saved_and_approved_sampler_tampering(balanced_adopted, damage):
+    adapter, approval, options = balanced_adopted
+    sampler = approval["training_configuration"]["pair_sampling"]
+    if damage == "domain_weights":
+        sampler["domain_weights"] = {"cuad": 0.75, "widesearch": 0.25}
+    elif damage == "denominator":
+        sampler["repeated_draw_gradient"] = "merge-multiplicity; each-draw-weight-1/global-unique-pairs"
+    else:
+        sampler["seed"] += 1
+    # Saved/approved equality alone would accept all three changes. Require
+    # the canonical sampler identity before admitting this actual adapter.
+    dump(adapter / "training_config.json", approval["training_configuration"])
+    with pytest.raises(ValueError, match="balanced DPO sampling configuration"):
+        validate_native_adapter(adapter, **options)

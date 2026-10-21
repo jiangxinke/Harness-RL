@@ -35,6 +35,10 @@ from dcc_training_io import TrainingJournal, finalize_training, prepare_training
 from slime_plugins.dcc.hf_policy import completion_logprobs, load_policy_model
 from slime_plugins.dcc.hf_chunked_logprobs import resolve_logprob_backend
 from slime_plugins.dcc.native_dpo_adapter import DPO_METHOD, PAIR_CONTRACT
+from slime_plugins.dcc.native_dpo_sampling import (
+    DOMAIN_BALANCED_PAIR_SAMPLING, LEGACY_PAIR_SAMPLING, DomainBalancedPairDeck,
+    balanced_pair_sampling_configuration,
+)
 from slime_plugins.dcc.episode import WIDESEARCH_EVIDENCE_GUARD_VERSION
 from slime_plugins.dcc_train_literal_reward_contract import (
     PROTOCOL as LITERAL_PROTOCOL, LITERAL_RECEIPT, LITERAL_DPO_COLLECTIONS, PER_COLLECTION_RECEIPTS,
@@ -386,7 +390,7 @@ def run_dpo_loop(model, tokenizer, pairs, reference_identity, *, output, steps,
                  pairs_per_step=4, learning_rate=1e-6, beta=0.1, seed=42,
                  rank=0, world_size=1, distributed=dist, config=None,
                  save_every=0, save_initial=False, sync_artifacts=False,
-                 logprob_fn=completion_logprobs):
+                 logprob_fn=completion_logprobs, pair_sampling=LEGACY_PAIR_SAMPLING):
     """Shared whole loop; CLI validates production NF4 before entering here.
 
     Tiny CPU fixtures exercise this same optimizer/journal/checkpoint path.
@@ -399,8 +403,15 @@ def run_dpo_loop(model, tokenizer, pairs, reference_identity, *, output, steps,
     require(reference_identity.mode == "base" and reference_identity.adapter_snapshot_id is None,
             "Fresh production loop requires same-base disabled-adapter reference")
     pairs = tuple(pairs)
-    deck = GlobalPairDeck(len(pairs), seed=seed)
+    require(pair_sampling in {LEGACY_PAIR_SAMPLING, DOMAIN_BALANCED_PAIR_SAMPLING},
+            "Unknown explicit pair sampling mode")
+    balanced_pairs = pair_sampling == DOMAIN_BALANCED_PAIR_SAMPLING
+    deck = DomainBalancedPairDeck(pairs, seed=seed) if balanced_pairs else GlobalPairDeck(len(pairs), seed=seed)
+    if balanced_pairs:
+        balanced_pair_sampling_configuration(seed=seed, global_draws=pairs_per_step)
     require(type(pairs_per_step) is int and pairs_per_step > 0, "Positive global pair batch required")
+    require("pair_sampling" not in (config or {}),
+            "Pair sampler metadata is owned by the explicit training-loop option")
     output = Path(output)
     prepare_training_output(output, rank=rank, world_size=world_size, distributed=distributed)
     public_config = dict(config or {})
@@ -415,6 +426,9 @@ def run_dpo_loop(model, tokenizer, pairs, reference_identity, *, output, steps,
         candidate_contract="native-final-preference-candidate-v1",
         reward_contract=PER_COLLECTION_RECEIPTS if any(p.get("reward_version") == LITERAL_PROTOCOL
             for p in public_config.get("collections", [])) else REWARD_CONTRACT)
+    if balanced_pairs:
+        public_config["pair_sampling"] = balanced_pair_sampling_configuration(
+            seed=seed, global_draws=pairs_per_step)
     started = time.monotonic()
     with TrainingJournal(output, rank, sync=sync_artifacts) as journal:
         def record(**value):
@@ -436,7 +450,8 @@ def run_dpo_loop(model, tokenizer, pairs, reference_identity, *, output, steps,
                     distributed=distributed)) if world_size > 1 else None
             trainer = OfflineNativeDPOTrainer(model, owned, reference_identity,
                 logprob_fn=logprob_fn, beta=beta, world_size=world_size, gradient_sync=sync,
-                optimizer_factory=lambda values: torch.optim.AdamW(values, lr=learning_rate, weight_decay=0.0))
+                optimizer_factory=lambda values: torch.optim.AdamW(values, lr=learning_rate, weight_decay=0.0),
+                allow_repeated_pairs=balanced_pairs)
             record(event="reference_cached", local_pairs=len(owned),
                    reference_mode=reference_identity.mode, cache_before_optimizer_updates=True,
                    second_base_model_loaded=False)
@@ -452,8 +467,10 @@ def run_dpo_loop(model, tokenizer, pairs, reference_identity, *, output, steps,
                             model.save_pretrained(destination)
                             tokenizer.save_pretrained(destination)
                             state = {"optimizer": trainer.optimizer.state_dict(), "optimizer_steps": step,
-                                "torch_rng": torch.get_rng_state(), "sampler_rng": deck.rng.getstate(),
-                                "sampler_deck": list(deck.deck), "resume_supported": False}
+                                "torch_rng": torch.get_rng_state(),
+                                **({"sampler_state": deck.state_dict()} if balanced_pairs else {
+                                    "sampler_rng": deck.rng.getstate(), "sampler_deck": list(deck.deck)}),
+                                "resume_supported": False}
                             if next(model.parameters()).device.type == "cuda":
                                 state["cuda_rng"] = torch.cuda.get_rng_state()
                             torch.save(state, destination / "training_state.pt")
@@ -478,7 +495,8 @@ def run_dpo_loop(model, tokenizer, pairs, reference_identity, *, output, steps,
                 report = collective_dpo_step(trainer, local_pairs, distributed=distributed)
                 require(not report["optimizer_step_skipped"] and trainer.optimizer_steps == step,
                         "Nonempty sampled global update must advance exactly once")
-                record(event="step", step=step, seconds=time.monotonic() - begin, **report)
+                record(event="step", step=step, seconds=time.monotonic() - begin, **report,
+                       **({"pair_sampling_statistics": deck.describe(selected[0])} if balanced_pairs else {}))
                 if save_every and step % save_every == 0:
                     save(f"step_{step:04d}", step)
             save("final", steps)
@@ -511,7 +529,11 @@ def parser():
     result.add_argument("--tokenizer-id", required=True, type=public_id)
     result.add_argument("--output-dir", required=True, help="Fresh or empty artifact directory; no resume")
     result.add_argument("--steps", type=int, default=20)
-    result.add_argument("--pairs-per-step", type=int, default=4, help="Global distinct pairs per optimizer update")
+    result.add_argument("--pairs-per-step", type=int, default=4,
+                        help="Global pairs per update; balanced mode counts draws including explicit repetitions")
+    result.add_argument("--pair-sampling", choices=(LEGACY_PAIR_SAMPLING, DOMAIN_BALANCED_PAIR_SAMPLING),
+                        default=LEGACY_PAIR_SAMPLING,
+                        help="Opt in to half-CUAD/half-Web fixed draw batches; carries tails and can repeat pairs")
     result.add_argument("--learning-rate", type=float, default=1e-6)
     result.add_argument("--beta", type=float, default=0.1)
     result.add_argument("--seed", type=int, default=42)
@@ -538,6 +560,8 @@ def main(argv=None):
             and math.isfinite(args.beta) and args.beta > 0
             and math.isfinite(args.learning_rate) and args.learning_rate > 0,
             "Positive finite optimizer configuration required")
+    if args.pair_sampling == DOMAIN_BALANCED_PAIR_SAMPLING:
+        balanced_pair_sampling_configuration(seed=args.seed, global_draws=args.pairs_per_step)
     rank, local, world = (int(os.environ.get(key, default)) for key, default in
                          (("RANK", "0"), ("LOCAL_RANK", "0"), ("WORLD_SIZE", "1")))
     torch.cuda.set_device(local)
@@ -559,6 +583,8 @@ def main(argv=None):
             dist.broadcast_object_list(payload, src=0)
         require("error_type" not in payload[0],
                 "TRAIN freeze/closure/reward validation failed: " + payload[0].get("error_type", ""))
+        if args.pair_sampling == DOMAIN_BALANCED_PAIR_SAMPLING:
+            DomainBalancedPairDeck(payload[0]["pairs"], seed=args.seed)
         model, tokenizer = load_policy_model(args.model, adapter=None, trainable=True, rank=local,
                                              lora_rank=16, quantization="nf4")
         report = validate_fresh_nf4_lora(model)
@@ -574,7 +600,8 @@ def main(argv=None):
             learning_rate=args.learning_rate, beta=args.beta, seed=args.seed,
             rank=rank, world_size=world, config=dict(payload[0]["metadata"], quantization=report,
                 training_source=training_source, scoring_backend=scoring_backend),
-            logprob_fn=logprob_fn, save_every=args.save_every, save_initial=args.save_initial, sync_artifacts=args.sync_artifacts)
+            logprob_fn=logprob_fn, pair_sampling=args.pair_sampling,
+            save_every=args.save_every, save_initial=args.save_initial, sync_artifacts=args.sync_artifacts)
     finally:
         if world > 1:
             dist.destroy_process_group()

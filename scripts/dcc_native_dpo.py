@@ -8,6 +8,7 @@ thought, real </think>, JSON and its actual EOS. No length normalization.
 """
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import nullcontext
 from dataclasses import dataclass
 import math
@@ -165,7 +166,8 @@ class OfflineNativeDPOTrainer:
     before optimizer construction. This class does not load or generate data.
     """
     def __init__(self, model, pairs, reference_identity, *, logprob_fn,
-                 optimizer_factory, beta=0.1, gradient_sync=None, world_size=1):
+                 optimizer_factory, beta=0.1, gradient_sync=None, world_size=1,
+                 allow_repeated_pairs=False):
         _require(type(world_size) is int and world_size >= 1, "Positive world size required")
         _require(world_size == 1 or callable(gradient_sync), "Distributed gradients require explicit sync")
         _require(type(beta) in (int, float) and math.isfinite(beta) and beta > 0,
@@ -174,6 +176,8 @@ class OfflineNativeDPOTrainer:
         self.model, self.logprob_fn, self.beta = model, logprob_fn, beta
         self.reference_identity, self.world_size = reference_identity, world_size
         self.gradient_sync = gradient_sync
+        _require(type(allow_repeated_pairs) is bool, "Explicit repeated-pair mode must be boolean")
+        self.allow_repeated_pairs = allow_repeated_pairs
         pairs = tuple(pairs)
         _require(all(isinstance(pair, PreferencePair) for pair in pairs), "Validated native pairs required")
         self.references = cache_reference_scores(model, pairs, reference_identity, logprob_fn=logprob_fn)
@@ -184,7 +188,9 @@ class OfflineNativeDPOTrainer:
 
     def step(self, pairs, *, global_pair_count=None):
         pairs = tuple(pairs)
-        _require(len({pair.key for pair in pairs}) == len(pairs), "Duplicate pair in optimizer batch")
+        multiplicities = Counter(pairs) if self.allow_repeated_pairs else None
+        if not self.allow_repeated_pairs:
+            _require(len({pair.key for pair in pairs}) == len(pairs), "Duplicate pair in optimizer batch")
         if global_pair_count is None:
             _require(self.world_size == 1, "Every distributed rank must supply a verified global pair count")
             global_pair_count = len(pairs)
@@ -196,13 +202,14 @@ class OfflineNativeDPOTrainer:
             return {"algorithm": "offline_native_final_DPO; not RL", "optimizer_step_skipped": True,
                     "local_pairs": 0, "global_pairs": 0}
         observations = []
-        for pair in pairs:
+        weighted_pairs = multiplicities.items() if self.allow_repeated_pairs else ((pair, 1) for pair in pairs)
+        for pair, multiplicity in weighted_pairs:
             _require(pair.key in self.references, "Pair is absent from immutable reference cache")
             reference = self.references[pair.key]
             _require(reference.identity == self.reference_identity, "Reference identity mismatch")
             observations.append(backward_pair_low_memory(self.model, pair, reference,
                 beta=self.beta, logprob_fn=self.logprob_fn,
-                scale=self.world_size / global_pair_count))
+                scale=multiplicity * self.world_size / global_pair_count) * multiplicity)
         if self.gradient_sync is not None:
             self.gradient_sync(self.parameters, self.world_size)
         norm = torch.nn.utils.clip_grad_norm_(self.parameters, 1.0)
@@ -219,4 +226,6 @@ class OfflineNativeDPOTrainer:
                 "reference_adjusted_margin_sum": sum(row[1] for row in rows),
                 "chosen_raw_sum": sum(row[2] for row in rows),
                 "rejected_raw_sum": sum(row[3] for row in rows),
-                "measured_KL": False}
+                "measured_KL": False,
+                **({"local_pair_draws": len(pairs), "local_unique_pairs": len(multiplicities)}
+                   if self.allow_repeated_pairs else {})}

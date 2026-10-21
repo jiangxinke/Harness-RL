@@ -69,6 +69,13 @@ def validate_dpo_approval(value):
     require(type(value.get("checkpoint_optimizer_steps")) is int
         and 1 <= value["checkpoint_optimizer_steps"] <= cfg["steps"],
         "Explicit actual checkpoint optimizer steps within the configured total required")
+    if "pair_sampling" in cfg:
+        from .native_dpo_sampling import balanced_pair_sampling_configuration
+        require(cfg["pair_sampling"] == balanced_pair_sampling_configuration(
+            seed=cfg.get("seed"), global_draws=cfg["pairs_per_step"]),
+            "Explicit balanced DPO sampling configuration differs from its optimizer batch")
+        require(set(cfg.get("training_sources", [])) == {"cuad_train", "independent_curriculum"},
+                "Two-domain balanced DPO requires both approved TRAIN domains")
     profiles = cfg.get("collections")
     require(cfg.get("collection_merge_contract") in {"native-final-dpo-collections-v1", LITERAL_DPO_COLLECTIONS}
         and isinstance(profiles, list) and bool(profiles), "Explicit approved collection merge contract required")
