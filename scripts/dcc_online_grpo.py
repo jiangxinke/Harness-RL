@@ -35,6 +35,7 @@ from slime_plugins.dcc.hf_policy import encode_messages, load_policy_model
 from slime_plugins.dcc.hf_compute import (COMPUTE_PROFILES, compute_profile_configuration,
     precision_observation, validate_model_compute_profile)
 from slime_plugins.dcc.online_grpo import ALGORITHM, apply_policy_update, group_signal, thought_policy_loss
+from slime_plugins.dcc.native_hf_context import context_handling_configuration
 from slime_plugins.dcc.retrieval import load_retrieval_profile
 
 
@@ -216,6 +217,7 @@ def configuration(args, plan, tasks, world_size):
         policy_loss_tokens="sampled thought only, including actual closing token",
         replay_diagnostic_mode=getattr(args, "replay_diagnostic", "full"),
         json_policy_loss=False, model_failure_reward=0,
+        context_failure_handling=context_handling_configuration(),
         objective_denominator=args.group_size * args.max_steps * args.thought_tokens,
         zero_global_gradient_optimizer_step=False,
         planned_task_ids=[[tasks[index].id for index in row] for row in plan])

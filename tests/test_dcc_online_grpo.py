@@ -148,6 +148,9 @@ def test_native_batch_cli_keeps_logical_group_and_token_budgets(monkeypatch, bat
     assert len(observed) == 1
     assert observed[0]["arguments"]["native_batch_size"] == expected
     assert observed[0]["objective_denominator"] == 4 * 2 * 8
+    assert observed[0]["algorithm"] == "online-native-HF-thought-only-GRPO-v2"
+    assert observed[0]["context_failure_handling"]["version"] == "hf-native-context-sampled-prefix-v2"
+    assert observed[0]["context_failure_handling"]["initial_prompt"] == "discard-whole-group"
     assert observed[0]["cuad_concise_reasoning"]["enabled"] is concise
     assert not torch.cuda.is_initialized()
 

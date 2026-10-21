@@ -51,8 +51,29 @@ instead of dividing by observed response lengths. This is fixed-budget GRPO,
 not the complete Dr.GRPO algorithm.
 
 Model truncation and invalid JSON retain their actual sampled thoughts and
-zero rewards in the group. Infrastructure/context failures discard the whole
-group and are logged explicitly. Constant rewards give exact zero advantages.
+zero rewards in the group. Version `online-native-HF-thought-only-GRPO-v2`
+also retains a trajectory's prior sampled thoughts with zero reward when a
+later full request fails the actual raw-HF prompt preflight. Successful Web
+siblings keep their original TRAIN literal rewards. Initial prompt overflow,
+unverified context failures and infrastructure failures discard the whole group.
+The shared TRAIN classifier requires actual retained token boundaries, native
+completion ownership and aligned streamed behavior logprobs; it never supplies
+missing tokens or scores. The fixed objective denominator is unchanged.
+
+Training configurations and reviewed Web bindings record
+`hf-native-context-sampled-prefix-v2`. Raw training capture journals include
+the rejected request's preflight receipt without a generated completion.
+Capture-disabled evaluation keeps its completion-only trace stream and its
+existing statuses/rewards. Serialized outcomes require verification against
+the actual native generation/error journals and re-encoded failed request
+before `restore_verified_native_context` restores their eligibility; plain
+diagnostic strings do not authorize gradients. Episode diagnostics gain source,
+stage and turn metadata; the legacy `trainable_steps` property is unchanged.
+Previously frozen v1 sources and adapters retain their original whole-group
+context-discard semantics and must not be labeled as v2 training. This rule is
+the new plugin default and has no separate switch.
+
+Constant rewards give exact zero advantages.
 All replicas participate in gradient averaging; a zero global gradient skips
 Adam entirely, including its momentum update. Logs distinguish rollout
 iterations, applied optimizer updates, changed adapter tensors, and whether

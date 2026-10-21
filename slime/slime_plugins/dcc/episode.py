@@ -17,6 +17,7 @@ from .metrics import cuad_predictions, cuad_task_metrics
 from .retrieval import RetrievalProfile, search_document
 from .tools import DocumentTools, InfrastructureError, WebTools
 from .prompt_history import PromptHistoryBudgetExceeded
+from .native_hf_context import NativeHFPromptBudgetExceeded
 
 WIDESEARCH_EVIDENCE_GUARD_VERSION = "read-grounded-nonempty-exact-schema-v5"
 EPISODE_PROMPT_VERSION = "legal-review-web-autoread-v8"
@@ -676,6 +677,13 @@ class EpisodeRunner:
                 "diagnostics": exc.diagnostics,
                 "request_messages": [message.copy() for message in request_messages],
                 "generation_submitted": False}
+            if isinstance(exc, NativeHFPromptBudgetExceeded):
+                # Additive diagnostics only: status, zero reward, retained steps
+                # and legacy trainable_steps behavior stay unchanged.
+                prompt_history_failure.update(native_hf_preflight=exc.preflight,
+                    operation=operation, turn_index=turn_index,
+                    prior_model_calls=len(steps),
+                    stage="after_model_call" if steps else "initial_prompt")
         except (InfrastructureError, TimeoutError, ConnectionError) as exc:
             # asyncio.timeout converts its own cancellation to an often-empty
             # TimeoutError. A dependency can also raise TimeoutError before the

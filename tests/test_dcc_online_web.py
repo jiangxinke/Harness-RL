@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass
 import importlib.util
 import json
 from pathlib import Path
@@ -20,6 +19,10 @@ from slime_plugins.dcc.data import Task
 from slime_plugins.dcc.episode import EpisodeRunner, PolicyCompletion, ModelProtocolFailure
 from slime_plugins.dcc.tools import InfrastructureError
 from slime_plugins.dcc.prompt_history import PromptHistoryBudgetExceeded
+from slime_plugins.dcc.hf_native_policy import NativeHFCompletion, NativeHFPolicy
+from slime_plugins.dcc.hf_policy import _chat_tokens
+from slime_plugins.dcc.native_hf_context import restore_verified_native_context
+from slime_plugins.dcc.online_grpo import group_signal
 
 URL, EOS = "https://example.com/invented", 2
 COMMIT = "a" * 40
@@ -34,13 +37,8 @@ class ToyTokenizer:
         return self.encode(json.dumps(messages))
 
 
-@dataclass
-class FixtureCompletion(PolicyCompletion):
-    thought_token_count: int = 0
-    native_status: str = "completed"
-    trace_id: str | None = None
-    thought_logprobs: list[float] | None = None
-    thought_logprobs_source: str | None = None
+class FixtureCompletion(NativeHFCompletion):
+    pass
 
 
 def public_row():
@@ -80,6 +78,24 @@ class FixturePolicy:
                     raise InfrastructureError("Invented unavailable environment")
                 if mode == "context":
                     raise PromptHistoryBudgetExceeded("invented_too_long", diagnostics={"original_prompt_tokens": 10, "minimum_prompt_tokens": 10, "effective_prompt_limit": 1}, original_prompt_ids=[])
+                if mode in {"hf-context", "late-hf-context", "slow-hf-context"}:
+                    if mode == "slow-hf-context":
+                        await asyncio.sleep(0.03)
+                    if self.turn == 0:
+                        self.prompt_limit = len(_chat_tokens(parent.tokenizer, messages)) + (
+                            16 if mode == "late-hf-context" else -1)
+                    if mode != "late-hf-context" or self.turn:
+                        # Actual NativeHFPolicy full-request preflight, no model
+                        # or encoded-generation replacement for the failed call.
+                        native = object.__new__(NativeHFPolicy)
+                        native.tokenizer, native.max_prompt_tokens = parent.tokenizer, self.prompt_limit
+                        native.thought_tokens, native.json_tokens = 4, 256
+                        native.allow_truncation, native.mixed_schema_batching = False, False
+                        native.sampling_profile, native.capture_thought_logprobs = "raw", True
+                        native.trace_sink = parent.trace_sink
+                        error = native._generate_batch([messages], json_schema, [task_id])[0]
+                        assert isinstance(error, PromptHistoryBudgetExceeded)
+                        raise error
                 if mode == "slow":
                     await asyncio.sleep(0.03)
                 turn = self.turn
@@ -97,6 +113,7 @@ class FixturePolicy:
                 ids = parent.tokenizer.apply_chat_template(messages)
                 status = "thought_did_not_stop_on_real_close" if failed else "completed"
                 completion = FixtureCompletion(text, ids, thought + final,
+                    phase_lengths=(len(thought), len(final)),
                     thought_token_count=len(thought), native_status=status, trace_id=trace_id,
                     thought_logprobs=[-0.5] * len(thought), thought_logprobs_source=web.BEHAVIOR_SCORES)
                 trace = dict(protocol=web.HF_PROTOCOL, trace_id=trace_id, task_id=task_id,
@@ -174,10 +191,10 @@ def test_real_group_journals_close_before_first_label_deserialization(tmp_path, 
     assert all(row["reward"] == 0 for row in web._read_jsonl(tmp_path / "group/public_outcomes.jsonl"))
 
 
-@pytest.mark.parametrize("failure", ["infra", "context", "slow"])
+@pytest.mark.parametrize("failure", ["infra", "context", "hf-context", "slow", "slow-hf-context"])
 def test_whole_unreliable_group_retained_and_zero(tmp_path, failure):
     data, _ = inputs(tmp_path)
-    group, policy = collect(tmp_path, ["ok", failure], timeout=0.01 if failure == "slow" else 2)
+    group, policy = collect(tmp_path, ["ok", failure], timeout=0.01 if failure.startswith("slow") else 2)
     results, report = web.score_closed_group(group, inputs=data, tokenizer=policy.tokenizer)
     assert len(results) == 2 and [result.reward for result in results] == [0, 0]
     assert report["gradient_group_discarded"]
@@ -185,6 +202,43 @@ def test_whole_unreliable_group_retained_and_zero(tmp_path, failure):
     if failure == "slow":
         rows = web._read_jsonl(tmp_path / "group/request_owners.jsonl")
         assert any(row.get("delivery") == "cancelled" and row.get("trace_id") for row in rows)
+    elif failure == "slow-hf-context":
+        assert results[1].status == "infrastructure_error"
+        rows = web._read_jsonl(tmp_path / "group/request_owners.jsonl")
+        assert any(row.get("delivery") == "cancelled" and row.get("native_hf_preflight") for row in rows)
+
+
+def test_post_sampling_HF_overflow_keeps_sibling_reward_and_replays_closed_journals(tmp_path):
+    from slime_plugins.dcc.episode import EpisodeResult
+    data, _ = inputs(tmp_path)
+    group, policy = collect(tmp_path, ["ok", "late-hf-context"])
+    results, report = web.score_closed_group(group, inputs=data, tokenizer=policy.tokenizer)
+    assert [result.reward for result in results] == [1., 0.]
+    assert [len(result.steps) for result in results] == [3, 1]
+    assert results[1].status == "context_budget_failure"
+    assert not report["gradient_group_discarded"]
+    assert report["receipts"][0]["train_metric"]["evaluated"]
+    assert not report["receipts"][1]["train_metric"]["evaluated"]
+    signal = group_signal(results, group_size=2, max_steps=3, thought_tokens=4)
+    assert signal.discarded_reason is None and signal.advantages[0] > 0 > signal.advantages[1]
+    assert signal.segments[1][0].completion_ids == [77, web.END_THINK]
+    saved = web._read_jsonl(tmp_path / "group/public_outcomes.jsonl")
+    traces = web._read_jsonl(tmp_path / "group/native_traces.jsonl")
+    owners = web._read_jsonl(tmp_path / "group/request_owners.jsonl")
+    restored = []
+    for row in saved:
+        row.pop("sample")
+        row["steps"] = [NativeHFCompletion(**step) for step in row["steps"]]
+        result = EpisodeResult(**row)
+        if result.status == "context_budget_failure":
+            result = restore_verified_native_context(result, traces=traces, tokenizer=policy.tokenizer)
+        restored.append(result)
+    # Re-run the genuine owner/schema/token verifier from closed JSONL bytes.
+    prompts = web.verify_owned_native_group(group.task, restored, owners, traces,
+        eos_ids=[EOS], tokenizer=policy.tokenizer, iteration=1, rank=0)
+    rebound = web.ClosedPublicGroup(group.task, tuple(restored), group.closure, COMMIT, prompts)
+    rescored, _ = web.score_closed_group(rebound, inputs=data, tokenizer=policy.tokenizer)
+    assert group_signal(rescored, group_size=2, max_steps=3, thought_tokens=4) == signal
 
 
 def test_uuid_mismatch_preserves_failed_journals_without_close_marker(tmp_path):

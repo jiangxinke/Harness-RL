@@ -11,10 +11,11 @@ import math
 
 import torch
 
-from .native_behavior_logprobs import BEHAVIOR_LOGPROB_SOURCE
+from .native_hf_context import (unreliable_context_or_environment_group,
+                                validated_thought_step)
 
 
-ALGORITHM = "online-native-HF-thought-only-GRPO-v1"
+ALGORITHM = "online-native-HF-thought-only-GRPO-v2"
 
 
 @dataclass(frozen=True)
@@ -51,11 +52,11 @@ def group_signal(results, *, group_size, max_steps, thought_tokens):
     rewards = [float(r.reward) for r in results]
     if any(not math.isfinite(r) or not 0 <= r <= 1 for r in rewards):
         raise ValueError("Finite rewards in [0, 1] required")
-    unreliable = {"infrastructure_error", "context_budget_failure"}
-    if any(r.status in unreliable for r in results):
+    if unreliable_context_or_environment_group(results):
         return GroupSignal([[] for _ in results], [0.0] * group_size, rewards, 0.0,
                            "unreliable_environment_or_context_group")
-    allowed = {"completed", "max_steps", "invalid_answer", "evidence_failure", "model_protocol_failure"}
+    allowed = {"completed", "max_steps", "invalid_answer", "evidence_failure",
+               "model_protocol_failure", "context_budget_failure"}
     all_segments = []
     for result in results:
         if result.status not in allowed or len(result.steps) > max_steps:
@@ -64,21 +65,9 @@ def group_signal(results, *, group_size, max_steps, thought_tokens):
             raise ValueError("Unsuccessful model episodes must retain zero reward")
         segments = []
         for step in result.steps:
-            count = getattr(step, "thought_token_count", None)
-            if (type(count) is not int or not 0 <= count <= thought_tokens
-                    or count > len(step.completion_ids) or not step.prompt_ids):
-                raise ValueError("Native completion must retain actual thought token boundaries")
-            thought = list(step.completion_ids[:count])
-            if any(type(token) is not int or token < 0 for token in thought + step.prompt_ids):
-                raise ValueError("Actual nonnegative integer token IDs required")
-            behavior = getattr(step, "thought_logprobs", None)
-            if (not isinstance(behavior, list) or len(behavior) != count
-                    or getattr(step, "thought_logprobs_source", None) != BEHAVIOR_LOGPROB_SOURCE
-                    or any(type(value) not in (int, float) or not math.isfinite(value)
-                           or value > 1e-6 for value in behavior)):
-                raise ValueError("Finite aligned actual sampled thought behavior logprobs required")
+            prompt, thought, behavior = validated_thought_step(step, thought_tokens=thought_tokens)
             if thought:
-                segments.append(ThoughtSegment(list(step.prompt_ids), thought, list(behavior)))
+                segments.append(ThoughtSegment(prompt, thought, behavior))
         if not segments:
             return GroupSignal([[] for _ in results], [0.0] * group_size, rewards, 0.0,
                                "missing_sampled_thought_group")

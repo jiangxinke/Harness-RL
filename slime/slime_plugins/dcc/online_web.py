@@ -20,9 +20,11 @@ import random
 from .data import Task
 from .durable_journal import OrderedDurableJSONLWriter, close_durable_journals
 from .episode import _WebEvidence, ModelProtocolFailure, WIDESEARCH_EVIDENCE_GUARD_VERSION
+from .native_hf_context import (NativeHFPromptBudgetExceeded, PREFLIGHT_PROTOCOL, context_handling_configuration,
+    restore_verified_native_context, unreliable_context_or_environment_group)
 from slime_plugins.dcc_train_literal_reward_contract import PROTOCOL, LABEL_PROTOCOL, configuration, _same
 
-WRAPPER = "dcc-hf-online-web-public-closed-literal-v1"
+WRAPPER = "dcc-hf-online-web-public-closed-literal-v2"
 GROUP_CLOSE = "dcc-hf-online-web-group-close-v1"
 BINDING = "dcc-hf-online-web-reviewed-binding-v1"
 HF_PROTOCOL = "hf-native-two-stage-thought-only-policy-v1"
@@ -143,6 +145,7 @@ def binding_protocols():
     return dict(wrapper=WRAPPER, group_close=GROUP_CLOSE, native=HF_PROTOCOL,
                 end_think_id=END_THINK, evidence_guard=WIDESEARCH_EVIDENCE_GUARD_VERSION,
                 native_cell_grounding=GROUNDING, behavior_scores=BEHAVIOR_SCORES,
+                context_failure_handling=context_handling_configuration(),
                 reward=configuration())
 
 
@@ -264,6 +267,8 @@ class OwnedEpisodePolicy:
         except BaseException as error:
             row.update(request_status="error", delivery="cancelled" if cancelled else "error",
                        error_type=type(error).__name__, error=str(error))
+            if isinstance(error, NativeHFPromptBudgetExceeded):
+                row["native_hf_preflight"] = dict(error.preflight)
             self.sink(row)
             if cancelled:
                 raise asyncio.CancelledError() from error
@@ -340,6 +345,26 @@ def verify_owned_native_group(task, results, owner_rows, traces, *, eos_ids, tok
             if row.get("request_status") == "error":
                 if result.status not in {"infrastructure_error", "context_budget_failure"}:
                     raise ValueError("Untraced native request error requires an unreliable episode")
+                preflight = row.get("native_hf_preflight")
+                if preflight is not None:
+                    failure = result.metrics.get("prompt_history_failure", {})
+                    trace_id = preflight.get("trace_id")
+                    if (trace_id in used or index.get(trace_id) != preflight
+                            or row.get("error_type") != NativeHFPromptBudgetExceeded.__name__
+                            or preflight.get("protocol") != PREFLIGHT_PROTOCOL
+                            or preflight.get("task_id") != task.id
+                            or preflight.get("generation_submitted") is not False
+                            or _chat_tokens(tokenizer, row["messages"]) != preflight.get("prompt_ids")):
+                        raise ValueError("Native HF preflight error request ownership differs")
+                    if result.status == "context_budget_failure":
+                        if (row["messages"] != failure.get("request_messages")
+                                or row["turn"] != failure.get("turn_index")
+                                or preflight != failure.get("native_hf_preflight")):
+                            raise ValueError("Native HF preflight error outcome ownership differs")
+                        restore_verified_native_context(result, traces=traces, tokenizer=tokenizer)
+                    elif row.get("delivery") != "cancelled":
+                        raise ValueError("Infrastructure preflight error requires cancelled delivery")
+                    used.add(trace_id)
                 continue
             if row.get("request_status") != "native":
                 raise ValueError("Unfinished or unknown native request outcome")
@@ -495,8 +520,7 @@ def score_closed_group(group, *, inputs, tokenizer):
     if not isinstance(group, ClosedPublicGroup) or not group.closure.get("journals_flushed"):
         raise ValueError("Closed public Web TRAIN group required before label access")
     label = inputs.label_after_close(group)
-    unreliable = any(result.status in {"infrastructure_error", "context_budget_failure"}
-                     for result in group.results)
+    unreliable = unreliable_context_or_environment_group(group.results)
     allowed = {"completed", "max_steps", "invalid_answer", "evidence_failure",
                "model_protocol_failure", "infrastructure_error", "context_budget_failure"}
     scored, receipts = [], []

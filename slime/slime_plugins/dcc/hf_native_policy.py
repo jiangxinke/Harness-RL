@@ -21,7 +21,7 @@ from .web_whitespace import web_bounded_whitespace_configuration
 from .episode import ModelProtocolFailure, PolicyCompletion
 from .hf_policy import _chat_tokens, encode_messages
 from .hf_compute import compute_context, model_compute_profile
-from .prompt_history import PromptHistoryBudgetExceeded
+from .native_hf_context import NativeHFPromptBudgetExceeded
 from .native_behavior_logprobs import BEHAVIOR_LOGPROB_SOURCE, StreamingRawThoughtLogprobs
 
 PROTOCOL = "hf-native-two-stage-thought-only-policy-v1"
@@ -250,9 +250,16 @@ class NativeHFPolicy:
         for i, messages in enumerate(messages_batch):
             full = _chat_tokens(self.tokenizer, messages)
             if len(full) > self.max_prompt_tokens and not self.allow_truncation:
-                results[i] = PromptHistoryBudgetExceeded("full_context_exceeds_native_HF_limit",
-                    diagnostics={"original_prompt_tokens": len(full), "minimum_prompt_tokens": len(full),
-                                 "effective_prompt_limit": self.max_prompt_tokens}, original_prompt_ids=full)
+                failure = NativeHFPromptBudgetExceeded(full, limit=self.max_prompt_tokens,
+                    task_id=task_ids[i] if task_ids is not None else None,
+                    thought_tokens=self.thought_tokens, json_tokens=self.json_tokens,
+                    sampling_profile=self.sampling_profile,
+                    behavior_source=BEHAVIOR_LOGPROB_SOURCE if self.capture_thought_logprobs else None)
+                # This additional diagnostic belongs only to raw TRAIN capture.
+                # Evaluation sinks retain their completion-only trace counts.
+                if self.capture_thought_logprobs and self.trace_sink is not None:
+                    self.trace_sink(dict(failure.preflight))
+                results[i] = failure
                 continue
             prompt = encode_messages(self.tokenizer, messages, self.max_prompt_tokens,
                                      allow_truncation=self.allow_truncation)
