@@ -25,6 +25,9 @@ from .hf_policy import _chat_tokens, encode_messages
 from .hf_compute import compute_context, model_compute_profile
 from .native_hf_context import NativeHFPromptBudgetExceeded
 from .native_behavior_logprobs import BEHAVIOR_LOGPROB_SOURCE, StreamingRawThoughtLogprobs
+from .prompt_history import PromptHistoryConfig, PromptHistoryBudgetExceeded
+from .web_hf_prompt_history import (native_web_history_configuration, native_web_history_fields,
+    native_web_history_plan)
 
 PROTOCOL = "hf-native-two-stage-thought-only-policy-v1"
 JOINT_PROTOCOL = "hf-native-two-stage-joint-masked-JSON-policy-v1"
@@ -97,6 +100,7 @@ class NativeHFPolicy:
     # joint runtimes always override both values explicitly in __init__.
     joint_json_policy = False
     web_thought_budget_close = False
+    prompt_history_config = PromptHistoryConfig()
     protocol = PROTOCOL
 
     @staticmethod
@@ -113,12 +117,19 @@ class NativeHFPolicy:
                  max_prompt_tokens=16384, max_model_len=None, batch_size=4,
                  sampling_profile="raw", allow_truncation=False, trace_sink=None,
                  web_bounded_whitespace=False, capture_thought_logprobs=False,
-                 mixed_schema_batching=False, joint_json_policy=False, web_thought_budget_close=False):
+                 mixed_schema_batching=False, joint_json_policy=False, web_thought_budget_close=False,
+                 prompt_history_config=None):
         from transformers import GenerationConfig
         import xgrammar as xgr
 
         if sampling_profile not in {"raw", "greedy", "thinking"}:
             raise ValueError("Thought sampling must explicitly be raw, greedy or thinking")
+        self.prompt_history_config = (PromptHistoryConfig() if prompt_history_config is None
+                                      else prompt_history_config)
+        if not isinstance(self.prompt_history_config, PromptHistoryConfig):
+            raise ValueError("An explicit PromptHistoryConfig is required")
+        if self.prompt_history_config.enabled and (capture_thought_logprobs or joint_json_policy or allow_truncation):
+            raise ValueError("Native HF whole-turn history is Web evaluation-only; training capture, joint JSON and truncation are unsupported")
         if any(type(value) is not int or value <= 0
                for value in (thought_tokens, json_tokens, max_prompt_tokens, batch_size)):
             raise ValueError("Positive integer token and batch budgets required")
@@ -187,6 +198,9 @@ class NativeHFPolicy:
                 policy_gradient="disabled-evaluation-only",
                 failure_policy="retain-original-outcomes; last-thought-position-singleton-close; no-appended-token-or-retry",
                 supported_benchmark="widesearch")
+        if self.prompt_history_config.enabled:
+            self.provenance.update(native_web_prompt_history=native_web_history_configuration(self.prompt_history_config),
+                policy_gradient="disabled-evaluation-only", supported_benchmark="widesearch")
 
     async def __call__(self, *args, **kwargs):
         raise ValueError("HF native policy requires generate_structured and an explicit public schema")
@@ -315,7 +329,24 @@ class NativeHFPolicy:
     def _generate_batch(self, messages_batch, json_schema, task_ids=None):
         schemas = self._batch_schemas(json_schema, len(messages_batch))
         prompts, selected, results = [], [], [None] * len(messages_batch)
+        history_metadata = []
         for i, messages in enumerate(messages_batch):
+            if self.prompt_history_config.enabled:
+                try:
+                    plan = native_web_history_plan(self.tokenizer, messages, config=self.prompt_history_config,
+                        max_prompt_tokens=self.max_prompt_tokens, max_model_len=self.max_model_len,
+                        thought_tokens=self.thought_tokens, json_tokens=self.json_tokens)
+                except PromptHistoryBudgetExceeded as failure:
+                    failure.native_web_prompt_history_failure = native_web_history_fields(
+                        messages, failure.diagnostics, self.prompt_history_config)
+                    failure.native_web_prompt_history_failure["original_prompt_ids"] = list(failure.original_prompt_ids)
+                    failure.native_web_prompt_history_failure["generation_submitted"] = False
+                    results[i] = failure
+                    continue
+                prompts.append(plan.prompt_ids)
+                selected.append(i)
+                history_metadata.append(native_web_history_fields(messages, plan.report, self.prompt_history_config))
+                continue
             full = _chat_tokens(self.tokenizer, messages)
             if len(full) > self.max_prompt_tokens and not self.allow_truncation:
                 failure = NativeHFPromptBudgetExceeded(full, limit=self.max_prompt_tokens,
@@ -338,7 +369,8 @@ class NativeHFPolicy:
         if selected:
             selected_schemas = [schemas[i] for i in selected] if isinstance(json_schema, list) else json_schema
             values = self._generate_encoded_batch(prompts, selected_schemas,
-                [task_ids[i] for i in selected] if task_ids is not None else None)
+                [task_ids[i] for i in selected] if task_ids is not None else None,
+                **({"history_metadata": history_metadata} if self.prompt_history_config.enabled else {}))
             for i, value in zip(selected, values, strict=True):
                 results[i] = value
         return results
@@ -352,14 +384,18 @@ class NativeHFPolicy:
             schemas = [json_schema] * count
         for schema in schemas:
             kind = native_structured_schema_kind(schema)
+            if self.prompt_history_config.enabled and kind not in {"web", "web-review"}:
+                raise ValueError("Native HF whole-turn history supports exact Web evaluation schemas only")
             if self.web_thought_budget_close and kind not in {"web", "web-review"}:
                 raise ValueError("Web thought budget closing supports exact Web evaluation schemas only")
             if self.joint_json_policy and kind != "cuad":
                 raise ValueError("Joint JSON policy currently supports CUAD only")
         return schemas
 
-    def _generate_encoded_batch(self, prompts, json_schema, task_ids):
+    def _generate_encoded_batch(self, prompts, json_schema, task_ids, *, history_metadata=None):
         from jsonschema import Draft202012Validator
+        if history_metadata is not None and len(history_metadata) != len(prompts):
+            raise ValueError("Every compacted native request requires its own history provenance")
         schemas = self._batch_schemas(json_schema, len(prompts))
         self.model.eval()
         thought_started = time.monotonic()
@@ -436,6 +472,8 @@ class NativeHFPolicy:
                     trace.update(web_thought_budget_close=web_thought_budget_close_configuration(self.thought_tokens),
                         forced_thought_positions=([self.thought_tokens - 1]
                             if len(thought) == self.thought_tokens and thought[-1] == END_THINK else []))
+                if history_metadata is not None:
+                    trace.update(deepcopy(history_metadata[i]))
                 if self.joint_json_policy:
                     trace.update(json_logprobs=completion.json_logprobs,
                         json_logprobs_source=completion.json_logprobs_source,

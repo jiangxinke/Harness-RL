@@ -15,6 +15,9 @@ from pathlib import Path
 
 from .data import Task
 from .episode import ModelProtocolFailure, parse_action
+from .prompt_history import PromptHistoryBudgetExceeded
+from .web_hf_prompt_history import (FIELDS as HISTORY_FIELDS, native_web_history_configuration,
+    native_web_history_fields, native_web_history_plan)
 
 VERSION = "dcc-matched-HF-Web-native-ownership-v1"
 PROVENANCE_FIELDS = ("source", "source_revision", "original_split", "curriculum_version",
@@ -146,6 +149,9 @@ class OwnedEvaluationPolicy:
         except BaseException as error:
             row.update(request_status="error", delivery="cancelled" if cancelled else "error",
                        error_type=type(error).__name__, error=str(error))
+            history_failure = getattr(error, "native_web_prompt_history_failure", None)
+            if history_failure is not None:
+                row.update(deepcopy(history_failure))
             self.sink(row)
             if cancelled:
                 raise asyncio.CancelledError() from error
@@ -164,13 +170,48 @@ class OwnedEvaluationPolicy:
         self.sink(row)
 
 
+def _verify_history_request(owner, trace, result, tokenizer, config, budgets):
+    """Recompute from the caller's full request; never fit a stored summary."""
+    try:
+        plan = native_web_history_plan(tokenizer, owner["messages"], config=config, **budgets)
+    except PromptHistoryBudgetExceeded as error:
+        context_failure = result.get("status") == "context_budget_failure"
+        timeout_drained_failure = (result.get("status") == "infrastructure_error"
+                                   and owner.get("delivery") == "cancelled")
+        if (trace is not None or owner.get("request_status") != "error"
+                or not (context_failure or timeout_drained_failure)):
+            raise ValueError("Native Web history preflight outcome differs from full-request replay") from error
+        expected = native_web_history_fields(owner["messages"], error.diagnostics, config)
+        expected["original_prompt_ids"] = list(error.original_prompt_ids)
+        expected["generation_submitted"] = False
+        failure = result.get("metrics", {}).get("prompt_history_failure", {})
+        if (any(canonical(owner.get(key)) != canonical(value) for key, value in expected.items())
+                or owner.get("error_type") != type(error).__name__ or owner.get("error") != str(error)
+                or context_failure and canonical(failure) != canonical(dict(reason=error.reason,
+                    diagnostics=error.diagnostics, request_messages=owner["messages"], generation_submitted=False))):
+            raise ValueError("Native Web history failure provenance differs from full-request replay") from error
+        return
+    if trace is None:
+        # A dependency/timeout failure remains an infrastructure outcome. No
+        # invented completion or omission proof is accepted in its place.
+        if result.get("status") != "infrastructure_error" or any(key in owner for key in HISTORY_FIELDS):
+            raise ValueError("Native Web history request error lacks its replayed context failure")
+        return
+    expected = native_web_history_fields(owner["messages"], plan.report, config)
+    if (any(canonical(trace.get(key)) != canonical(value) for key, value in expected.items())
+            or trace.get("prompt_ids") != plan.prompt_ids):
+        raise ValueError("Native Web history prompt/provenance differs from full-request replay")
+
+
 def verify_native_ownership(tasks, predictions, owners, traces, *, rank, profile, eos_ids, tokenizer=None,
-                            web_thought_budget_close=None):
+                            web_thought_budget_close=None, prompt_history_config=None, history_budgets=None):
     """Bind every persisted request/trace/step; optional token encoding replay.
 
     Generation supplies its real tokenizer before publishing its done marker.
-    Score-only revalidates the complete persisted cross-links without loading
-    a model/tokenizer. Cancelled native outputs remain owned, but earn no score.
+    Default score-only revalidates persisted cross-links without a tokenizer.
+    Opt-in Web history also replays the full request with the local tokenizer
+    and context configuration; neither path loads model weights. Cancelled
+    native outputs remain owned, but earn no score.
     """
     from jsonschema import Draft202012Validator
     from .hf_native_policy import (END_THINK, PROTOCOL, WEB_THOUGHT_BUDGET_CLOSE_PROTOCOL,
@@ -178,6 +219,15 @@ def verify_native_ownership(tasks, predictions, owners, traces, *, rank, profile
     from .hf_native_structured import _web_review_mode
     from .hf_policy import _chat_tokens
 
+    if prompt_history_config is not None:
+        native_web_history_configuration(prompt_history_config)
+        if (tokenizer is None or not isinstance(history_budgets, dict)
+                or set(history_budgets) != {"max_prompt_tokens", "max_model_len", "thought_tokens", "json_tokens"}
+                or any(type(v) is not int or v < 1 for v in history_budgets.values())
+                or any(task.benchmark != "widesearch" for task in tasks)):
+            raise ValueError("Native Web history ownership requires exact tokenizer, budgets and Web-only tasks")
+    elif history_budgets is not None:
+        raise ValueError("History budgets require the enabled native Web evaluation policy")
     if not eos_ids or END_THINK in eos_ids:
         raise ValueError("Exact native non-thinking EOS IDs required")
     protocol = PROTOCOL
@@ -216,9 +266,13 @@ def verify_native_ownership(tasks, predictions, owners, traces, *, rank, profile
         if canonical([row["completion"] for row in delivered]) != canonical(result.get("steps")):
             raise ValueError("Delivered native requests differ from the retained episode steps")
         for owner in rows:
+            if prompt_history_config is None and any(key in owner for key in HISTORY_FIELDS):
+                raise ValueError("Unexpected native Web history provenance")
             if owner.get("request_status") == "error":
                 if result["status"] not in {"infrastructure_error", "context_budget_failure"}:
                     raise ValueError("Untraced request error requires a retained unreliable outcome")
+                if prompt_history_config is not None:
+                    _verify_history_request(owner, None, result, tokenizer, prompt_history_config, history_budgets)
                 continue
             if (owner.get("request_status") != "native"
                     or owner.get("delivery") not in {"delivered", "cancelled"}
@@ -228,6 +282,13 @@ def verify_native_ownership(tasks, predictions, owners, traces, *, rank, profile
             if trace_id not in index or trace_id in used or completion.get("trace_id") != trace_id:
                 raise ValueError("Missing/reused/foreign native trace binding")
             trace = index[trace_id]
+            if prompt_history_config is not None:
+                _verify_history_request(owner, trace, result, tokenizer, prompt_history_config, history_budgets)
+                if any(value.get(key) is not None for value in (trace, completion)
+                       for key in ("thought_logprobs", "thought_logprobs_source", "json_logprobs", "json_logprobs_source")):
+                    raise ValueError("Native Web history evaluation cannot accept training behavior capture")
+            elif any(key in trace for key in HISTORY_FIELDS):
+                raise ValueError("Unexpected native Web history provenance")
             count, ids = completion.get("thought_token_count"), completion.get("completion_ids")
             if (type(count) is not int or not isinstance(ids, list) or not 0 < count <= len(ids)
                     or completion.get("native_status") not in allowed
@@ -256,7 +317,8 @@ def verify_native_ownership(tasks, predictions, owners, traces, *, rank, profile
                     raise ValueError("Actual Web thought budget closing policy/position differs")
             elif "web_thought_budget_close" in trace or "forced_thought_positions" in trace:
                 raise ValueError("Unexpected Web thought budget closing policy")
-            if tokenizer is not None and _chat_tokens(tokenizer, owner["messages"]) != completion["prompt_ids"]:
+            if (prompt_history_config is None and tokenizer is not None
+                    and _chat_tokens(tokenizer, owner["messages"]) != completion["prompt_ids"]):
                 raise ValueError("Original public request does not encode to the actual native prompt IDs")
             # Round-trip the exact original public constructors. Do not compile
             # a grammar during score-only: actual generation already admitted

@@ -38,6 +38,8 @@ from slime_plugins.dcc.hf_compute import precision_observation, validate_compute
 from slime_plugins.dcc.hf_native_policy import (NativeHFPolicy, PROTOCOL,
     WEB_THOUGHT_BUDGET_CLOSE_PROTOCOL, web_thought_budget_close_configuration)
 from slime_plugins.dcc.hf_policy import load_policy_model, PROMPT_ENCODING_VERSION
+from slime_plugins.dcc.prompt_history import add_prompt_history_arguments, prompt_history_from_arguments
+from slime_plugins.dcc.web_hf_prompt_history import native_web_history_configuration
 from slime_plugins.dcc.tools import WEB_READER_VERSION
 from slime_plugins.dcc.web_hf_evaluation import (STATUSES, OwnedEvaluationPolicy, canonical,
     dataset_identity, identity, load_public_tasks, prediction_row, public_task, read_jsonl,
@@ -141,6 +143,9 @@ def runner_configuration(args):
         config["web_concise_reasoning"] = web_concise_reasoning_configuration(True)
     if getattr(args, "web_thought_budget_close", False):
         config["web_thought_budget_close"] = web_thought_budget_close_configuration(args.thought_tokens)
+    history = prompt_history_from_arguments(args)
+    if history.enabled:
+        config["native_web_prompt_history"] = native_web_history_configuration(history)
     return config
 
 
@@ -182,11 +187,44 @@ def runtime_identity(model, tokenizer, policy):
     # Config/revision/tokenizer provenance is small. Never hash all base weights.
     for key in ("_name_or_path", "transformers_version"):
         config.pop(key, None)
-    return dict(model_config_identity=identity(config), model_revision=getattr(model.config, "_commit_hash", None),
+    result = dict(model_config_identity=identity(config), model_revision=getattr(model.config, "_commit_hash", None),
         tokenizer_class=type(tokenizer).__name__, tokenizer_size=len(tokenizer),
         tokenizer_chat_template_identity=identity(tokenizer.chat_template),
         native_suffix_ids=list(policy.suffix_ids), eos_ids=list(policy.eos_ids),
         pad_token_id=tokenizer.pad_token_id)
+    history = getattr(policy, "prompt_history_config", None)
+    if history is not None and history.enabled:
+        result["native_web_prompt_history"] = dict(configuration=native_web_history_configuration(history),
+            max_model_len=policy.max_model_len)
+    return result
+
+
+def history_verification_options(args, runtime, *, tokenizer=None):
+    """Enabled score-only replay loads local tokenizer/config, never weights."""
+    history = prompt_history_from_arguments(args)
+    if not history.enabled:
+        if "native_web_prompt_history" in runtime:
+            raise ValueError("Unexpected native Web history runtime policy")
+        return {}
+    declaration = runtime.get("native_web_prompt_history", {})
+    limit = declaration.get("max_model_len")
+    if (type(limit) is not int or limit < 1 or canonical(declaration) != canonical(dict(
+            configuration=native_web_history_configuration(history), max_model_len=limit))):
+        raise ValueError("Native Web history runtime policy differs")
+    if tokenizer is None:
+        from transformers import AutoConfig, AutoTokenizer
+        config = AutoConfig.from_pretrained(args.model, local_files_only=True, trust_remote_code=False)
+        if config.max_position_embeddings != limit:
+            raise ValueError("Native Web history model context configuration differs")
+        tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=True, trust_remote_code=False)
+    suffix = NativeHFPolicy.validate_tokenizer(tokenizer)["native_suffix_ids"]
+    if (type(tokenizer).__name__ != runtime.get("tokenizer_class") or len(tokenizer) != runtime.get("tokenizer_size")
+            or identity(tokenizer.chat_template) != runtime.get("tokenizer_chat_template_identity")
+            or suffix != runtime.get("native_suffix_ids") or tokenizer.pad_token_id != runtime.get("pad_token_id")):
+        raise ValueError("Native Web history replay tokenizer differs from generation")
+    return dict(tokenizer=tokenizer, prompt_history_config=history,
+        history_budgets=dict(max_prompt_tokens=args.max_prompt_tokens, max_model_len=limit,
+            thought_tokens=args.thought_tokens, json_tokens=args.json_tokens))
 
 
 async def generate(args, tasks):
@@ -211,7 +249,9 @@ async def generate(args, tasks):
         policy = NativeHFPolicy(model, tokenizer, thought_tokens=args.thought_tokens,
             json_tokens=args.json_tokens, max_prompt_tokens=args.max_prompt_tokens,
             sampling_profile=args.profile, trace_sink=lambda row: enqueue("native_traces", row),
-            **({"web_thought_budget_close": True} if getattr(args, "web_thought_budget_close", False) else {}))
+            **({"web_thought_budget_close": True} if getattr(args, "web_thought_budget_close", False) else {}),
+            **({"prompt_history_config": prompt_history_from_arguments(args)}
+               if prompt_history_from_arguments(args).enabled else {}))
         runtime = runtime_identity(model, tokenizer, policy)
         runner = make_runner(args)
         for task in assigned:
@@ -228,8 +268,10 @@ async def generate(args, tasks):
         saved = {name: read_jsonl(args.output_dir / f"{name}_rank{rank}.jsonl") for name in JOURNALS}
         if any(len(saved[name]) != writer.count for name, writer in writers.items()):
             raise ValueError("Closed evaluation journal count differs from exact persisted records")
+        ownership_options = dict(tokenizer=tokenizer)
+        ownership_options.update(history_verification_options(args, runtime, tokenizer=tokenizer))
         ownership = verify_native_ownership(assigned, saved["predictions"], saved["request_owners"],
-            saved["native_traces"], rank=rank, profile=args.profile, eos_ids=policy.eos_ids, tokenizer=tokenizer,
+            saved["native_traces"], rank=rank, profile=args.profile, eos_ids=policy.eos_ids, **ownership_options,
             **({"web_thought_budget_close": configuration["comparison"]["harness"]["web_thought_budget_close"]}
                if getattr(args, "web_thought_budget_close", False) else {}))
         write_json(args.output_dir / f"rank{rank}.done.json", dict(version=VERSION,
@@ -270,6 +312,10 @@ def load_closed_run(args, tasks):
         assigned = tasks[rank::args.shards]
         if packages is None:
             packages, runtime, precision = config.get("packages"), done.get("runtime"), done.get("precision")
+        if prompt_history_from_arguments(args).enabled and canonical(
+                config.get("comparison", {}).get("harness", {}).get("native_web_prompt_history")) != canonical(
+                expected["comparison"]["harness"]["native_web_prompt_history"]):
+            raise ValueError("Evaluation configuration, precision, runtime or closure differs across shards")
         if (any(config.get(key) != expected[key] for key in ("version", "comparison", "condition", "adapter_identity", "shards"))
                 or config.get("packages") != packages or config.get("shard_index") != rank
                 or config.get("assigned_task_ids") != [task.id for task in assigned]
@@ -287,6 +333,7 @@ def load_closed_run(args, tasks):
             raise ValueError("Closed journal record counts changed")
         ownership = verify_native_ownership(assigned, rows["predictions"], rows["request_owners"], rows["native_traces"],
             rank=rank, profile=args.profile, eos_ids=runtime.get("eos_ids"),
+            **history_verification_options(args, done["runtime"]),
             **({"web_thought_budget_close": expected["comparison"]["harness"]["web_thought_budget_close"]}
                if getattr(args, "web_thought_budget_close", False) else {}))
         if ownership != done.get("native_ownership") or any(row.get("task_seed") != task_seed(args.seed, task.id)
@@ -383,6 +430,9 @@ def parser():
     result.set_defaults(max_steps=20)
     result.add_argument("--web-thought-budget-close", action="store_true",
         help="Experimental Web evaluation only: constrain the last in-budget thought token to the real closing token; JSON is unchanged")
+    add_prompt_history_arguments(result)
+    next(action for action in result._actions if action.dest == "prompt_history_whole_turns").help = (
+        "Experimental native HF Web evaluation only: evict earlier whole turns with complete request/tokenizer replay; CUAD and training capture are unsupported")
     profile = next(action for action in result._actions if action.dest == "profile")
     profile.choices = ("raw", "thinking", "greedy")
     return result
@@ -391,6 +441,10 @@ def parser():
 def main(argv=None):
     arguments = parser()
     args = arguments.parse_args(argv)
+    try:
+        prompt_history_from_arguments(args)
+    except ValueError as error:
+        arguments.error(str(error))
     if (not re.fullmatch(r"[0-9a-f]{40}", args.source_commit)
             or any(value < 1 for value in (args.shards, args.thought_tokens, args.json_tokens,
                    args.max_prompt_tokens, args.max_steps, args.retrieval_context_chars, args.retrieval_max_context_chars))
