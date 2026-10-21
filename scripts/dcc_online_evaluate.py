@@ -38,7 +38,7 @@ from slime_plugins.dcc.hf_policy import load_policy_model
 from slime_plugins.dcc.hf_compute import (COMPUTE_PROFILES, adapter_compute_profile,
     compute_profile_configuration, precision_observation, validate_compute_profile, validate_model_compute_profile)
 from slime_plugins.dcc.metrics import cuad_task_metrics
-from slime_plugins.dcc.native_joint_grpo import ALGORITHM as JOINT_ALGORITHM
+from slime_plugins.dcc.native_joint_grpo import ALGORITHM as JOINT_ALGORITHM, JSON_SURROGATE_VARIANT
 from slime_plugins.dcc.online_grpo import ALGORITHM
 from slime_plugins.dcc.episode_gspo import VARIANT as GSPO_VARIANT
 
@@ -46,7 +46,9 @@ VERSION = "dcc-online-matched-HF-CUAD-evaluation-v1"
 ONLINE_ALGORITHMS = (ALGORITHM, JOINT_ALGORITHM,
     ALGORITHM + "+" + REFERENCE_KL_VARIANT,
     JOINT_ALGORITHM + "+frozen-base-reference-k3-nonzero-advantage-joint-v1",
-    ALGORITHM + "+" + GSPO_VARIANT, JOINT_ALGORITHM + "+" + GSPO_VARIANT)
+    ALGORITHM + "+" + GSPO_VARIANT, JOINT_ALGORITHM + "+" + GSPO_VARIANT,
+    JOINT_ALGORITHM + "+" + JSON_SURROGATE_VARIANT,
+    JOINT_ALGORITHM + "+frozen-base-reference-k3-nonzero-advantage-joint-v1+" + JSON_SURROGATE_VARIANT)
 SCORE_FIELDS = {"f1", "precision", "recall", "no_answer_correct", "tp", "fp", "fn",
                 "verbatim_span_fraction"}
 

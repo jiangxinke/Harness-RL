@@ -355,11 +355,12 @@ def test_adapter_provenance_separates_training_and_evaluation_source(evaluator, 
     assert config["condition"]["online_policy_gradient_updates_recorded"] is marked_online
 
 
-def completed_online_metadata(*, joint_json_policy, reference_kl_beta=0):
+def completed_online_metadata(*, joint_json_policy, reference_kl_beta=0, json_surrogate_weight=1):
     from dcc_online_grpo import configuration
     args = SimpleNamespace(model="invented-CPU-model", source_commit="b" * 40,
         group_size=4, max_steps=2, thought_tokens=4, json_tokens=256,
-        joint_json_policy=joint_json_policy, reference_kl_beta=reference_kl_beta)
+        joint_json_policy=joint_json_policy, reference_kl_beta=reference_kl_beta,
+        json_surrogate_weight=json_surrogate_weight)
     config = configuration(args, [], [], 1)
     config.update(rollout_iterations=4, optimizer_updates=2)
     return config, dict(complete=True, optimizer_steps=2)
@@ -380,6 +381,26 @@ def test_actual_online_algorithm_metadata_records_completed_updates(
     assert condition["training"]["algorithm"] == config["algorithm"]
     assert condition["training"]["training_source_commit"] == "b" * 40
     assert condition["online_policy_gradient_updates_recorded"] is True
+    assert not torch.cuda.is_initialized()
+
+
+@pytest.mark.parametrize("reference_kl_beta", [0, 0.02])
+@pytest.mark.parametrize("updates", [0, 2])
+def test_weighted_joint_metadata_requires_positive_matching_updates(
+        evaluator, tmp_path, reference_kl_beta, updates):
+    # Actual trainer declarations with synthetic checkpoint receipts; no rollout.
+    config, checkpoint = completed_online_metadata(joint_json_policy=True,
+        reference_kl_beta=reference_kl_beta, json_surrogate_weight=4)
+    config["optimizer_updates"] = checkpoint["optimizer_steps"] = updates
+    adapter = tmp_path / "invented-weighted-adapter"
+    adapter.mkdir()
+    (adapter / "training_config.json").write_text(json.dumps(config))
+    (adapter / "checkpoint_complete.json").write_text(json.dumps(checkpoint))
+    condition = evaluator.adapter_condition(str(adapter))
+    assert config["algorithm"].endswith("+" + evaluator.JSON_SURROGATE_VARIANT)
+    assert condition["training"]["algorithm"] == config["algorithm"]
+    assert condition["training"]["optimizer_updates"] == updates
+    assert condition["online_policy_gradient_updates_recorded"] is (updates > 0)
     assert not torch.cuda.is_initialized()
 
 
