@@ -193,3 +193,13 @@ the seed, budgets, learning rate and all other training choices fixed.
 Neither mode resamples tasks based on outcomes. Phase events separately record collection,
 reward signal, replay, optimizer application and checkpoint publication. Closed
 native traces include batch thought/JSON elapsed time; absent JSON is null.
+
+Distributed training uses a separate full-world Gloo CPU rendezvous after
+rollout and replay, before submitting gradient all-reduces to NCCL. Each rank
+first synchronizes its own CUDA work. This prevents an early rank's GPU
+collective from waiting throughout another rank's longer generation. Readiness
+has a finite two-hour timeout; NCCL watchdog monitoring remains enabled.
+Readiness timing is recorded separately from optimizer application. Gradient
+averaging, clipping, zero-signal skipping and the objective are unchanged.
+This is a synchronization safeguard, not evidence of improved model quality
+or proof that every NCCL watchdog failure has the same cause.

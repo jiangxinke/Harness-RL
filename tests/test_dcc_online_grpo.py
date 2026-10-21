@@ -14,7 +14,7 @@ import torch
 from slime_plugins.dcc.episode import EpisodeResult
 from slime_plugins.dcc.native_behavior_logprobs import BEHAVIOR_LOGPROB_SOURCE
 from slime_plugins.dcc.online_grpo import (apply_policy_update, group_signal,
-                                          thought_policy_loss)
+                                          thought_policy_loss, wait_for_update_ranks)
 
 
 def episode(reward, *, status="completed", thought=(6, 7), json_ids=(8, 9)):
@@ -453,6 +453,17 @@ def _distributed_update_worker(rank, rendezvous, output):
     from datetime import timedelta
     distributed.init_process_group("gloo", init_method="file://" + rendezvous,
         rank=rank, world_size=2, timeout=timedelta(seconds=60))
+    control = distributed.new_group(backend="gloo", timeout=timedelta(seconds=60))
+    # A rank that finishes early cannot enter the gradient collective until
+    # the other rank has actually finished its simulated rollout/replay.
+    if rank == 1:
+        import time
+        time.sleep(0.25)
+    def device_ready():
+        Path(output + str(rank) + ".ready").write_text("ready")
+    wait_for_update_ranks(world_size=2, distributed=distributed,
+        control_group=control, synchronize=device_ready, timeout_seconds=30)
+    assert all(Path(output + str(other) + ".ready").read_text() == "ready" for other in range(2))
     parameter = torch.nn.Parameter(torch.tensor([1.0]))
     optimizer = torch.optim.AdamW([parameter], lr=0.1, weight_decay=0)
     # One rank has no local policy signal; both must apply the global update.
@@ -472,6 +483,7 @@ def _distributed_update_worker(rank, rendezvous, output):
         world_size=2, distributed=distributed)
     assert norm == 0 and not applied and torch.equal(parameter.detach(), before)
     Path(output + str(rank)).write_text("passed")
+    distributed.destroy_process_group(control)
     distributed.destroy_process_group()
 
 
@@ -481,6 +493,20 @@ def test_real_gloo_global_update_and_zero_signal_momentum(tmp_path):
         args=(str(tmp_path / "rendezvous"), str(tmp_path / "result-")),
         nprocs=2, join=True)
     assert [(tmp_path / f"result-{rank}").read_text() for rank in range(2)] == ["passed", "passed"]
+
+
+def test_update_readiness_single_rank_is_noop_and_multi_rank_requires_cpu_group():
+    def unexpected():
+        raise AssertionError("Single-rank readiness must not touch CUDA")
+    wait_for_update_ranks(synchronize=unexpected)
+    with pytest.raises(ValueError, match="Gloo"):
+        wait_for_update_ranks(world_size=2, synchronize=unexpected)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
+def test_update_readiness_rejects_invalid_timeout(timeout):
+    with pytest.raises(ValueError, match="timeout"):
+        wait_for_update_ranks(timeout_seconds=timeout)
 
 
 @pytest.mark.parametrize("native_batch_size", [4, 2])

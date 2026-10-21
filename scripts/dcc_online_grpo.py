@@ -35,7 +35,8 @@ from slime_plugins.dcc.hf_chunked_logprobs import resolve_logprob_backend
 from slime_plugins.dcc.hf_policy import encode_messages, load_policy_model
 from slime_plugins.dcc.hf_compute import (COMPUTE_PROFILES, compute_profile_configuration,
     precision_observation, validate_model_compute_profile)
-from slime_plugins.dcc.online_grpo import ALGORITHM, apply_policy_update, group_signal, thought_policy_loss
+from slime_plugins.dcc.online_grpo import (ALGORITHM, apply_policy_update, group_signal,
+                                         thought_policy_loss, wait_for_update_ranks)
 from slime_plugins.dcc.native_hf_context import context_handling_configuration
 from slime_plugins.dcc.retrieval import load_retrieval_profile
 from slime_plugins.dcc.tools import WebTools
@@ -254,6 +255,8 @@ def configuration(args, plan, tasks, world_size):
         replay_diagnostic_mode=getattr(args, "replay_diagnostic", "full"),
         json_policy_loss=False, model_failure_reward=0,
         context_failure_handling=context_handling_configuration(),
+        distributed_update_readiness=dict(backend="gloo", device_synchronize_before_wait=True,
+            timeout_seconds=7200, before_gradient_collectives=True, enabled=world_size > 1),
         objective_denominator=args.group_size * args.max_steps * args.thought_tokens,
         zero_global_gradient_optimizer_step=False,
         planned_task_ids=[[tasks[index].id for index in row] for row in plan])
@@ -296,8 +299,10 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
     from slime_plugins.dcc.hf_native_policy import NativeHFPolicy
     rank, local = int(os.environ.get("RANK", "0")), int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local)
+    control_group = None
     if world_size > 1:
         dist.init_process_group("nccl", timeout=timedelta(hours=2))
+        control_group = dist.new_group(backend="gloo", timeout=timedelta(hours=2))
     prepare_training_output(args.output_dir, rank=rank, world_size=world_size, distributed=dist)
     torch.manual_seed(args.seed)
     config = configuration(args, plan, tasks, world_size)
@@ -405,6 +410,13 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
                 replay_diagnostic=getattr(args, "replay_diagnostic", "full"))
             record(event="replay_end", iteration=iteration, seconds=time.monotonic() - replay_started,
                    scored_tokens=report["scored_tokens"], scored_segments=report["scored_segments"])
+            if world_size > 1:
+                readiness_started = time.monotonic()
+                record(event="update_readiness_begin", iteration=iteration)
+                wait_for_update_ranks(world_size=world_size, distributed=dist,
+                    control_group=control_group, synchronize=torch.cuda.synchronize)
+                record(event="update_readiness_end", iteration=iteration,
+                       seconds=time.monotonic() - readiness_started)
             apply_started = time.monotonic()
             record(event="apply_begin", iteration=iteration)
             norm, applied = apply_policy_update(parameters, optimizer, world_size=world_size,
@@ -460,6 +472,7 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
         if failure is not None and sys.exc_info()[0] is None:
             raise failure
     if world_size > 1:
+        dist.destroy_process_group(control_group)
         dist.destroy_process_group()
 
 

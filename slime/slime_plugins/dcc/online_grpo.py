@@ -7,6 +7,7 @@ policy loss. Model failures retain sampled thoughts and zero reward.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 import math
 
 import torch
@@ -101,6 +102,29 @@ def thought_policy_loss(current, old, advantage, *, group_size, max_steps, thoug
     ratio = (current - old).exp()
     surrogate = torch.minimum(ratio * advantage, ratio.clamp(1 - clip, 1 + clip) * advantage)
     return -surrogate.sum() / (group_size * max_steps * thought_tokens)
+
+
+def wait_for_update_ranks(*, world_size=1, distributed=None, control_group=None,
+                          synchronize=None, timeout_seconds=7200):
+    """Wait on the CPU before submitting any gradient collective to CUDA.
+
+    Rollout and replay lengths differ across ranks, especially for mixed Web
+    groups. An early rank must not leave a GPU collective waiting throughout
+    another rank's generation. This rendezvous changes no gradient arithmetic
+    and retains a finite timeout and NCCL's existing watchdog monitoring.
+    """
+    if (type(world_size) is not int or world_size < 1
+            or not math.isfinite(timeout_seconds) or timeout_seconds <= 0):
+        raise ValueError("Positive world size and finite readiness timeout required")
+    if world_size == 1:
+        return
+    if (distributed is None or control_group is None or not callable(synchronize)
+            or distributed.get_backend(control_group) != "gloo"
+            or distributed.get_world_size(control_group) != world_size):
+        raise ValueError("A full-world Gloo readiness group and device synchronization are required")
+    synchronize()
+    distributed.monitored_barrier(group=control_group,
+        timeout=timedelta(seconds=timeout_seconds), wait_all_ranks=True)
 
 
 def apply_policy_update(parameters, optimizer, *, world_size=1, distributed=None, max_grad_norm=1.0):
