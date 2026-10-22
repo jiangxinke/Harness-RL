@@ -123,12 +123,30 @@ training arguments. Different padding, RNG consumption and concurrent KV
 storage can change sampled trajectories and peak memory; verify the selected
 configuration on the actual GPU before scaling it.
 
-The episode deadline covers queue waiting as well as execution. Allow enough
-outer watchdog time for the configured group size, and use the explicit
-thought/JSON/turn budgets to bound policy work. A queue timeout alone does not
-show a model error. Requests cancelled while waiting for another schema group
-are checked again before submission and do not start new generation. Already
-running work is still drained and retained with its actual ownership.
+The episode deadline covers queue waiting as well as execution, but is not a
+hard wall-clock limit on native drain. On cancellation, owned Web requests mark
+their thread-safe native cancellation control expired. The worker skips expired
+queued requests before submission, retaining an explicit cancelled request error
+and the episode's infrastructure outcome without inventing tokens or behavior
+scores. A submitted thought phase drains its actual IDs and scores; if cancelled
+before the JSON phase starts, it produces a `request_cancelled_before_json`
+trace with no JSON or synthetic EOS. A JSON phase already started drains its
+actual output. Such traces are accepted only for cancelled delivery and an
+infrastructure-error episode. All group members remain represented and the
+existing unreliable-group gradient discard is unchanged.
+
+Training and matched Web evaluation use the same cancellation control. Policies
+without that capability retain the previous complete-request drain. Repeated
+outer cancellations do not cancel submitted native work. Allow outer watchdog
+time for drain: a running kernel or phase still has no hard wall-clock cutoff.
+Submission means the worker's check and mark immediately before dispatching
+`to_thread`; JSON uses the corresponding locked check at its phase boundary.
+These are submission boundaries, not a guarantee that no GPU instruction can
+execute after the episode deadline.
+Normal requests keep the same sampling, token budgets, schemas and loss. This
+timeout fix changes future runtime behavior; already frozen evaluations keep
+their original source, and comparisons using the fix need a new source identity
+and matched control.
 
 `--replay-diagnostic full|first|off` controls only the extra evaluation-mode,
 no-gradient decoder forwards used to compare teacher-forced replay with the

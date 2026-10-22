@@ -97,6 +97,14 @@ rejects reference metrics or nonzero reward.
 
 Each shard writes predictions, native traces and request ownership journals.
 Timeout-late native outputs are drained and retained with cancelled delivery.
+Owned native requests also share the training cancellation control: an expired
+queued request retains an explicit error without model submission, and a
+submitted thought can drain a real `request_cancelled_before_json` prefix
+without starting a new JSON phase. Already submitted JSON drains normally.
+Both cases retain an infrastructure-error outcome with zero score and remain
+in the task denominator. Submission is a checked worker/phase boundary, not a
+hard wall-clock bound on GPU work; repeated cancellations keep drain shielded.
+Policies without this capability keep the original complete-request drain.
 Every delivered step and every native trace UUID must match its request,
 original public schema, prompt IDs, actual thought/JSON IDs and status. Before
 publishing the done marker, the actual tokenizer verifies prompt encoding and
@@ -105,6 +113,9 @@ Score-only rechecks all persisted cross-links and every configured shard;
 missing/extra shards, duplicate traces, foreign outputs, changed task seeds or
 changed configuration fail closed. Generation never resumes or retries into
 an existing shard.
+This cancellation fix requires the new committed source and its ownership
+verifier. Previously frozen sources remain unchanged; use a new matched control
+for evaluations with the fix instead of combining their scores with old runs.
 
 All noncompleted outcomes, including protocol, evidence, context and policy
 timeout failures, receive zero and remain in the full task denominator. The

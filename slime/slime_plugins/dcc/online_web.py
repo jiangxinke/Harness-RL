@@ -299,17 +299,26 @@ class OwnedEpisodePolicy:
         row = {**self.identity, "turn": len(self.requests),
                "messages": deepcopy(messages), "json_schema": deepcopy(json_schema)}
         self.requests.append(row)
+        factory = getattr(self.bound_policy, "new_request_control", None)
+        control = factory() if callable(factory) else None
         pending = asyncio.create_task(self.bound_policy.generate_structured(
-            messages, json_schema=json_schema, **kwargs))
+            messages, json_schema=json_schema, **kwargs,
+            **({"_request_control": control} if control is not None else {})))
         cancelled = False
         try:
-            try:
-                completion = await asyncio.shield(pending)
-            except asyncio.CancelledError:
-                # The real HF thread may already be sampling. Drain and own its
-                # completion before propagating the episode's timeout/cancel.
-                cancelled = True
-                completion = await pending
+            while True:
+                try:
+                    completion = await asyncio.shield(pending)
+                    break
+                except asyncio.CancelledError:
+                    # Expire queued work, but keep shielding any submitted
+                    # phase through repeated sibling/deadline cancellations.
+                    cancelled = True
+                    if control is not None:
+                        control.expire()
+                    if pending.done():
+                        completion = pending.result()
+                        break
         except ModelProtocolFailure as error:
             if error.trace_id != getattr(error.completion, "trace_id", None):
                 raise ValueError("Failed completion/exception trace ownership differs") from error
@@ -334,6 +343,9 @@ class OwnedEpisodePolicy:
         return completion
 
     def _record(self, row, completion, *, cancelled):
+        from .hf_native_policy import CANCELLED_BEFORE_JSON
+        if completion.native_status == CANCELLED_BEFORE_JSON and not cancelled:
+            raise ValueError("A cancelled-before-JSON prefix requires cancelled delivery")
         trace_id = getattr(completion, "trace_id", None)
         if type(trace_id) is not str or not trace_id:
             raise ValueError("HF completion must carry its exact sink trace_id")
@@ -366,6 +378,7 @@ def verify_owned_native_group(task, results, owner_rows, traces, *, eos_ids, tok
     """Replay exact closed journal bytes, original schemas and actual token IDs."""
     from jsonschema import Draft202012Validator
     from .hf_native_policy import _strict_json
+    from .hf_native_policy import CANCELLED_BEFORE_JSON, NativeHFRequestExpiredBeforeSubmission
     from .hf_native_structured import native_structured_schema_kind
     from .hf_policy import _chat_tokens
     history_config = (PromptHistoryConfig() if web_train_prompt_history_config is None
@@ -388,7 +401,7 @@ def verify_owned_native_group(task, results, owner_rows, traces, *, eos_ids, tok
     if len(index) != len(traces):
         raise ValueError("Duplicate native trace IDs")
     used, prompts = set(), []
-    allowed = {"completed", "thought_did_not_stop_on_real_close",
+    allowed = {"completed", "thought_did_not_stop_on_real_close", CANCELLED_BEFORE_JSON,
                "json_did_not_finish_with_real_eos", "json_not_complete_or_schema_valid"}
     for sample, result in enumerate(results):
         rows = [row for row in owner_rows if row.get("sample") == sample]
@@ -412,6 +425,11 @@ def verify_owned_native_group(task, results, owner_rows, traces, *, eos_ids, tok
                 raise ValueError("Delivered step/completion owner differs")
         for row in rows:
             if row.get("request_status") == "error":
+                if (row.get("error_type") == NativeHFRequestExpiredBeforeSubmission.__name__
+                        and (row.get("delivery") != "cancelled" or result.status != "infrastructure_error"
+                             or any(key in row for key in ("trace_id", "completion", "completion_ids",
+                                 "thought_logprobs", "native_hf_preflight", FAILURE_FIELD)))):
+                    raise ValueError("Unsubmitted expired request requires cancelled infrastructure outcome")
                 if result.status not in {"infrastructure_error", "context_budget_failure"}:
                     raise ValueError("Untraced native request error requires an unreliable episode")
                 preflight = row.get("native_hf_preflight")
@@ -500,6 +518,12 @@ def verify_owned_native_group(task, results, owner_rows, traces, *, eos_ids, tok
                     or trace.get("final_text") != row["text"] or trace.get("status") not in allowed):
                 raise ValueError("Native messages/schema/token/status trace binding differs")
             native_structured_schema_kind(row["json_schema"])
+            if trace["status"] == CANCELLED_BEFORE_JSON:
+                thought = trace["thought_ids"]
+                if (row["delivery"] != "cancelled" or result.status != "infrastructure_error"
+                        or not thought or thought[-1] != END_THINK or thought.count(END_THINK) != 1
+                        or set(thought).intersection(eos_ids) or trace["json_ids"] or row["text"]):
+                    raise ValueError("Cancelled-before-JSON trace must retain only its actual closed thought")
             if result.status == "completed" and trace["status"] != "completed":
                 raise ValueError("Completed episode contains failed native request")
             if trace["status"] == "completed":

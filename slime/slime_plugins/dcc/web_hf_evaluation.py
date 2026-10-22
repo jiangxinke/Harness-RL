@@ -131,14 +131,23 @@ class OwnedEvaluationPolicy:
         row = dict(task_id=self.task_id, shard_index=self.rank, turn=self.turn,
                    messages=deepcopy(messages), json_schema=deepcopy(json_schema))
         self.turn += 1
-        pending = asyncio.create_task(self.bound.generate_structured(messages, json_schema=json_schema, **kwargs))
+        factory = getattr(self.bound, "new_request_control", None)
+        control = factory() if callable(factory) else None
+        pending = asyncio.create_task(self.bound.generate_structured(messages, json_schema=json_schema, **kwargs,
+            **({"_request_control": control} if control is not None else {})))
         cancelled = False
         try:
-            try:
-                completion = await asyncio.shield(pending)
-            except asyncio.CancelledError:
-                cancelled = True
-                completion = await pending
+            while True:
+                try:
+                    completion = await asyncio.shield(pending)
+                    break
+                except asyncio.CancelledError:
+                    cancelled = True
+                    if control is not None:
+                        control.expire()
+                    if pending.done():
+                        completion = pending.result()
+                        break
         except ModelProtocolFailure as error:
             if error.trace_id != getattr(error.completion, "trace_id", None):
                 raise ValueError("Protocol failure and native completion trace IDs differ") from error
@@ -162,6 +171,9 @@ class OwnedEvaluationPolicy:
         return completion
 
     def _record(self, row, completion, *, cancelled):
+        from .hf_native_policy import CANCELLED_BEFORE_JSON
+        if completion.native_status == CANCELLED_BEFORE_JSON and not cancelled:
+            raise ValueError("A cancelled-before-JSON prefix requires cancelled delivery")
         trace_id = getattr(completion, "trace_id", None)
         if type(trace_id) is not str or not trace_id:
             raise ValueError("Actual native completion trace ID required")
@@ -215,6 +227,7 @@ def verify_native_ownership(tasks, predictions, owners, traces, *, rank, profile
     """
     from jsonschema import Draft202012Validator
     from .hf_native_policy import (END_THINK, PROTOCOL, WEB_THOUGHT_BUDGET_CLOSE_PROTOCOL,
+        CANCELLED_BEFORE_JSON, NativeHFRequestExpiredBeforeSubmission,
         _strict_json, web_thought_budget_close_configuration)
     from .hf_native_structured import _web_review_mode
     from .hf_policy import _chat_tokens
@@ -249,7 +262,7 @@ def verify_native_ownership(tasks, predictions, owners, traces, *, rank, profile
     if any(row.get("task_id") not in expected for row in owners):
         raise ValueError("Foreign native request owner")
     used = set()
-    allowed = {"completed", "thought_did_not_stop_on_real_close", "json_did_not_finish_with_real_eos",
+    allowed = {"completed", "thought_did_not_stop_on_real_close", CANCELLED_BEFORE_JSON, "json_did_not_finish_with_real_eos",
                "json_not_complete_or_schema_valid"}
     for task, result in zip(tasks, predictions, strict=True):
         public_task(task)
@@ -269,6 +282,15 @@ def verify_native_ownership(tasks, predictions, owners, traces, *, rank, profile
             if prompt_history_config is None and any(key in owner for key in HISTORY_FIELDS):
                 raise ValueError("Unexpected native Web history provenance")
             if owner.get("request_status") == "error":
+                if owner.get("error_type") == NativeHFRequestExpiredBeforeSubmission.__name__:
+                    if (owner.get("delivery") != "cancelled" or result["status"] != "infrastructure_error"
+                            or any(key in owner for key in (*HISTORY_FIELDS, "completion", "trace_id",
+                                "prompt_ids", "completion_ids", "thought_logprobs", "json_logprobs"))):
+                        raise ValueError("Unsubmitted expired request requires cancelled infrastructure outcome")
+                    # A queued request has not run the history preflight. Do not
+                    # invent its result by replaying a hypothetical submission.
+                    _web_review_mode(owner["json_schema"])
+                    continue
                 if result["status"] not in {"infrastructure_error", "context_budget_failure"}:
                     raise ValueError("Untraced request error requires a retained unreliable outcome")
                 if prompt_history_config is not None:
@@ -324,6 +346,12 @@ def verify_native_ownership(tasks, predictions, owners, traces, *, rank, profile
             # a grammar during score-only: actual generation already admitted
             # it through NativeHFPolicy before any model call.
             _web_review_mode(owner["json_schema"])
+            if trace["status"] == CANCELLED_BEFORE_JSON:
+                thought = ids[:count]
+                if (owner["delivery"] != "cancelled" or result["status"] != "infrastructure_error"
+                        or thought[-1] != END_THINK or thought.count(END_THINK) != 1
+                        or set(thought).intersection(eos_ids) or ids[count:] or completion["text"]):
+                    raise ValueError("Cancelled-before-JSON trace must retain only its actual closed thought")
             if trace["status"] == "completed":
                 thought, final = ids[:count], ids[count:]
                 if (thought[-1] != END_THINK or thought.count(END_THINK) != 1 or set(thought).intersection(eos_ids)

@@ -13,6 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 import inspect
 import json
+import threading
 import time
 import uuid
 
@@ -37,6 +38,41 @@ JOINT_PROTOCOL = "hf-native-two-stage-joint-masked-JSON-policy-v1"
 WEB_THOUGHT_BUDGET_CLOSE_PROTOCOL = "hf-native-web-thought-budget-close-evaluation-v1"
 OPEN_THINK, END_THINK = 151667, 151668
 NATIVE_SUFFIX = "<|im_start|>assistant\n<think>\n"
+CANCELLED_BEFORE_JSON = "request_cancelled_before_json"
+
+
+class NativeHFRequestExpiredBeforeSubmission(RuntimeError):
+    """A cancelled queued request has no model tokens or native trace."""
+
+
+class NativeHFRequestControl:
+    """Coordinate owner cancellation with queue submission and phase boundaries."""
+    def __init__(self):
+        self._expired = threading.Event()
+        self._lock = threading.Lock()
+        self.started = False
+
+    def expire(self):
+        with self._lock:
+            self._expired.set()
+
+    @property
+    def expired(self):
+        return self._expired.is_set()
+
+    def try_start(self):
+        # The worker calls this before to_thread, without yielding the eventloop.
+        with self._lock:
+            if self._expired.is_set():
+                return False
+            self.started = True
+            return True
+
+    def try_start_json(self):
+        # Cancellation and this boundary run on different threads. Once this
+        # check succeeds, that JSON phase belongs to the work that must drain.
+        with self._lock:
+            return not self._expired.is_set()
 
 
 def web_thought_budget_close_configuration(thought_tokens):
@@ -220,7 +256,13 @@ class NativeHFPolicy:
     async def __call__(self, *args, **kwargs):
         raise ValueError("HF native policy requires generate_structured and an explicit public schema")
 
-    async def generate_structured(self, messages, *, json_schema, max_new_tokens, temperature, _task_id=None):
+    def new_request_control(self):
+        return NativeHFRequestControl()
+
+    async def generate_structured(self, messages, *, json_schema, max_new_tokens, temperature, _task_id=None,
+                                  _request_control=None):
+        if _request_control is not None and not isinstance(_request_control, NativeHFRequestControl):
+            raise ValueError("An explicit native request control is required")
         kind = native_structured_schema_kind(json_schema)
         if self.joint_json_policy and kind != "cuad":
             raise ValueError("Joint JSON policy currently supports CUAD only")
@@ -231,7 +273,7 @@ class NativeHFPolicy:
         if self.worker is None:
             self.worker = asyncio.create_task(self._work())
         future = asyncio.get_running_loop().create_future()
-        await self.queue.put((messages, json_schema, _task_id, future))
+        await self.queue.put((messages, json_schema, _task_id, future, _request_control))
         return await future
 
     def bind_task(self, task_id, rank=0):
@@ -265,13 +307,25 @@ class NativeHFPolicy:
                 # An earlier schema group may run past a sibling deadline.
                 # Do not start GPU work for requests already cancelled while
                 # waiting; running work still follows the existing drain path.
-                group = [request for request in group if not request[3].done()]
+                active = []
+                for request in group:
+                    if request[3].done():
+                        continue
+                    control = request[4]
+                    if control is not None and not control.try_start():
+                        request[3].set_exception(NativeHFRequestExpiredBeforeSubmission(
+                            "Native request expired before model submission"))
+                    else:
+                        active.append(request)
+                group = active
                 if not group:
                     continue
                 try:
                     schemas = [item[1] for item in group] if self.mixed_schema_batching else group[0][1]
+                    controls = [item[4] for item in group]
                     values = await asyncio.to_thread(self._generate_batch,
-                        [item[0] for item in group], schemas, [item[2] for item in group])
+                        [item[0] for item in group], schemas, [item[2] for item in group],
+                        **({"request_controls": controls} if any(c is not None for c in controls) else {}))
                     for request, value in zip(group, values, strict=True):
                         if not request[3].done():
                             if isinstance(value, Exception):
@@ -341,7 +395,10 @@ class NativeHFPolicy:
         return rows
 
     @torch.inference_mode()
-    def _generate_batch(self, messages_batch, json_schema, task_ids=None):
+    def _generate_batch(self, messages_batch, json_schema, task_ids=None, *, request_controls=None):
+        if request_controls is not None and (len(request_controls) != len(messages_batch)
+                or any(c is not None and not isinstance(c, NativeHFRequestControl) for c in request_controls)):
+            raise ValueError("Every native request requires its own cancellation control")
         schemas = self._batch_schemas(json_schema, len(messages_batch))
         prompts, selected, results = [], [], [None] * len(messages_batch)
         history_metadata = []
@@ -409,7 +466,9 @@ class NativeHFPolicy:
             values = self._generate_encoded_batch(prompts, selected_schemas,
                 [task_ids[i] for i in selected] if task_ids is not None else None,
                 **({"history_metadata": history_metadata} if self.prompt_history_config.enabled
-                   or self.web_train_prompt_history_config.enabled else {}))
+                   or self.web_train_prompt_history_config.enabled else {}),
+                **({"request_controls": [request_controls[i] for i in selected]}
+                   if request_controls is not None else {}))
             for i, value in zip(selected, values, strict=True):
                 results[i] = value
         return results
@@ -431,7 +490,8 @@ class NativeHFPolicy:
                 raise ValueError("Joint JSON policy currently supports CUAD only")
         return schemas
 
-    def _generate_encoded_batch(self, prompts, json_schema, task_ids, *, history_metadata=None):
+    def _generate_encoded_batch(self, prompts, json_schema, task_ids, *, history_metadata=None,
+                                request_controls=None):
         from jsonschema import Draft202012Validator
         if history_metadata is not None and len(history_metadata) != len(prompts):
             raise ValueError("Every compacted native request requires its own history provenance")
@@ -443,6 +503,7 @@ class NativeHFPolicy:
         thought_logprobs = self._last_thought_logprobs
         valid = [i for i, tokens in enumerate(thoughts) if tokens and tokens[-1] == END_THINK
                  and tokens.count(END_THINK) == 1 and not set(tokens).intersection(self.eos_ids)]
+        cancelled_before_json = set()
         finals = [[] for _ in prompts]
         json_logprobs = [[] for _ in prompts] if self.joint_json_policy else None
         json_seconds = None
@@ -454,6 +515,18 @@ class NativeHFPolicy:
                     self.grammars[key] = compile_native_structured_schema(self.compiler, schemas[i],
                         web_bounded_whitespace=self.web_bounded_whitespace)
                 grammars.append(self.grammars[key])
+            if request_controls is not None:
+                selected = []
+                kept_grammars = []
+                for i, compiled in zip(valid, grammars, strict=True):
+                    control = request_controls[i]
+                    if control is not None and not control.try_start_json():
+                        cancelled_before_json.add(i)
+                    else:
+                        selected.append(i)
+                        kept_grammars.append(compiled)
+                valid, grammars = selected, kept_grammars
+        if valid:
             json_started = time.monotonic()
             # xgrammar owns a separate matcher per row. Never union schemas:
             # each answer keeps only its own columns, read URLs and citations.
@@ -468,7 +541,9 @@ class NativeHFPolicy:
         results = []
         for i, (prompt, thought, final) in enumerate(zip(prompts, thoughts, finals, strict=True)):
             reason, text = None, ""
-            if i not in valid:
+            if i in cancelled_before_json:
+                reason = CANCELLED_BEFORE_JSON
+            elif i not in valid:
                 reason = "thought_did_not_stop_on_real_close"
             elif not final or final[-1] not in self.eos_ids or set(final[:-1]).intersection(self.eos_ids):
                 reason = "json_did_not_finish_with_real_eos"
@@ -530,6 +605,9 @@ class _TaskPolicy:
 
     async def __call__(self, *args, **kwargs):
         return await self.parent(*args, **kwargs)
+
+    def new_request_control(self):
+        return self.parent.new_request_control()
 
     async def generate_structured(self, *args, **kwargs):
         return await self.parent.generate_structured(*args, _task_id=self.task_id, **kwargs)
