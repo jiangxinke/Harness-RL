@@ -19,6 +19,7 @@ import random
 
 from .data import Task
 from . import web_train_thought_budget_close as train_close
+from . import cuad_train_thought_budget_close as cuad_close
 from .durable_journal import OrderedDurableJSONLWriter, close_durable_journals
 from .episode import _WebEvidence, ModelProtocolFailure, WIDESEARCH_EVIDENCE_GUARD_VERSION
 from .native_hf_context import (NativeHFPromptBudgetExceeded, PREFLIGHT_PROTOCOL, context_handling_configuration,
@@ -409,6 +410,14 @@ def verify_owned_native_group(task, results, owner_rows, traces, *, eos_ids, tok
         raise ValueError("Web TRAIN history budgets require the explicit enabled configuration")
     if not eos_ids or END_THINK in eos_ids or len(results) < 2:
         raise ValueError("Exact native EOS IDs and complete group required")
+    # CUAD's independent joint TRAIN identity is never a Web owner field,
+    # including expired/unsubmitted/error rows and native preflight records.
+    for row in [*owner_rows, *traces]:
+        preflight = row.get("native_hf_preflight", {})
+        if (any(key in row for key in (cuad_close.FIELD, cuad_close.POSITIONS))
+                or (isinstance(preflight, dict) and any(key in preflight
+                    for key in (cuad_close.FIELD, cuad_close.POSITIONS)))):
+            raise ValueError("CUAD singleton policy cannot appear in Web owner/native metadata")
     index = {row["trace_id"]: row for row in traces}
     if len(index) != len(traces):
         raise ValueError("Duplicate native trace IDs")

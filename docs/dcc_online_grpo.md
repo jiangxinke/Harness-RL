@@ -395,3 +395,45 @@ This is a synchronization safeguard, not evidence of improved model quality
 or proof that every NCCL watchdog failure has the same cause.
 
 The optional [`--web-zip-member-fallback`](dcc_web_zip_member_fallback.md) skips whole ZIP text members only at character caps; it defaults off, retains all byte and archive validation limits, and must match across compared policies.
+
+`--cuad-train-thought-budget-close` is a separate, default-off CUAD TRAIN
+experiment requiring `--joint-json-policy` and token-GRPO. Before generated
+thought position `thought_tokens - 1`, sampling retains the raw T=1 softmax.
+At that position the generation processor restricts the support to the actual
+`</think>` token, inside the existing budget. Earlier natural closes keep their
+original probabilities. JSON retains the original grammar-masked stochastic
+sampling and its policy loss. Web training, greedy JSON, episode-GSPO and Web
+evaluation budget-close identities cannot be used with this option.
+
+Captured behavior scores come from the real processed sampling distribution.
+The controlled slot has probability one and contributes zero policy numerator
+and zero gradient; all sampled tokens remain in the decoder input. Current,
+diagnostic and frozen-base scorers use the same support. The denominator stays
+`group_size * max_steps * (thought_tokens + json_tokens)`, including the
+controlled slot. Optional JSON surrogate weighting still applies after
+clipping, and reference KL stays unweighted. The new completion subtype,
+protocol, policy profile and forced-position metadata must come from a fresh
+run; raw, Web or evaluation traces cannot be relabeled. Unsubmitted expired
+requests carry no completion or sampled-position metadata.
+
+This flag changes only TRAIN sampling. The CUAD evaluator keeps its original
+thought policy unless the independent, default-off `--cuad-thought-budget-close`
+is selected in `scripts/dcc_online_evaluate.py`. That EVAL option supports
+`--profile raw` (T=1, top-p=1, top-k=0) or the existing `thinking` profile and
+keeps JSON greedy, without behavior capture or a policy loss. It selects the
+real `</think>` token at the last existing thought slot; it adds no tokens.
+TRAIN and EVAL options have separate protocols and cannot substitute for each
+other. The evaluator's existing default remains `--profile thinking`.
+
+Enabled CUAD EVAL journals bind every actual request, retained step, cancelled
+native prefix and trace. Preflight failures remain unsubmitted and carry no
+completion or forced position. Generation verifies original request tokenization;
+score-only rechecks the closed ownership/provenance records without model
+weights. The option, profile, budgets and full evaluation comparison must match
+for base and adapter; failures remain in every original scoring denominator.
+
+Enabling TRAIN or EVAL budget closing does not prove benchmark improvement.
+Compare fresh control/on training with identical tasks, seed, budgets, reward,
+optimization and checkpoint selection; compare base and trained models under
+the same evaluation harness before claiming a training benefit. Choose and
+smoke-test evaluation settings using TRAIN tasks before held-out evaluation.

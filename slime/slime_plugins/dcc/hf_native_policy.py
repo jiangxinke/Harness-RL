@@ -27,7 +27,9 @@ from .hf_compute import compute_context, model_compute_profile
 from .native_hf_context import NativeHFPromptBudgetExceeded
 from .native_behavior_logprobs import (BEHAVIOR_LOGPROB_SOURCE, StreamingRawThoughtLogprobs,
     RowSelectiveThoughtBudgetClose, StreamingBudgetClosedThoughtLogprobs)
+from . import cuad_eval_thought_budget_close as cuad_eval_close
 from . import web_train_thought_budget_close as train_close
+from . import cuad_train_thought_budget_close as cuad_close
 from .prompt_history import PromptHistoryConfig, PromptHistoryBudgetExceeded
 from .web_hf_prompt_history import (native_web_history_configuration, native_web_history_fields,
     native_web_history_plan)
@@ -113,6 +115,14 @@ class NativeHFCompletion(PolicyCompletion):
 
 
 @dataclass(slots=True)
+class CuadEvalBudgetClosedNativeHFCompletion(NativeHFCompletion):
+    """Only the independent CUAD EVAL policy carries these fields."""
+    cuad_thought_budget_close: dict | None = None
+    forced_thought_positions: list[int] | None = None
+    json_stop_ids: list[int] | None = None
+
+
+@dataclass(slots=True)
 class BudgetClosedNativeHFCompletion(NativeHFCompletion):
     """Only new Web TRAIN completions serialize the controlled-policy fields."""
     web_train_thought_budget_close: dict | None = None
@@ -126,6 +136,13 @@ class JointNativeHFCompletion(NativeHFCompletion):
     json_logprobs_source: str | None = None
     json_public_schema: dict | None = None
     json_stop_ids: list[int] | None = None
+
+
+@dataclass(slots=True)
+class CuadBudgetClosedJointNativeHFCompletion(JointNativeHFCompletion):
+    """Only newly captured CUAD singleton joint completions add these fields."""
+    cuad_train_thought_budget_close: dict | None = None
+    cuad_forced_thought_positions: list[int] | None = None
 
 
 def _strict_json(text):
@@ -149,6 +166,8 @@ class NativeHFPolicy:
     joint_json_policy = False
     web_thought_budget_close = False
     web_train_thought_budget_close = False
+    cuad_train_thought_budget_close = False
+    cuad_thought_budget_close = False
     prompt_history_config = PromptHistoryConfig()
     web_train_prompt_history_config = PromptHistoryConfig()
     protocol = PROTOCOL
@@ -169,7 +188,8 @@ class NativeHFPolicy:
                  web_bounded_whitespace=False, capture_thought_logprobs=False,
                  mixed_schema_batching=False, joint_json_policy=False, web_thought_budget_close=False,
                  prompt_history_config=None, web_train_prompt_history_config=None,
-                 web_train_thought_budget_close=False):
+                 web_train_thought_budget_close=False, cuad_train_thought_budget_close=False,
+                 cuad_thought_budget_close=False):
         from transformers import GenerationConfig
         import xgrammar as xgr
 
@@ -206,6 +226,20 @@ class NativeHFPolicy:
                 (not capture_thought_logprobs or sampling_profile != "raw" or joint_json_policy
                  or web_thought_budget_close or allow_truncation or self.prompt_history_config.enabled)):
             raise ValueError("Web TRAIN thought budget close requires captured raw thoughts and unchanged greedy JSON")
+        if type(cuad_train_thought_budget_close) is not bool or (cuad_train_thought_budget_close and
+                (not joint_json_policy or not capture_thought_logprobs or sampling_profile != "raw"
+                 or web_train_thought_budget_close or web_thought_budget_close or allow_truncation
+                 or self.prompt_history_config.enabled or self.web_train_prompt_history_config.enabled)):
+            raise ValueError("CUAD TRAIN thought budget close requires captured raw thoughts and joint stochastic JSON only")
+        if type(cuad_thought_budget_close) is not bool or (cuad_thought_budget_close and
+                (sampling_profile not in {"raw", "thinking"} or capture_thought_logprobs
+                 or joint_json_policy or web_thought_budget_close or web_train_thought_budget_close
+                 or cuad_train_thought_budget_close or web_bounded_whitespace or allow_truncation
+                 or mixed_schema_batching or self.prompt_history_config.enabled
+                 or self.web_train_prompt_history_config.enabled)):
+            raise ValueError("CUAD thought budget closing is evaluation-only; raw/thinking thoughts, greedy JSON and no capture, TRAIN, Web, history or truncation are required")
+        self.cuad_thought_budget_close = cuad_thought_budget_close
+        self.cuad_train_thought_budget_close = cuad_train_thought_budget_close
         self.web_train_thought_budget_close = web_train_thought_budget_close
         self.joint_json_policy = joint_json_policy
         self.web_thought_budget_close = web_thought_budget_close
@@ -255,6 +289,19 @@ class NativeHFPolicy:
                 policy_gradient="sampled-raw-thought-and-grammar-normalized-JSON",
                 failure_policy="retain-actual-sampled-thought-and-JSON-IDs-with-reward-zero; no-forced-close-or-retry",
                 supported_benchmark="cuad")
+        if cuad_thought_budget_close:
+            self.protocol = cuad_eval_close.PROTOCOL
+            self.provenance.update(protocol=self.protocol,
+                **{cuad_eval_close.FIELD: cuad_eval_close.configuration(thought_tokens)},
+                policy_gradient="disabled-evaluation-only", supported_benchmark="cuad",
+                failure_policy="retain-original-outcomes; CUAD-last-in-budget-singleton-close; no-appended-token-or-retry")
+        if cuad_train_thought_budget_close:
+            self.protocol = cuad_close.PROTOCOL
+            self.provenance.update(protocol=self.protocol,
+                **{cuad_close.FIELD: cuad_close.configuration(thought_tokens)},
+                thought_logprobs_source=cuad_close.SOURCE,
+                policy_gradient="CUAD-raw-thought-prefix-and-masked-stochastic-JSON; singleton-thought-slot-mask-zero",
+                failure_policy="retain-actual-outcomes; CUAD-last-in-budget-singleton-close; no-appended-token-or-retry")
         if web_thought_budget_close:
             self.protocol = WEB_THOUGHT_BUDGET_CLOSE_PROTOCOL
             self.provenance.update(protocol=self.protocol,
@@ -289,6 +336,8 @@ class NativeHFPolicy:
         kind = native_structured_schema_kind(json_schema)
         if self.joint_json_policy and kind != "cuad":
             raise ValueError("Joint JSON policy currently supports CUAD only")
+        if self.cuad_thought_budget_close and kind != "cuad":
+            raise ValueError("CUAD thought budget closing supports exact CUAD evaluation schemas only")
         if max_new_tokens != self.thought_tokens + self.json_tokens:
             raise ValueError("Runner must reserve exactly the two explicit phase budgets")
         if self.sampling_profile == "raw" and temperature != 1.0:
@@ -362,7 +411,8 @@ class NativeHFPolicy:
             if stop:
                 return
 
-    def _phase(self, prompts, *, phase, grammar=None, train_budget_close_rows=None):
+    def _phase(self, prompts, *, phase, grammar=None, train_budget_close_rows=None,
+               cuad_train_budget_close_rows=None):
         from xgrammar.contrib.hf import LogitsProcessor
         from transformers import LogitsProcessorList
 
@@ -386,7 +436,7 @@ class NativeHFPolicy:
             output_attentions=False, output_hidden_states=False, output_scores=False,
             disable_compile=False,
             use_cache=True, return_dict_in_generate=False)
-        if phase == "thought" and self.web_thought_budget_close:
+        if phase == "thought" and (self.web_thought_budget_close or self.cuad_thought_budget_close):
             # HF masks the last in-budget sampling position to this singleton.
             # generate selects and returns the real token; nothing is appended.
             config.forced_eos_token_id = END_THINK
@@ -398,6 +448,15 @@ class NativeHFPolicy:
                 raise ValueError("Row-selective singleton close requires its Web TRAIN thought policy")
             if any(train_budget_close_rows):
                 intervention = RowSelectiveThoughtBudgetClose(train_budget_close_rows, prompt_width=width,
+                    thought_tokens=self.thought_tokens, close_id=END_THINK)
+                tracker = StreamingBudgetClosedThoughtLogprobs(intervention)
+        if cuad_train_budget_close_rows is not None:
+            if (train_budget_close_rows is not None or phase != "thought" or not raw
+                    or not self.capture_thought_logprobs or not self.cuad_train_thought_budget_close
+                    or not self.joint_json_policy or len(cuad_train_budget_close_rows) != len(prompts)):
+                raise ValueError("CUAD singleton rows require their independent joint TRAIN thought policy")
+            if any(cuad_train_budget_close_rows):
+                intervention = RowSelectiveThoughtBudgetClose(cuad_train_budget_close_rows, prompt_width=width,
                     thought_tokens=self.thought_tokens, close_id=END_THINK)
                 tracker = StreamingBudgetClosedThoughtLogprobs(intervention)
         processors = [LogitsProcessor(grammar)] if grammar is not None else []
@@ -482,12 +541,17 @@ class NativeHFPolicy:
                     task_id=task_ids[i] if task_ids is not None else None,
                     thought_tokens=self.thought_tokens, json_tokens=self.json_tokens,
                     sampling_profile=self.sampling_profile,
-                    behavior_source=(train_close.SOURCE if self.web_train_thought_budget_close
+                    behavior_source=(cuad_close.SOURCE if self.cuad_train_thought_budget_close
+                        and native_structured_schema_kind(schemas[i]) == "cuad"
+                        else train_close.SOURCE if self.web_train_thought_budget_close
                         and native_structured_schema_kind(schemas[i]) in {"web", "web-review"}
                         else BEHAVIOR_LOGPROB_SOURCE if self.capture_thought_logprobs else None),
                     **({train_close.FIELD: train_close.configuration(self.thought_tokens)}
                         if self.web_train_thought_budget_close
-                        and native_structured_schema_kind(schemas[i]) in {"web", "web-review"} else {}))
+                        and native_structured_schema_kind(schemas[i]) in {"web", "web-review"} else {}),
+                    **({cuad_close.FIELD: cuad_close.configuration(self.thought_tokens)}
+                        if self.cuad_train_thought_budget_close
+                        and native_structured_schema_kind(schemas[i]) == "cuad" else {}))
                 if history_failure is not None:
                     setattr(failure, FAILURE_FIELD, history_failure)
                 # This additional diagnostic belongs only to raw TRAIN capture.
@@ -528,6 +592,8 @@ class NativeHFPolicy:
             kind = native_structured_schema_kind(schema)
             if self.prompt_history_config.enabled and kind not in {"web", "web-review"}:
                 raise ValueError("Native HF whole-turn history supports exact Web evaluation schemas only")
+            if self.cuad_thought_budget_close and kind != "cuad":
+                raise ValueError("CUAD thought budget closing supports exact CUAD evaluation schemas only")
             if self.web_thought_budget_close and kind not in {"web", "web-review"}:
                 raise ValueError("Web thought budget closing supports exact Web evaluation schemas only")
             if self.joint_json_policy and kind != "cuad":
@@ -544,9 +610,12 @@ class NativeHFPolicy:
         thought_started = time.monotonic()
         train_close_rows = [self.web_train_thought_budget_close
             and native_structured_schema_kind(schema) in {"web", "web-review"} for schema in schemas]
+        cuad_close_rows = [self.cuad_train_thought_budget_close
+            and native_structured_schema_kind(schema) == "cuad" for schema in schemas]
         thoughts = self._phase(prompts, phase="thought",
-            **({"train_budget_close_rows": train_close_rows} if any(train_close_rows) else {}))
-        forced_positions = self._last_thought_forced_positions if any(train_close_rows) else None
+            **({"train_budget_close_rows": train_close_rows} if any(train_close_rows) else {}),
+            **({"cuad_train_budget_close_rows": cuad_close_rows} if any(cuad_close_rows) else {}))
+        forced_positions = self._last_thought_forced_positions if any(train_close_rows) or any(cuad_close_rows) else None
         thought_seconds = time.monotonic() - thought_started
         thought_logprobs = self._last_thought_logprobs
         valid = [i for i, tokens in enumerate(thoughts) if tokens and tokens[-1] == END_THINK
@@ -615,12 +684,25 @@ class NativeHFPolicy:
                          train_close.POSITIONS: forced_positions[i]}
                 train_close.validate_fields(extra[train_close.FIELD], extra[train_close.POSITIONS],
                     thought, thought_logprobs[i], thought_tokens=self.thought_tokens)
+            if self.cuad_thought_budget_close:
+                completion_type = CuadEvalBudgetClosedNativeHFCompletion
+                extra = {cuad_eval_close.FIELD: cuad_eval_close.configuration(self.thought_tokens),
+                    cuad_eval_close.POSITIONS: [self.thought_tokens - 1]
+                        if len(thought) == self.thought_tokens else [],
+                    "json_stop_ids": list(self.eos_ids)}
+                cuad_eval_close.validate_fields(extra[cuad_eval_close.FIELD], extra[cuad_eval_close.POSITIONS],
+                    thought, thought_tokens=self.thought_tokens)
             if self.joint_json_policy:
                 from .native_joint_grpo import JSON_BEHAVIOR_SOURCE
                 completion_type = JointNativeHFCompletion
                 extra = dict(json_logprobs=json_logprobs[i],
                     json_logprobs_source=JSON_BEHAVIOR_SOURCE if final else None,
                     json_public_schema=deepcopy(schemas[i]), json_stop_ids=list(self.eos_ids))
+            if cuad_close_rows[i]:
+                completion_type = CuadBudgetClosedJointNativeHFCompletion
+                row_protocol, behavior_source = cuad_close.PROTOCOL, cuad_close.SOURCE
+                extra.update(cuad_close.validate_fields(cuad_close.configuration(self.thought_tokens),
+                    forced_positions[i], thought, thought_logprobs[i], thought_tokens=self.thought_tokens))
             completion = completion_type(text=text, prompt_ids=list(prompt), completion_ids=thought + final,
                 finish_reason="stop" if observed and observed[-1] in terminal_ids else "length",
                 thought_token_count=len(thought), phase_lengths=(len(thought), len(final)), native_status=status,
@@ -641,6 +723,11 @@ class NativeHFPolicy:
                     "json_public_schema": schemas[i]}
                 if train_close_rows[i]:
                     trace.update(deepcopy(extra))
+                if cuad_close_rows[i]:
+                    trace.update({cuad_close.FIELD: deepcopy(extra[cuad_close.FIELD]),
+                                  cuad_close.POSITIONS: list(extra[cuad_close.POSITIONS])})
+                if self.cuad_thought_budget_close:
+                    trace.update(deepcopy(extra), json_sampling_profile=cuad_eval_close.JSON_SAMPLING)
                 if self.web_thought_budget_close:
                     trace.update(web_thought_budget_close=web_thought_budget_close_configuration(self.thought_tokens),
                         forced_thought_positions=([self.thought_tokens - 1]

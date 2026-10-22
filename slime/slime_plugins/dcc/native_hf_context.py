@@ -14,6 +14,7 @@ import uuid
 
 from .prompt_history import PromptHistoryBudgetExceeded
 from . import web_train_thought_budget_close as train_close
+from . import cuad_train_thought_budget_close as cuad_close
 
 CONTEXT_HANDLING = "hf-native-context-sampled-prefix-v2"
 PREFLIGHT_PROTOCOL = "hf-native-request-preflight-v1"
@@ -37,7 +38,8 @@ class _VerifiedPreflight(dict):
 class NativeHFPromptBudgetExceeded(PromptHistoryBudgetExceeded):
     """Raised by the actual full-request HF preflight, before generation."""
     def __init__(self, prompt_ids, *, limit, task_id, thought_tokens, json_tokens,
-                 sampling_profile, behavior_source, web_train_thought_budget_close=None):
+                 sampling_profile, behavior_source, web_train_thought_budget_close=None,
+                 cuad_train_thought_budget_close=None):
         super().__init__(REASON, diagnostics={"original_prompt_tokens": len(prompt_ids),
             "minimum_prompt_tokens": len(prompt_ids), "effective_prompt_limit": limit},
             original_prompt_ids=prompt_ids)
@@ -48,7 +50,9 @@ class NativeHFPromptBudgetExceeded(PromptHistoryBudgetExceeded):
             json_tokens=json_tokens, thought_sampling_profile=sampling_profile,
             thought_logprobs_source=behavior_source,
             **({train_close.FIELD: deepcopy(web_train_thought_budget_close)}
-               if web_train_thought_budget_close is not None else {})))
+               if web_train_thought_budget_close is not None else {}),
+            **({cuad_close.FIELD: deepcopy(cuad_train_thought_budget_close)}
+               if cuad_train_thought_budget_close is not None else {})))
 
 
 def context_handling_configuration():
@@ -56,6 +60,16 @@ def context_handling_configuration():
         verified_post_sampling_overflow="retain-actual-thought-prefix-with-zero-reward",
         unverified_context="discard-whole-group", infrastructure="discard-whole-group",
         preflight_protocol=PREFLIGHT_PROTOCOL, serialized_proof="verify-native-journals-and-request-tokens")
+
+
+def thought_policy_fields(step, *, thought_tokens):
+    """Dispatch independent newly captured policies; old raw steps stay raw."""
+    if (getattr(step, train_close.FIELD, None) is not None
+            and getattr(step, cuad_close.FIELD, None) is not None):
+        raise ValueError("A completion cannot claim both Web and CUAD singleton policies")
+    web_fields = train_close.step_fields(step, thought_tokens=thought_tokens)
+    cuad_fields = cuad_close.step_fields(step, thought_tokens=thought_tokens)
+    return web_fields or cuad_fields
 
 
 def validated_thought_step(step, *, thought_tokens):
@@ -69,18 +83,26 @@ def validated_thought_step(step, *, thought_tokens):
     if any(type(token) is not int or token < 0 for token in thought + step.prompt_ids):
         raise ValueError("Actual nonnegative integer token IDs required")
     behavior = getattr(step, "thought_logprobs", None)
+    fields = thought_policy_fields(step, thought_tokens=thought_tokens)
+    expected_source = (cuad_close.SOURCE if cuad_close.FIELD in fields else train_close.SOURCE
+                       if train_close.FIELD in fields else BEHAVIOR_LOGPROB_SOURCE)
     if (not isinstance(behavior, list) or len(behavior) != count
-            or getattr(step, "thought_logprobs_source", None) != (train_close.SOURCE
-                if getattr(step, train_close.FIELD, None) is not None else BEHAVIOR_LOGPROB_SOURCE)
+            or getattr(step, "thought_logprobs_source", None) != expected_source
             or any(type(value) not in (int, float) or not math.isfinite(value)
                    or value > 1e-6 for value in behavior)):
         raise ValueError("Finite aligned actual sampled thought behavior logprobs required")
-    train_close.step_fields(step, thought_tokens=thought_tokens)
     return list(step.prompt_ids), thought, list(behavior)
 
 
 def _preflight_behavior_source(record):
     from .native_behavior_logprobs import BEHAVIOR_LOGPROB_SOURCE
+    if any(key in record for key in (train_close.POSITIONS, cuad_close.POSITIONS)):
+        raise ValueError("Unsubmitted preflight cannot carry sampled singleton positions")
+    if train_close.FIELD in record and cuad_close.FIELD in record:
+        raise ValueError("A preflight cannot claim both Web and CUAD singleton policies")
+    if cuad_close.FIELD in record:
+        cuad_close.validate_configuration(record[cuad_close.FIELD], thought_tokens=record.get("thought_tokens"))
+        return cuad_close.SOURCE
     profile = record.get(train_close.FIELD)
     if profile is not None:
         train_close.validate_configuration(profile, thought_tokens=record.get("thought_tokens"))
@@ -136,8 +158,8 @@ def retains_sampled_context_prefix(result):
     used = {record["trace_id"]}
     for step in result.steps:
         prompt, thought, _ = validated_thought_step(step, thought_tokens=record["thought_tokens"])
-        fields = train_close.step_fields(step, thought_tokens=record["thought_tokens"])
-        if fields.get(train_close.FIELD) != record.get(train_close.FIELD):
+        fields = thought_policy_fields(step, thought_tokens=record["thought_tokens"])
+        if any(fields.get(key) != record.get(key) for key in (train_close.FIELD, cuad_close.FIELD)):
             raise ValueError("Sampled context prefix and failed request thought policies differ")
         trace_id = getattr(step, "trace_id", None)
         phases = getattr(step, "phase_lengths", None)
@@ -188,11 +210,12 @@ def restore_verified_native_context(result, *, traces, tokenizer):
         row = index.get(getattr(step, "trace_id", None), {})
         from .hf_native_policy import JOINT_PROTOCOL, JointNativeHFCompletion
         joint = isinstance(step, JointNativeHFCompletion)
-        fields = train_close.step_fields(step, thought_tokens=record["thought_tokens"])
-        expected_protocol = train_close.PROTOCOL if fields else JOINT_PROTOCOL if joint else HF_PROTOCOL
+        fields = thought_policy_fields(step, thought_tokens=record["thought_tokens"])
+        owner_policy = cuad_close if cuad_close.FIELD in fields else train_close
+        expected_protocol = owner_policy.PROTOCOL if fields else JOINT_PROTOCOL if joint else HF_PROTOCOL
         if fields:
-            trace_fields = train_close.validate_fields(row.get(train_close.FIELD),
-                row.get(train_close.POSITIONS), row.get("thought_ids"), row.get("thought_logprobs"),
+            trace_fields = owner_policy.validate_fields(row.get(owner_policy.FIELD),
+                row.get(owner_policy.POSITIONS), row.get("thought_ids"), row.get("thought_logprobs"),
                 thought_tokens=record["thought_tokens"])
             if trace_fields != fields:
                 raise ValueError("Retained singleton policy differs from its actual native journal")
@@ -207,7 +230,8 @@ def restore_verified_native_context(result, *, traces, tokenizer):
                 or row.get("status") != step.native_status or row.get("final_text") != step.text):
             raise ValueError("Retained sampled step differs from actual native generation journal")
         if ({key: row.get(key) for key in fields} != fields
-                or (not fields and any(key in row for key in (train_close.FIELD, train_close.POSITIONS)))):
+                or any(key in row and key not in fields for key in
+                    (train_close.FIELD, train_close.POSITIONS, cuad_close.FIELD, cuad_close.POSITIONS))):
             raise ValueError("Retained singleton policy differs from its actual native journal")
         if joint and (row.get("json_logprobs") != step.json_logprobs
                 or row.get("json_logprobs_source") != step.json_logprobs_source

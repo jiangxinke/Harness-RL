@@ -232,6 +232,14 @@ def verify_native_ownership(tasks, predictions, owners, traces, *, rank, profile
     from .hf_native_structured import _web_review_mode
     from .hf_policy import _chat_tokens
 
+    from . import cuad_train_thought_budget_close as cuad_close
+    for row in [*owners, *traces]:
+        completion = row.get("completion", {})
+        if (any(key in row for key in (cuad_close.FIELD, cuad_close.POSITIONS))
+                or (isinstance(completion, dict) and any(key in completion
+                    for key in (cuad_close.FIELD, cuad_close.POSITIONS)))):
+            raise ValueError("CUAD singleton TRAIN identity cannot appear in Web evaluation ownership")
+
     if prompt_history_config is not None:
         native_web_history_configuration(prompt_history_config)
         if (tokenizer is None or not isinstance(history_budgets, dict)

@@ -13,6 +13,7 @@ import math
 import torch
 
 from . import web_train_thought_budget_close as train_close
+from . import cuad_train_thought_budget_close as cuad_close
 from .native_hf_context import (unreliable_context_or_environment_group,
                                 validated_thought_step)
 
@@ -30,6 +31,13 @@ class ThoughtSegment:
 
 
 @dataclass(frozen=True)
+class CuadBudgetClosedThoughtSegment(ThoughtSegment):
+    """Transient shared-group segment; joint_group_signal retains this identity."""
+    cuad_train_thought_budget_close: dict | None = None
+    cuad_forced_thought_positions: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
 class GroupSignal:
     segments: list[list[ThoughtSegment]]
     advantages: list[float]
@@ -39,7 +47,8 @@ class GroupSignal:
     advantage_normalization: str = "std"
 
 
-def group_signal(results, *, group_size, max_steps, thought_tokens, advantage_normalization="std"):
+def group_signal(results, *, group_size, max_steps, thought_tokens, advantage_normalization="std",
+                 _joint_cuad_policy=False):
     """Keep model failures in the group, reject unreliable environment groups.
 
     Do not use EpisodeResult.trainable_steps: evaluation protocol failures are
@@ -80,6 +89,14 @@ def group_signal(results, *, group_size, max_steps, thought_tokens, advantage_no
                 fields = train_close.step_fields(step, thought_tokens=thought_tokens)
                 if fields and result.benchmark != "widesearch":
                     raise ValueError("Singleton thought control supports newly owned Web TRAIN only")
+                cuad_fields = cuad_close.step_fields(step, thought_tokens=thought_tokens)
+                if cuad_fields:
+                    if not _joint_cuad_policy or result.benchmark != "cuad":
+                        raise ValueError("CUAD singleton thought control requires joint JSON group construction")
+                    segments.append(CuadBudgetClosedThoughtSegment(prompt, thought, behavior,
+                        **{cuad_close.FIELD: cuad_fields[cuad_close.FIELD],
+                           cuad_close.POSITIONS: tuple(cuad_fields[cuad_close.POSITIONS])}))
+                    continue
                 segments.append(ThoughtSegment(prompt, thought, behavior,
                     **({train_close.FIELD: fields[train_close.FIELD],
                         train_close.POSITIONS: tuple(fields[train_close.POSITIONS])} if fields else {})))

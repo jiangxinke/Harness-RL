@@ -13,6 +13,7 @@ import torch
 
 from .native_behavior_logprobs import StreamingRawThoughtLogprobs
 from .native_hf_context import validated_thought_step
+from . import cuad_train_thought_budget_close as cuad_close
 
 ALGORITHM = "online-native-HF-joint-thought-masked-JSON-GRPO-v1"
 JSON_BEHAVIOR_SOURCE = "streaming-generation-post-xgrammar-multinomial-T1-v1"
@@ -37,7 +38,7 @@ def json_surrogate_configuration(weight):
 
 def weighted_joint_policy_loss(current, old, advantage, *, thought_count, group_size,
                                max_steps, thought_tokens, json_tokens, json_surrogate_weight,
-                               clip=0.2):
+                               clip=0.2, policy_mask=None):
     """Weight JSON surrogates after token clipping; retain the fixed two-phase budget.
 
     Actual phase boundaries include their real stop tokens. Empty or truncated
@@ -60,6 +61,10 @@ def weighted_joint_policy_loss(current, old, advantage, *, thought_count, group_
     surrogate = torch.minimum(ratio * advantage, ratio.clamp(1 - clip, 1 + clip) * advantage)
     weights = torch.ones_like(surrogate)
     weights[thought_count:] = json_surrogate_weight
+    if policy_mask is not None:
+        if policy_mask.shape != current.shape or policy_mask.dtype != torch.bool or policy_mask.device != current.device:
+            raise ValueError("Aligned boolean deterministic-slot joint policy mask required")
+        surrogate = surrogate.masked_fill(~policy_mask, 0)
     loss = -(surrogate * weights).sum() / (group_size * max_steps * (thought_tokens + json_tokens))
     if not torch.isfinite(loss):
         raise FloatingPointError("Finite weighted joint policy loss required")
@@ -90,6 +95,12 @@ class JointSegment:
         return self.thought_logprobs + self.json_logprobs
 
 
+@dataclass(frozen=True)
+class CuadBudgetClosedJointSegment(JointSegment):
+    cuad_train_thought_budget_close: dict | None = None
+    cuad_forced_thought_positions: tuple[int, ...] = ()
+
+
 def joint_group_signal(results, *, group_size, max_steps, thought_tokens, json_tokens,
                        eos_ids, advantage_normalization="std"):
     from .hf_native_policy import END_THINK, JointNativeHFCompletion
@@ -99,7 +110,7 @@ def joint_group_signal(results, *, group_size, max_steps, thought_tokens, json_t
     if type(json_tokens) is not int or json_tokens < 1 or any(r.benchmark != "cuad" for r in results):
         raise ValueError("Joint JSON policy requires positive JSON budget and CUAD-only episodes")
     signal = group_signal(results, group_size=group_size, max_steps=max_steps,
-        thought_tokens=thought_tokens, advantage_normalization=advantage_normalization)
+        thought_tokens=thought_tokens, advantage_normalization=advantage_normalization, _joint_cuad_policy=True)
     if signal.discarded_reason is not None:
         return signal
     groups = []
@@ -126,8 +137,12 @@ def joint_group_signal(results, *, group_size, max_steps, thought_tokens, json_t
             if step.native_status == "completed" and (not final or final[-1] not in eos_ids):
                 raise ValueError("Successful JSON must retain its actual EOS")
             if thought:
-                segments.append(JointSegment(prompt, thought + final, behavior, list(values),
-                    len(thought), step.json_public_schema, list(step.json_stop_ids)))
+                fields = cuad_close.step_fields(step, thought_tokens=thought_tokens)
+                segment_type = CuadBudgetClosedJointSegment if fields else JointSegment
+                segments.append(segment_type(prompt, thought + final, behavior, list(values),
+                    len(thought), step.json_public_schema, list(step.json_stop_ids),
+                    **({cuad_close.FIELD: fields[cuad_close.FIELD],
+                        cuad_close.POSITIONS: tuple(fields[cuad_close.POSITIONS])} if fields else {})))
         groups.append(segments)
     return replace(signal, segments=groups)
 
@@ -191,6 +206,11 @@ def segment_scorer(segment, compiler, *, backend, head_chunk_tokens=None):
     from .hf_chunked_logprobs import completion_logprobs_chunked
     from .hf_compute import compute_context
 
+    profile = getattr(segment, cuad_close.FIELD, None)
+    if profile is not None:
+        cuad_close.segment_fields(segment, thought_tokens=profile.get("thought_tokens"))
+    elif isinstance(segment, CuadBudgetClosedJointSegment) or getattr(segment, cuad_close.POSITIONS, None) is not None:
+        raise ValueError("CUAD singleton joint scorer requires complete captured policy identity")
     count = segment.thought_count
     bitmasks = json_prefix_bitmasks(compiler, segment.json_public_schema,
         segment.completion_ids[count:], eos_ids=segment.json_stop_ids)
@@ -214,4 +234,4 @@ def segment_scorer(segment, compiler, *, backend, head_chunk_tokens=None):
         if length == count:
             return raw
         return torch.cat((raw, grammar_token_logprobs(logits[count:], labels[count:], bitmasks)))
-    return score
+    return cuad_close.scorer_for(segment, score) if profile is not None else score

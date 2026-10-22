@@ -34,6 +34,8 @@ from slime_plugins.dcc.web_auto_read import auto_read_follow_docs_configuration
 from slime_plugins.dcc.durable_journal import OrderedDurableJSONLWriter, close_durable_journals
 from slime_plugins.dcc.evaluation import evaluate_results
 from slime_plugins.dcc.hf_native_policy import NativeHFPolicy, PROTOCOL
+from slime_plugins.dcc import cuad_eval_thought_budget_close as cuad_eval_close
+from slime_plugins.dcc import cuad_train_thought_budget_close as cuad_train_close
 from slime_plugins.dcc.hf_policy import load_policy_model
 from slime_plugins.dcc.hf_compute import (COMPUTE_PROFILES, adapter_compute_profile,
     compute_profile_configuration, precision_observation, validate_compute_profile, validate_model_compute_profile)
@@ -56,6 +58,10 @@ SCORE_FIELDS = {"f1", "precision", "recall", "no_answer_correct", "tp", "fp", "f
 def write_json(path, value):
     with path.open("x", encoding="utf-8") as stream:
         stream.write(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
+
+
+def canonical_receipt(value):
+    return json.dumps(value, sort_keys=True, allow_nan=False, separators=(",", ":"))
 
 
 def read_jsonl(path):
@@ -101,7 +107,30 @@ def adapter_condition(adapter):
         checkpoint_complete=checkpoint.get("complete") is True,
         checkpoint_optimizer_steps=checkpoint.get("optimizer_steps"))
     updates, iterations = training["optimizer_updates"], training["rollout_iterations"]
-    recorded = (training["algorithm"] in ONLINE_ALGORITHMS
+    admitted_algorithm = training["algorithm"] in ONLINE_ALGORITHMS
+    # A fresh CUAD singleton TRAIN adapter needs its own exact identity; an
+    # EVAL option or a suffix match cannot establish on-policy training.
+    cuad_algorithms = tuple(value + "+" + cuad_train_close.VARIANT for value in (
+        JOINT_ALGORITHM, JOINT_ALGORITHM + "+frozen-base-reference-k3-nonzero-advantage-joint-v1",
+        JOINT_ALGORITHM + "+" + JSON_SURROGATE_VARIANT,
+        JOINT_ALGORITHM + "+frozen-base-reference-k3-nonzero-advantage-joint-v1+" + JSON_SURROGATE_VARIANT))
+    if training["algorithm"] in cuad_algorithms:
+        try:
+            arguments = config.get("arguments", {})
+            profile = cuad_train_close.validate_configuration(config.get(cuad_train_close.FIELD),
+                thought_tokens=arguments.get("thought_tokens"))
+            behavior = config.get("behavior_policy", {})
+            admitted_algorithm = (arguments.get(cuad_train_close.FIELD) is True
+                and arguments.get("joint_json_policy") is True
+                and arguments.get("enable_online_web", False) is False
+                and arguments.get("policy_surrogate", "token-grpo") == "token-grpo"
+                and config.get("native_policy_protocol") == cuad_train_close.PROTOCOL
+                and config.get("json_policy_loss") is True
+                and behavior.get("thought") == profile
+                and behavior.get("old_logprob_source", {}).get("thought") == cuad_train_close.SOURCE)
+        except (ValueError, TypeError, AttributeError):
+            admitted_algorithm = False
+    recorded = (admitted_algorithm
         and isinstance(training["training_source_commit"], str)
         and re.fullmatch(r"[0-9a-f]{40}", training["training_source_commit"]) is not None
         and type(updates) is int and updates > 0 and type(iterations) is int and iterations > 0
@@ -115,8 +144,12 @@ def adapter_condition(adapter):
 
 def manifest(args, tasks):
     compute = validate_compute_profile(getattr(args, "compute_profile", "legacy"), adapter=args.adapter)
-    profile = {"thinking": dict(do_sample=True, temperature=0.6, top_p=0.95, top_k=20),
+    profile = {"raw": dict(do_sample=True, temperature=1.0, top_p=1.0, top_k=0),
+               "thinking": dict(do_sample=True, temperature=0.6, top_p=0.95, top_k=20),
                "greedy": dict(do_sample=False, temperature=1.0, top_p=1.0, top_k=0)}[args.profile]
+    budget_close = getattr(args, cuad_eval_close.FIELD, False)
+    if type(budget_close) is not bool or budget_close and args.profile not in {"raw", "thinking"}:
+        raise ValueError("CUAD EVAL thought budget close requires raw or thinking thoughts")
     retrieval = (json.loads(Path(args.retrieval_profile).read_text(encoding="utf-8"))
                  if args.retrieval_profile else None)
     comparison = dict(source_commit=args.source_commit, protocol=PROTOCOL,
@@ -143,6 +176,10 @@ def manifest(args, tasks):
         original_splits=[task.split for task in tasks],
         rollout_labels_removed=True, rollout_scored=False,
         failure_policy="persist every episode; failures remain in scoring task set; no retries")
+    if budget_close:
+        comparison.update(protocol=cuad_eval_close.PROTOCOL,
+            **{cuad_eval_close.FIELD: cuad_eval_close.configuration(args.thought_tokens)},
+            native_ownership_version=cuad_eval_close.VERSION)
     packages = {}
     for name in ("torch", "transformers", "peft", "bitsandbytes", "xgrammar"):
         try:
@@ -162,6 +199,7 @@ async def generate(args, tasks):
     assigned = tasks[rank::args.shards]
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_json(args.output_dir / f"config_rank{rank}.json", configuration)
+    budget_close = getattr(args, cuad_eval_close.FIELD, False)
     writers, policy, failure = [], None, None
     started = time.monotonic()
     try:
@@ -169,6 +207,10 @@ async def generate(args, tasks):
         writers.append(predictions)
         traces = OrderedDurableJSONLWriter(args.output_dir / f"native_traces_rank{rank}.jsonl")
         writers.append(traces)
+        owners = None
+        if budget_close:
+            owners = OrderedDurableJSONLWriter(args.output_dir / f"request_owners_rank{rank}.jsonl")
+            writers.append(owners)
         model, tokenizer = load_policy_model(args.model, adapter=args.adapter,
             trainable=False, rank=args.device_index, quantization=args.quantization,
             compute_profile=getattr(args, "compute_profile", "legacy"))
@@ -178,6 +220,7 @@ async def generate(args, tasks):
         policy = NativeHFPolicy(model, tokenizer, thought_tokens=args.thought_tokens,
             json_tokens=args.json_tokens, max_prompt_tokens=args.max_prompt_tokens,
             sampling_profile=args.profile,
+            **({cuad_eval_close.FIELD: True} if budget_close else {}),
             trace_sink=lambda row: traces.write_line(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n"))
         for task in assigned:
             seed = task_seed(args.seed, task.id)
@@ -186,7 +229,11 @@ async def generate(args, tasks):
             # Keep the true split, but never send its labels to the runner.
             # Existing CUAD runner computes placeholder metrics on held-out
             # splits even with score_train=False; discard those below.
-            result = await runner.run(replace(task, gold=None), policy.bind_task(task.id, rank),
+            bound = policy.bind_task(task.id, rank)
+            if budget_close:
+                bound = cuad_eval_close.OwnedCuadEvaluationPolicy(bound, task_id=task.id, rank=rank,
+                    sink=lambda row: owners.write_line(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n"))
+            result = await runner.run(replace(task, gold=None), bound,
                                       evaluation=True, score_train=False)
             await policy.close()  # Drain model access before the next task seed.
             row = result.to_dict(include_tokens=True)
@@ -199,12 +246,22 @@ async def generate(args, tasks):
         saved = read_jsonl(args.output_dir / f"predictions_rank{rank}.jsonl")
         if [row["task_id"] for row in saved] != [task.id for task in assigned] or predictions.count != len(assigned):
             raise ValueError("Closed prediction journal does not exactly cover its assigned shard")
+        ownership = {}
+        if budget_close:
+            verified = cuad_eval_close.verify_native_ownership(assigned, saved,
+                read_jsonl(args.output_dir / f"request_owners_rank{rank}.jsonl"),
+                read_jsonl(args.output_dir / f"native_traces_rank{rank}.jsonl"),
+                rank=rank, profile=args.profile, thought_tokens=args.thought_tokens,
+                json_tokens=args.json_tokens, max_prompt_tokens=args.max_prompt_tokens,
+                eos_ids=list(policy.eos_ids), tokenizer=tokenizer)
+            ownership = dict(native_ownership=verified, native_eos_ids=list(policy.eos_ids),
+                             native_policy=policy.provenance)
         write_json(args.output_dir / f"rank{rank}.done.json", dict(
             generation_complete=True, version=VERSION, source_commit=args.source_commit,
             shard_index=rank, tasks=len(assigned), traces=traces.count,
             seconds=time.monotonic() - started,
             precision=precision_observation(model),
-            journals_closed=True, rollout_scored=False))
+            journals_closed=True, rollout_scored=False, **ownership))
     except BaseException as error:
         failure = error
         raise
@@ -226,8 +283,12 @@ async def generate(args, tasks):
 def score(args, tasks):
     """Score every persisted episode only after all shard journals are closed."""
     expected = manifest(args, tasks)
-    for template in ("config_rank{}.json", "predictions_rank{}.jsonl",
-                     "native_traces_rank{}.jsonl", "rank{}.done.json"):
+    budget_close = getattr(args, cuad_eval_close.FIELD, False)
+    templates = ("config_rank{}.json", "predictions_rank{}.jsonl",
+                 "native_traces_rank{}.jsonl", "rank{}.done.json")
+    if budget_close:
+        templates += ("request_owners_rank{}.jsonl",)
+    for template in templates:
         actual = {path.name for path in args.output_dir.glob(template.format("*"))}
         if actual != {template.format(rank) for rank in range(args.shards)}:
             raise ValueError("Missing or extra evaluation shard files")
@@ -265,6 +326,29 @@ def score(args, tasks):
                                                     "model_protocol_failure", "infrastructure_error", "context_budget_failure"}
                        for task, row in zip(assigned, rows, strict=True))):
             raise ValueError("Persisted predictions do not match the complete assigned task set")
+        if budget_close:
+            native_rows = read_jsonl(args.output_dir / f"native_traces_rank{rank}.jsonl")
+            verified = cuad_eval_close.verify_native_ownership(assigned, rows,
+                read_jsonl(args.output_dir / f"request_owners_rank{rank}.jsonl"), native_rows,
+                rank=rank, profile=args.profile, thought_tokens=args.thought_tokens,
+                json_tokens=args.json_tokens, max_prompt_tokens=args.max_prompt_tokens,
+                eos_ids=done.get("native_eos_ids"))
+            provenance = done.get("native_policy", {})
+            if (done.get("native_ownership") != verified or done.get("traces") != len(native_rows)
+                    or provenance.get("protocol") != cuad_eval_close.PROTOCOL
+                    or provenance.get(cuad_eval_close.FIELD) != cuad_eval_close.configuration(args.thought_tokens)
+                    or provenance.get("thought_sampling_profile") != args.profile
+                    or provenance.get("thought_tokens") != args.thought_tokens
+                    or provenance.get("json_tokens") != args.json_tokens
+                    or provenance.get("json_sampling") != cuad_eval_close.JSON_SAMPLING
+                    or provenance.get("policy_gradient") != "disabled-evaluation-only"
+                    or provenance.get("thought_logprobs_source") is not None
+                    or any(key in provenance for key in cuad_eval_close.FORBIDDEN_FIELDS)):
+                raise ValueError("CUAD EVAL native ownership/provenance receipt differs")
+            cuad_eval_close.validate_configuration(provenance.get(cuad_eval_close.FIELD),
+                thought_tokens=args.thought_tokens)
+            if canonical_receipt(verified) != canonical_receipt(done.get("native_ownership")):
+                raise ValueError("CUAD EVAL native ownership/provenance receipt differs")
         # Only completed answers can receive credit. Failed episodes still
         # occupy their original task position in every scoring denominator.
         saved.extend(dict(row, answer=row.get("answer", []) if row.get("status") == "completed" else []) for row in rows)
@@ -278,6 +362,13 @@ def score(args, tasks):
                   precision=generation_precision,
                   generation_complete=True, scored_after_journals_closed=True,
                   failure_zero_macro_f1=macro, metric_task_denominator=len(tasks), shard_receipts=receipts)
+    if budget_close:
+        report["native_ownership"] = dict(version=cuad_eval_close.VERSION,
+            all_native_traces_owned=True, verified_shards=args.shards,
+            requests=sum(row["native_ownership"]["requests"] for row in receipts),
+            native_traces=sum(row["native_ownership"]["native_traces"] for row in receipts),
+            cancelled_native_completions=sum(row["native_ownership"]["cancelled_native_completions"] for row in receipts),
+            evaluation_only=True, behavior_capture=False)
     # Labels enter only this post-generation scoring phase. Bind both sides to
     # the same references without putting held-out labels into rollout metadata.
     references = json.dumps([[task.id, task.gold] for task in tasks], ensure_ascii=False,
@@ -321,7 +412,9 @@ def parser():
     result.add_argument("--base-output-dir", type=Path,
                         help="Required for adapter scoring; completed matched base report (generation may run in parallel)")
     result.add_argument("--split", choices=("train", "validation", "test"))
-    result.add_argument("--profile", choices=("thinking", "greedy"), default="thinking")
+    result.add_argument("--profile", choices=("raw", "thinking", "greedy"), default="thinking")
+    result.add_argument("--cuad-thought-budget-close", action="store_true",
+                        help="CUAD EVAL only: select real </think> at the last existing thought slot; raw/thinking thoughts and greedy JSON; must match base and adapter")
     result.add_argument("--quantization", choices=("nf4", "none"), default="nf4")
     result.add_argument("--compute-profile", choices=COMPUTE_PROFILES, default="legacy")
     result.add_argument("--shard-index", type=int, default=0)
@@ -367,6 +460,10 @@ def main(argv=None):
             or (args.web_text_window_chars is not None and args.web_text_window_chars < 1)
             or not math.isfinite(args.episode_timeout) or args.episode_timeout <= 0):
         arguments.error("Invalid source identity, shard, device or episode budget")
+    if args.cuad_thought_budget_close and (args.profile not in {"raw", "thinking"}
+            or args.web_concise_reasoning or args.web_zip_member_fallback
+            or args.web_text_window_chars is not None):
+        arguments.error("CUAD EVAL thought budget close requires raw/thinking and no Web options")
     validate_source(args.source_commit)
     tasks = load_tasks(args.data, split=args.split)
     if (not tasks or args.shards > len(tasks) or any(task.benchmark != "cuad" for task in tasks)
