@@ -32,16 +32,23 @@ def web_train_history_from_arguments(args):
     return config
 
 
-def web_train_history_configuration(config):
+def web_train_history_configuration(config, *, thought_policy=None):
     if not isinstance(config, PromptHistoryConfig) or not config.enabled:
         raise ValueError("An enabled Web TRAIN PromptHistoryConfig is required")
-    return dict(version=VERSION, training_only=True, supported_benchmark="widesearch",
+    result = dict(version=VERSION, training_only=True, supported_benchmark="widesearch",
         prompt_history=config.to_dict(), original_request="persist-full-and-recompute-at-group-close",
         prompt_encoding="unchanged-checkpoint-chat-template-with-native-open-think-suffix",
         behavior_logprobs="actual-streamed-raw-sampled-thought-scores",
         replay="saved-actual-prompt-and-completion-IDs", policy_gradient="actual-thought-only",
         objective_denominator="unchanged-fixed-group-step-thought-budget",
         no_fit="original-full-request-native-preflight-and-context-sampled-prefix-v2")
+    if thought_policy is not None:
+        from . import web_train_thought_budget_close as train_close
+        train_close.validate_configuration(thought_policy)
+        result.update(version=VERSION+"+"+train_close.VARIANT,
+            behavior_logprobs="actual-streamed-raw-prefix-and-singleton-close-scores",
+            **{train_close.FIELD: deepcopy(thought_policy)})
+    return result
 
 
 def web_train_history_plan(tokenizer, messages, *, config, max_prompt_tokens,
@@ -58,13 +65,13 @@ def web_train_history_plan(tokenizer, messages, *, config, max_prompt_tokens,
     return plan
 
 
-def web_train_history_fields(original_messages, report, config):
-    return dict(native_web_train_prompt_history=web_train_history_configuration(config),
+def web_train_history_fields(original_messages, report, config, *, thought_policy=None):
+    return dict(native_web_train_prompt_history=web_train_history_configuration(config, thought_policy=thought_policy),
         prompt_history=deepcopy(report), prompt_history_original_messages=deepcopy(original_messages))
 
 
-def web_train_history_failure_fields(original_messages, failure, config):
-    return dict(**web_train_history_fields(original_messages, failure.diagnostics, config),
+def web_train_history_failure_fields(original_messages, failure, config, *, thought_policy=None):
+    return dict(**web_train_history_fields(original_messages, failure.diagnostics, config, thought_policy=thought_policy),
         reason=failure.reason, original_prompt_ids=list(failure.original_prompt_ids),
         generation_submitted=False)
 

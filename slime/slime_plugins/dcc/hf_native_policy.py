@@ -25,7 +25,9 @@ from .episode import ModelProtocolFailure, PolicyCompletion
 from .hf_policy import _chat_tokens, encode_messages
 from .hf_compute import compute_context, model_compute_profile
 from .native_hf_context import NativeHFPromptBudgetExceeded
-from .native_behavior_logprobs import BEHAVIOR_LOGPROB_SOURCE, StreamingRawThoughtLogprobs
+from .native_behavior_logprobs import (BEHAVIOR_LOGPROB_SOURCE, StreamingRawThoughtLogprobs,
+    RowSelectiveThoughtBudgetClose, StreamingBudgetClosedThoughtLogprobs)
+from . import web_train_thought_budget_close as train_close
 from .prompt_history import PromptHistoryConfig, PromptHistoryBudgetExceeded
 from .web_hf_prompt_history import (native_web_history_configuration, native_web_history_fields,
     native_web_history_plan)
@@ -111,6 +113,13 @@ class NativeHFCompletion(PolicyCompletion):
 
 
 @dataclass(slots=True)
+class BudgetClosedNativeHFCompletion(NativeHFCompletion):
+    """Only new Web TRAIN completions serialize the controlled-policy fields."""
+    web_train_thought_budget_close: dict | None = None
+    forced_thought_positions: list[int] | None = None
+
+
+@dataclass(slots=True)
 class JointNativeHFCompletion(NativeHFCompletion):
     """Only the opt-in policy adds JSON sampling fields to serialized outputs."""
     json_logprobs: list[float] | None = None
@@ -139,6 +148,7 @@ class NativeHFPolicy:
     # joint runtimes always override both values explicitly in __init__.
     joint_json_policy = False
     web_thought_budget_close = False
+    web_train_thought_budget_close = False
     prompt_history_config = PromptHistoryConfig()
     web_train_prompt_history_config = PromptHistoryConfig()
     protocol = PROTOCOL
@@ -158,7 +168,8 @@ class NativeHFPolicy:
                  sampling_profile="raw", allow_truncation=False, trace_sink=None,
                  web_bounded_whitespace=False, capture_thought_logprobs=False,
                  mixed_schema_batching=False, joint_json_policy=False, web_thought_budget_close=False,
-                 prompt_history_config=None, web_train_prompt_history_config=None):
+                 prompt_history_config=None, web_train_prompt_history_config=None,
+                 web_train_thought_budget_close=False):
         from transformers import GenerationConfig
         import xgrammar as xgr
 
@@ -191,6 +202,11 @@ class NativeHFPolicy:
         if type(joint_json_policy) is not bool or (joint_json_policy and
                 (sampling_profile != "raw" or not capture_thought_logprobs or web_bounded_whitespace)):
             raise ValueError("Joint CUAD JSON policy requires captured raw thoughts and unchanged CUAD grammar")
+        if type(web_train_thought_budget_close) is not bool or (web_train_thought_budget_close and
+                (not capture_thought_logprobs or sampling_profile != "raw" or joint_json_policy
+                 or web_thought_budget_close or allow_truncation or self.prompt_history_config.enabled)):
+            raise ValueError("Web TRAIN thought budget close requires captured raw thoughts and unchanged greedy JSON")
+        self.web_train_thought_budget_close = web_train_thought_budget_close
         self.joint_json_policy = joint_json_policy
         self.web_thought_budget_close = web_thought_budget_close
         self.protocol = JOINT_PROTOCOL if joint_json_policy else PROTOCOL
@@ -246,12 +262,19 @@ class NativeHFPolicy:
                 policy_gradient="disabled-evaluation-only",
                 failure_policy="retain-original-outcomes; last-thought-position-singleton-close; no-appended-token-or-retry",
                 supported_benchmark="widesearch")
+        if web_train_thought_budget_close:
+            self.provenance[train_close.FIELD] = train_close.configuration(thought_tokens)
+            self.provenance["web_thought_logprobs_source"] = train_close.SOURCE
+            self.provenance["web_protocol"] = train_close.PROTOCOL
+            self.provenance["policy_gradient"] = "raw-CUAD-and-stochastic-Web-thought-IDs; singleton-close-and-greedy-JSON-mask-zero"
+            self.provenance["failure_policy"] = "retain-actual-outcomes; Web-last-in-budget-singleton-close; no-appended-token-or-retry"
         if self.prompt_history_config.enabled:
             self.provenance.update(native_web_prompt_history=native_web_history_configuration(self.prompt_history_config),
                 policy_gradient="disabled-evaluation-only", supported_benchmark="widesearch")
         if self.web_train_prompt_history_config.enabled:
             self.provenance["native_web_train_prompt_history"] = web_train_history_configuration(
-                self.web_train_prompt_history_config)
+                self.web_train_prompt_history_config,
+                thought_policy=train_close.configuration(thought_tokens) if web_train_thought_budget_close else None)
 
     async def __call__(self, *args, **kwargs):
         raise ValueError("HF native policy requires generate_structured and an explicit public schema")
@@ -339,7 +362,7 @@ class NativeHFPolicy:
             if stop:
                 return
 
-    def _phase(self, prompts, *, phase, grammar=None):
+    def _phase(self, prompts, *, phase, grammar=None, train_budget_close_rows=None):
         from xgrammar.contrib.hf import LogitsProcessor
         from transformers import LogitsProcessorList
 
@@ -368,6 +391,15 @@ class NativeHFPolicy:
             # generate selects and returns the real token; nothing is appended.
             config.forced_eos_token_id = END_THINK
         tracker = StreamingRawThoughtLogprobs() if raw and self.capture_thought_logprobs else None
+        intervention = None
+        if train_budget_close_rows is not None:
+            if (phase != "thought" or not raw or not self.capture_thought_logprobs
+                    or not self.web_train_thought_budget_close or len(train_budget_close_rows) != len(prompts)):
+                raise ValueError("Row-selective singleton close requires its Web TRAIN thought policy")
+            if any(train_budget_close_rows):
+                intervention = RowSelectiveThoughtBudgetClose(train_budget_close_rows, prompt_width=width,
+                    thought_tokens=self.thought_tokens, close_id=END_THINK)
+                tracker = StreamingBudgetClosedThoughtLogprobs(intervention)
         processors = [LogitsProcessor(grammar)] if grammar is not None else []
         if sampled_json:
             from .native_joint_grpo import StreamingMaskedJSONLogprobs
@@ -379,6 +411,8 @@ class NativeHFPolicy:
             if processors and not sampled_json:
                 raise ValueError("Raw behavior tracking cannot include grammar processors")
             if not sampled_json:
+                if intervention is not None:
+                    processors.append(intervention)
                 processors.append(tracker)
         with compute_context(self.model):
             output = self.model.generate(input_ids=ids, attention_mask=attention,
@@ -390,6 +424,7 @@ class NativeHFPolicy:
             rows.append(row[:end])
         if phase == "thought":
             self._last_thought_logprobs = tracker.finish(rows) if tracker is not None else None
+            self._last_thought_forced_positions = tracker.forced_positions if intervention is not None else None
         elif sampled_json:
             self._last_json_logprobs = tracker.finish(rows)
         return rows
@@ -430,12 +465,16 @@ class NativeHFPolicy:
                     # preflight trace. Additional failed-plan proof is owned
                     # separately and recomputed before the group may be scored.
                     history_failure = web_train_history_failure_fields(
-                        messages, failure, self.web_train_prompt_history_config)
+                        messages, failure, self.web_train_prompt_history_config,
+                        thought_policy=train_close.configuration(self.thought_tokens)
+                            if self.web_train_thought_budget_close else None)
                 else:
                     prompts.append(plan.prompt_ids)
                     selected.append(i)
                     history_metadata.append(web_train_history_fields(
-                        messages, plan.report, self.web_train_prompt_history_config))
+                        messages, plan.report, self.web_train_prompt_history_config,
+                        thought_policy=train_close.configuration(self.thought_tokens)
+                            if self.web_train_thought_budget_close else None))
                     continue
             full = _chat_tokens(self.tokenizer, messages)
             if len(full) > self.max_prompt_tokens and not self.allow_truncation:
@@ -443,7 +482,12 @@ class NativeHFPolicy:
                     task_id=task_ids[i] if task_ids is not None else None,
                     thought_tokens=self.thought_tokens, json_tokens=self.json_tokens,
                     sampling_profile=self.sampling_profile,
-                    behavior_source=BEHAVIOR_LOGPROB_SOURCE if self.capture_thought_logprobs else None)
+                    behavior_source=(train_close.SOURCE if self.web_train_thought_budget_close
+                        and native_structured_schema_kind(schemas[i]) in {"web", "web-review"}
+                        else BEHAVIOR_LOGPROB_SOURCE if self.capture_thought_logprobs else None),
+                    **({train_close.FIELD: train_close.configuration(self.thought_tokens)}
+                        if self.web_train_thought_budget_close
+                        and native_structured_schema_kind(schemas[i]) in {"web", "web-review"} else {}))
                 if history_failure is not None:
                     setattr(failure, FAILURE_FIELD, history_failure)
                 # This additional diagnostic belongs only to raw TRAIN capture.
@@ -498,7 +542,11 @@ class NativeHFPolicy:
         schemas = self._batch_schemas(json_schema, len(prompts))
         self.model.eval()
         thought_started = time.monotonic()
-        thoughts = self._phase(prompts, phase="thought")
+        train_close_rows = [self.web_train_thought_budget_close
+            and native_structured_schema_kind(schema) in {"web", "web-review"} for schema in schemas]
+        thoughts = self._phase(prompts, phase="thought",
+            **({"train_budget_close_rows": train_close_rows} if any(train_close_rows) else {}))
+        forced_positions = self._last_thought_forced_positions if any(train_close_rows) else None
         thought_seconds = time.monotonic() - thought_started
         thought_logprobs = self._last_thought_logprobs
         valid = [i for i, tokens in enumerate(thoughts) if tokens and tokens[-1] == END_THINK
@@ -558,6 +606,15 @@ class NativeHFPolicy:
             observed = final or thought
             extra = {}
             completion_type = NativeHFCompletion
+            row_protocol = self.protocol
+            behavior_source = BEHAVIOR_LOGPROB_SOURCE
+            if train_close_rows[i]:
+                completion_type = BudgetClosedNativeHFCompletion
+                row_protocol, behavior_source = train_close.PROTOCOL, train_close.SOURCE
+                extra = {train_close.FIELD: train_close.configuration(self.thought_tokens),
+                         train_close.POSITIONS: forced_positions[i]}
+                train_close.validate_fields(extra[train_close.FIELD], extra[train_close.POSITIONS],
+                    thought, thought_logprobs[i], thought_tokens=self.thought_tokens)
             if self.joint_json_policy:
                 from .native_joint_grpo import JSON_BEHAVIOR_SOURCE
                 completion_type = JointNativeHFCompletion
@@ -568,11 +625,11 @@ class NativeHFPolicy:
                 finish_reason="stop" if observed and observed[-1] in terminal_ids else "length",
                 thought_token_count=len(thought), phase_lengths=(len(thought), len(final)), native_status=status,
                 thought_logprobs=thought_logprobs[i] if thought_logprobs is not None else None,
-                thought_logprobs_source=BEHAVIOR_LOGPROB_SOURCE if thought_logprobs is not None else None, **extra)
+                thought_logprobs_source=behavior_source if thought_logprobs is not None else None, **extra)
             trace_id = uuid.uuid4().hex
             completion.trace_id = trace_id
             if self.trace_sink is not None:
-                trace = {"protocol": self.protocol, "trace_id": trace_id,
+                trace = {"protocol": row_protocol, "trace_id": trace_id,
                     "task_id": task_ids[i] if task_ids else None, "status": status,
                     "prompt_ids": list(prompt), "thought_ids": thought, "json_ids": final,
                     "thought_token_count": len(thought), "final_text": text,
@@ -582,6 +639,8 @@ class NativeHFPolicy:
                         "json": json_seconds if i in valid else None},
                     "thought_sampling_profile": self.sampling_profile,
                     "json_public_schema": schemas[i]}
+                if train_close_rows[i]:
+                    trace.update(deepcopy(extra))
                 if self.web_thought_budget_close:
                     trace.update(web_thought_budget_close=web_thought_budget_close_configuration(self.thought_tokens),
                         forced_thought_positions=([self.thought_tokens - 1]
@@ -594,7 +653,7 @@ class NativeHFPolicy:
                         json_stop_ids=completion.json_stop_ids,
                         json_sampling_profile="multinomial-T1-top_p1-top_k0-xgrammar")
                 self.trace_sink(trace)
-            results.append(ModelProtocolFailure(reason, completion=completion, protocol=self.protocol, trace_id=trace_id)
+            results.append(ModelProtocolFailure(reason, completion=completion, protocol=row_protocol, trace_id=trace_id)
                            if reason is not None else completion)
         return results
 

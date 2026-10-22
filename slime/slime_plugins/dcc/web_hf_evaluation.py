@@ -285,7 +285,8 @@ def verify_native_ownership(tasks, predictions, owners, traces, *, rank, profile
                 if owner.get("error_type") == NativeHFRequestExpiredBeforeSubmission.__name__:
                     if (owner.get("delivery") != "cancelled" or result["status"] != "infrastructure_error"
                             or any(key in owner for key in (*HISTORY_FIELDS, "completion", "trace_id",
-                                "prompt_ids", "completion_ids", "thought_logprobs", "json_logprobs"))):
+                                "prompt_ids", "completion_ids", "thought_logprobs", "json_logprobs",
+                                "web_train_thought_budget_close", "forced_thought_positions"))):
                         raise ValueError("Unsubmitted expired request requires cancelled infrastructure outcome")
                     # A queued request has not run the history preflight. Do not
                     # invent its result by replaying a hypothetical submission.

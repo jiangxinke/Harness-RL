@@ -82,3 +82,61 @@ class StreamingRawThoughtLogprobs(LogitsProcessor):
                 raise FloatingPointError("Non-finite actual sampled thought logprobs")
             result.append(selected)
         return result
+
+
+class RowSelectiveThoughtBudgetClose(LogitsProcessor):
+    """Intervene only on enabled Web rows, before their behavior is observed."""
+
+    def __init__(self, enabled_rows, *, prompt_width, thought_tokens, close_id):
+        if (not enabled_rows or any(type(x) is not bool for x in enabled_rows)
+                or type(prompt_width) is not int or prompt_width < 1
+                or type(thought_tokens) is not int or thought_tokens < 1
+                or type(close_id) is not int or close_id < 0):
+            raise ValueError("Explicit row selection and native thought budgets required")
+        self.enabled_rows = tuple(enabled_rows)
+        self.prompt_width, self.thought_tokens, self.close_id = prompt_width, thought_tokens, close_id
+
+    def __call__(self, input_ids, scores):
+        if input_ids.shape[0] != len(self.enabled_rows) or scores.shape[0] != len(self.enabled_rows):
+            raise ValueError("Unchanged non-beam thought rows required")
+        if input_ids.shape[1] != self.prompt_width + self.thought_tokens - 1:
+            return scores
+        mask = torch.tensor(self.enabled_rows, device=scores.device, dtype=torch.bool)
+        result = scores.clone()
+        result[mask] = -torch.inf
+        result[mask, self.close_id] = 0
+        return result
+
+
+class StreamingBudgetClosedThoughtLogprobs(StreamingRawThoughtLogprobs):
+    """Capture actual raw-prefix/singleton probabilities after the intervention."""
+
+    def __init__(self, intervention):
+        super().__init__()
+        self.intervention = intervention
+        self._singleton_support = None
+        self.forced_positions = None
+
+    def __call__(self, input_ids, scores):
+        rule = self.intervention
+        if input_ids.shape[1] == rule.prompt_width + rule.thought_tokens - 1:
+            # No scalar reads or RNG operations during generation. Validate the
+            # observed support on CPU once, together with actual returned IDs.
+            self._singleton_support = ((torch.isfinite(scores).sum(-1) == 1)
+                & (scores[:, rule.close_id] == 0)
+                & (torch.isneginf(scores).sum(-1) == scores.shape[-1] - 1))
+        return super().__call__(input_ids, scores)
+
+    def finish(self, actual_token_rows):
+        values = super().finish(actual_token_rows)
+        rule = self.intervention
+        support = self._singleton_support.cpu().tolist() if self._singleton_support is not None else None
+        positions = []
+        for index, (enabled, row, scores) in enumerate(zip(rule.enabled_rows, actual_token_rows, values, strict=True)):
+            forced = enabled and len(row) == rule.thought_tokens
+            if forced and (support is None or not support[index]
+                    or row[-1] != rule.close_id or scores[-1] != 0):
+                raise ValueError("Actual forced thought sample is not its observed singleton distribution")
+            positions.append([rule.thought_tokens - 1] if forced else [])
+        self.forced_positions = positions
+        return values

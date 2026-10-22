@@ -13,6 +13,7 @@ import pytest
 from test_dcc_hf_native_policy import ScriptedModel, final_ids, messages, tokenizer
 from test_dcc_online_web import COMMIT, FixtureTools, inputs, public_row
 from slime_plugins.dcc import online_web as web
+from slime_plugins.dcc import web_train_thought_budget_close as train_close
 from slime_plugins.dcc.data import Task
 from slime_plugins.dcc.episode import EpisodeResult, EpisodeRunner
 from slime_plugins.dcc.hf_native_policy import (
@@ -30,35 +31,41 @@ THOUGHT = [10065, END_THINK]
 SCORES = [-0.25, -0.5]
 
 
-def native_fixture(tokenizer, *, batch_size=2, block="thought", capture=True):
+def native_fixture(tokenizer, *, batch_size=2, block="thought", capture=True, close_train=False):
     """Use the real queue, encoding, phase assembly, trace and owner paths."""
     model = ScriptedModel([], [])
     model.config = SimpleNamespace(vocab_size=151670, max_position_embeddings=65536)
     traces, controls, calls = [], [], []
     value = NativeHFPolicy(model, tokenizer, thought_tokens=4, json_tokens=256,
         max_prompt_tokens=32768, batch_size=batch_size, mixed_schema_batching=True,
-        capture_thought_logprobs=capture, trace_sink=traces.append)
+        capture_thought_logprobs=capture, trace_sink=traces.append,
+        web_train_thought_budget_close=close_train)
     started, release = Event(), Event()
+    thought = [10065, 10065, 10065, END_THINK] if close_train else THOUGHT
+    scores = [-.25, -.5, -.75, 0.] if close_train else SCORES
 
     def factory():
         control = NativeHFRequestControl()
         controls.append(control)
         return control
 
-    def phase(prompts, *, phase, grammar=None):
+    def phase(prompts, *, phase, grammar=None, train_budget_close_rows=None):
         calls.append((phase, len(prompts)))
         if phase == block:
             started.set()
             assert release.wait(5), "CPU fixture phase was not released"
         if phase == "thought":
-            value._last_thought_logprobs = [list(SCORES) for _ in prompts] if capture else None
-            return [list(THOUGHT) for _ in prompts]
+            value._last_thought_logprobs = [list(scores) for _ in prompts] if capture else None
+            if close_train:
+                assert train_budget_close_rows == [True] * len(prompts)
+                value._last_thought_forced_positions = [[3] for _ in prompts]
+            return [list(thought) for _ in prompts]
         return [final_ids(tokenizer, text='{"answer":[]}') for _ in prompts]
 
     value.new_request_control = factory
     value._phase = phase
     return SimpleNamespace(policy=value, traces=traces, controls=controls, calls=calls,
-                           started=started, release=release)
+                           started=started, release=release, thought=thought, scores=scores)
 
 
 def owned(fixture, kind, rows, *, sample=0):
@@ -92,7 +99,9 @@ def verify_cancelled(fixture, kind, rows):
     if kind == "train":
         results = [result, deepcopy(result)]
         web.verify_owned_native_group(task, results, rows, traces,
-            eos_ids=fixture.policy.eos_ids, tokenizer=fixture.policy.tokenizer, iteration=1, rank=0)
+            eos_ids=fixture.policy.eos_ids, tokenizer=fixture.policy.tokenizer, iteration=1, rank=0,
+            **({train_close.FIELD: train_close.configuration(4)}
+               if fixture.policy.web_train_thought_budget_close else {}))
     else:
         verify_native_ownership([task], [prediction_row(result, seed=1)], rows, traces,
             rank=0, profile="raw", eos_ids=fixture.policy.eos_ids, tokenizer=fixture.policy.tokenizer)
@@ -132,16 +141,17 @@ def test_expired_queued_owned_request_never_submits_or_invents_completion(tokeni
     # This request has no native trace; retain its explicit infrastructure owner.
     fixture.traces = []
     verify_cancelled(fixture, kind, expired_rows)
-    for field, value in (("trace_id", "invented"), ("completion_ids", [77]), ("thought_logprobs", [-.5])):
+    for field, value in (("trace_id", "invented"), ("completion_ids", [77]), ("thought_logprobs", [-.5]),
+                         (train_close.FIELD, train_close.configuration(4)), (train_close.POSITIONS, [3])):
         forged = deepcopy(expired_rows)
         forged[0][field] = value
         with pytest.raises(ValueError, match="Unsubmitted expired request"):
             verify_cancelled(fixture, kind, forged)
 
 
-@pytest.mark.parametrize("kind", ["train", "evaluation"])
-def test_cancelled_started_thought_drains_real_prefix_without_starting_json(tokenizer, kind):
-    fixture = native_fixture(tokenizer, capture=kind == "train")
+@pytest.mark.parametrize("kind, close_train", [("train", False), ("evaluation", False), ("train", True)])
+def test_cancelled_started_thought_drains_real_prefix_without_starting_json(tokenizer, kind, close_train):
+    fixture = native_fixture(tokenizer, capture=kind == "train", close_train=close_train)
     rows = []
 
     async def run():
@@ -166,8 +176,12 @@ def test_cancelled_started_thought_drains_real_prefix_without_starting_json(toke
     assert fixture.calls == [("thought", 1)]
     trace = fixture.traces[0]
     assert trace["status"] == CANCELLED_BEFORE_JSON
-    assert trace["thought_ids"] == THOUGHT and trace["json_ids"] == []
-    assert trace["thought_logprobs"] == (SCORES if kind == "train" else None)
+    assert trace["thought_ids"] == fixture.thought and trace["json_ids"] == []
+    assert trace["thought_logprobs"] == (fixture.scores if kind == "train" else None)
+    if close_train:
+        assert trace["protocol"] == train_close.PROTOCOL
+        assert trace[train_close.FIELD] == rows[0][train_close.FIELD] == train_close.configuration(4)
+        assert trace[train_close.POSITIONS] == rows[0][train_close.POSITIONS] == [3]
     assert trace["final_text"] == "" and rows[0]["delivery"] == "cancelled"
     verify_cancelled(fixture, kind, rows)
     bad = deepcopy(rows)

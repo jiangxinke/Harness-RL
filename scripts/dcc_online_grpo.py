@@ -30,6 +30,7 @@ import torch.distributed as dist
 from dcc_training_io import prepare_training_output, publish_checkpoint
 from dcc_train import validate_grpo_dropout
 from slime_plugins.dcc import EpisodeRunner, load_tasks
+from slime_plugins.dcc import web_train_thought_budget_close as train_close
 from slime_plugins.dcc.cuad_reasoning import cuad_concise_reasoning_configuration
 from slime_plugins.dcc.cuad_confidence_reward import (
     VARIANT as CONFIDENCE_REWARD_VARIANT, calibrate_cuad_train_group,
@@ -198,6 +199,10 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
     validate_policy_surrogate(policy_surrogate, reference_kl_beta)
     validate_json_surrogate_weight(json_surrogate_weight,
         joint_json_policy=joint_json_policy, policy_surrogate=policy_surrogate)
+    has_train_close = any(getattr(segment, train_close.FIELD, None) is not None
+        for segments in signal.segments for segment in segments)
+    if has_train_close and (joint_json_policy or policy_surrogate != "token-grpo"):
+        raise ValueError("Web singleton thought policy supports thought-only token-GRPO")
     objective_tokens = thought_tokens
     if joint_json_policy:
         if type(json_tokens) is not int or json_tokens < 1 or grammar_compiler is None:
@@ -208,7 +213,7 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
             from slime_plugins.dcc.native_joint_grpo import segment_scorer
             return segment_scorer(segment, grammar_compiler,
                 backend=logprob_backend, head_chunk_tokens=head_chunk_tokens)
-        return scorer
+        return train_close.scorer_for(segment, scorer)
     def old_values(segment):
         return segment.behavior_logprobs if joint_json_policy else segment.thought_logprobs
     if policy_surrogate == "episode-gspo":
@@ -238,6 +243,7 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
     behavior_replay, replay_current = None, None
     behavior_current, diagnostic_tokens = 0.0, 0
     ratio_min, ratio_max, clipped_tokens = None, None, 0
+    forced_tokens = 0
     for index, (segment, advantage) in enumerate(scored):
         active_scorer = scorer_for(segment)
         if reference_kl_beta > 0:
@@ -262,12 +268,17 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
         ratio = (observed - old).exp()
         if not torch.isfinite(ratio).all():
             raise FloatingPointError("Non-finite actual behavior importance ratio")
-        lo, hi = ratio.min().item(), ratio.max().item()
-        ratio_min, ratio_max = min(ratio_min if ratio_min is not None else lo, lo), max(ratio_max if ratio_max is not None else hi, hi)
-        clipped_tokens += ((ratio < 1 - clip) | (ratio > 1 + clip)).sum().item()
+        mask = train_close.policy_mask(segment, current) if getattr(segment, train_close.FIELD, None) is not None else None
+        active_ratio = ratio[mask] if mask is not None else ratio
+        forced_tokens += len(getattr(segment, train_close.POSITIONS, ()))
+        if active_ratio.numel():
+            lo, hi = active_ratio.min().item(), active_ratio.max().item()
+            ratio_min, ratio_max = min(ratio_min if ratio_min is not None else lo, lo), max(ratio_max if ratio_max is not None else hi, hi)
+            clipped_tokens += ((active_ratio < 1 - clip) | (active_ratio > 1 + clip)).sum().item()
         if json_surrogate_weight == 1:
             loss = thought_policy_loss(current, old, advantage,
-                group_size=group_size, max_steps=max_steps, thought_tokens=objective_tokens, clip=clip)
+                group_size=group_size, max_steps=max_steps, thought_tokens=objective_tokens, clip=clip,
+                **({"policy_mask": mask} if mask is not None else {}))
         else:
             loss = weighted_joint_policy_loss(current, old, advantage,
                 thought_count=segment.thought_count, group_size=group_size, max_steps=max_steps,
@@ -296,7 +307,13 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
                 maximum_behavior_current_logprob_difference=behavior_current if tokens else None,
                 maximum_replay_current_logprob_difference=replay_current,
                 importance_ratio_min=ratio_min, importance_ratio_max=ratio_max,
-                importance_ratio_outside_clip_fraction=clipped_tokens / tokens if tokens else None)
+                importance_ratio_outside_clip_fraction=clipped_tokens / (tokens - forced_tokens) if tokens > forced_tokens else None)
+    if has_train_close:
+        report.update(forced_close_scored_tokens=forced_tokens, stochastic_scored_tokens=tokens-forced_tokens,
+            importance_ratio_token_scope="stochastic-only; deterministic-singleton-excluded",
+            singleton_policy_logprob=0, singleton_policy_gradient=False,
+            old_logprob_source="actual-sampled-Web-raw-prefix-and-singleton-close-behavior",
+            **{train_close.FIELD: train_close.configuration(thought_tokens)})
     if joint_json_policy:
         report.update(old_logprob_source="actual-sampled-raw-thought-and-post-xgrammar-JSON-behavior",
             thought_scored_tokens=sum(segment.thought_count for segment, _ in scored),
@@ -316,6 +333,9 @@ def replay_group(model, signal, scorer, *, group_size, max_steps, thought_tokens
         report["json_surrogate"] = json_surrogate_configuration(json_surrogate_weight)
         report["algorithm_variant"] = "+".join(filter(None,
             (report.get("algorithm_variant"), JSON_SURROGATE_VARIANT)))
+    if has_train_close:
+        report["algorithm_variant"] = "+".join(filter(None,
+            (report.get("algorithm_variant"), train_close.VARIANT)))
     return report
 
 
@@ -347,6 +367,7 @@ def configuration(args, plan, tasks, world_size):
     from slime_plugins.dcc.web_reasoning import web_concise_reasoning_configuration
 
     train_history = web_train_history_from_arguments(args)
+    close_profile = train_close.from_arguments(args)
     schedule = getattr(args, "mixed_benchmark_schedule", "slot-interleaved")
     validate_mixed_benchmark_schedule(schedule, steps=getattr(args, "steps", None),
         cuad_draws_per_cycle=getattr(args, "cuad_draws_per_cycle", 1),
@@ -387,6 +408,7 @@ def configuration(args, plan, tasks, world_size):
                    and (key != "json_surrogate_weight" or value != 1)
                    and (key != "cuad_confidence_reward_weight" or value != 0)
                    and (key != "web_observation_token_budget" or value is not None)
+                   and (key != "web_train_thought_budget_close" or value)
                    and (key != "mixed_benchmark_schedule" or value != "slot-interleaved")
                    and (key != "web_train_prompt_history_whole_turns" or bool(value))
                    and (key != "web_train_prompt_history_keep_recent_turns" or value is not None)},
@@ -445,10 +467,19 @@ def configuration(args, plan, tasks, world_size):
         config["algorithm_variant"] = "+".join(filter(None,
             (config.get("algorithm_variant"), CONFIDENCE_REWARD_VARIANT)))
         config["cuad_train_confidence_reward"] = confidence_reward_configuration(confidence_weight)
+    if close_profile is not None:
+        config[train_close.FIELD] = close_profile
+        config["algorithm"] += "+" + train_close.VARIANT
+        config["algorithm_variant"] = "+".join(filter(None, (config.get("algorithm_variant"), train_close.VARIANT)))
+        config["behavior_policy"]["web_thought"] = close_profile
+        config["behavior_policy"]["web_old_logprob_source"] = train_close.SOURCE
+        config["policy_loss_tokens"] = "actual raw thoughts; Web singleton-close and greedy JSON mask zero"
+        config["reference_kl"]["web_thought_policy"] = close_profile
+        config["reference_kl"]["web_singleton_position_logprob"] = 0
     if getattr(args, "enable_online_web", False):
         from slime_plugins.dcc.online_web import binding_protocols
         if train_history is not None:
-            config["native_web_train_prompt_history"] = web_train_history_configuration(train_history)
+            config["native_web_train_prompt_history"] = web_train_history_configuration(train_history, thought_policy=close_profile)
         if observation_budget is not None:
             config["web_observation_budget"] = web_observation_budget_configuration(observation_budget)
         if web_reasoning["enabled"]:
@@ -566,6 +597,7 @@ def cpu_preflight(args, tasks, plan, world_size):
 
 async def train(args, tasks, plan, world_size, *, web_inputs=None):
     train_history = web_train_history_from_arguments(args)
+    close_profile = train_close.from_arguments(args)
     observation_budget = getattr(args, "web_observation_token_budget", None)
     web_observation_budget_configuration(observation_budget)
     if observation_budget is not None and not getattr(args, "enable_online_web", False):
@@ -648,7 +680,8 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
             capture_thought_logprobs=True,
             mixed_schema_batching=getattr(args, "native_mixed_schema_batching", False),
             joint_json_policy=getattr(args, "joint_json_policy", False),
-            **(dict(web_train_prompt_history_config=train_history) if train_history is not None else {}))
+            **(dict(web_train_prompt_history_config=train_history) if train_history is not None else {}),
+            **({train_close.FIELD: True} if close_profile is not None else {}))
         runner = make_runner(args)
         if observation_budget is not None:
             runner.set_web_observation_tokenizer(tokenizer)
@@ -788,6 +821,8 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
             if config["reference_kl"]["enabled"]:
                 complete.update(algorithm_variant=config.get("algorithm_variant", REFERENCE_KL_VARIANT),
                                 reference_kl=config["reference_kl"])
+            if close_profile is not None:
+                complete.update(algorithm_variant=config["algorithm_variant"], **{train_close.FIELD: close_profile})
             if "policy_surrogate" in config:
                 complete.update(algorithm_variant=config["algorithm_variant"],
                                 policy_surrogate=config["policy_surrogate"])
@@ -825,6 +860,8 @@ def main(argv=None):
     parser.add_argument("--adapter")
     parser.add_argument("--enable-online-web", action="store_true",
                         help="Opt in to separately reviewed public-only Web TRAIN groups")
+    parser.add_argument("--web-train-thought-budget-close", action="store_true",
+                        help="Web TRAIN only: sample singleton </think> at the last thought budget slot; raw prefix, zero singleton gradient, unchanged fixed denominator and CUAD")
     parser.add_argument("--web-train-data", type=Path)
     parser.add_argument("--web-train-labels", type=Path)
     parser.add_argument("--web-binding", type=Path)
@@ -913,6 +950,7 @@ def main(argv=None):
         if args.mixed_benchmark_schedule != "slot-interleaved" and not args.enable_online_web:
             raise ValueError("--mixed-benchmark-schedule iteration-blocked requires --enable-online-web")
         web_train_history_from_arguments(args)
+        train_close.from_arguments(args)
         validate_reference_kl_beta(args.reference_kl_beta)
         validate_policy_surrogate(args.policy_surrogate, args.reference_kl_beta)
         validate_json_surrogate_weight(args.json_surrogate_weight,

@@ -176,3 +176,11 @@ and prompt version. A matched base/adapter evaluation must use the same setting;
 an adapter evaluated with this option cannot use an old baseline without it.
 Treat it as an experimental option until a separate TRAIN-only comparison
 establishes its effect on completion, correctness and generated length.
+
+`--web-train-thought-budget-close` is a separate default-off thought-only
+token-GRPO policy that samples an actual singleton `</think>` at the final
+in-budget Web thought position. CUAD rows retain raw sampling. Captured,
+current and frozen-reference singleton logprobs are zero, its policy gradient
+is masked, and the original fixed budget denominator is retained. See
+[Web TRAIN thought budget close](dcc_web_train_thought_budget_close.md) for
+mode restrictions, ownership, history composition and validation limits.

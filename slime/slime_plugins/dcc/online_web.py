@@ -18,6 +18,7 @@ from pathlib import Path
 import random
 
 from .data import Task
+from . import web_train_thought_budget_close as train_close
 from .durable_journal import OrderedDurableJSONLWriter, close_durable_journals
 from .episode import _WebEvidence, ModelProtocolFailure, WIDESEARCH_EVIDENCE_GUARD_VERSION
 from .native_hf_context import (NativeHFPromptBudgetExceeded, PREFLIGHT_PROTOCOL, context_handling_configuration,
@@ -353,7 +354,8 @@ class OwnedEpisodePolicy:
         probability_source = getattr(completion, "thought_logprobs_source", None)
         if (type(probabilities) is not list or len(probabilities) != completion.thought_token_count
                 or any(type(value) not in (int, float) or not math.isfinite(value) for value in probabilities)
-                or probability_source != BEHAVIOR_SCORES):
+                or probability_source != (train_close.SOURCE
+                    if getattr(completion, train_close.FIELD, None) is not None else BEHAVIOR_SCORES)):
             raise ValueError("Web TRAIN requires actual streamed raw behavior thought logprobs")
         row.update(request_status="native", delivery="cancelled" if cancelled else "delivered",
             trace_id=trace_id, prompt_ids=list(completion.prompt_ids),
@@ -361,6 +363,12 @@ class OwnedEpisodePolicy:
             thought_token_count=completion.thought_token_count,
             native_status=completion.native_status, text=completion.text,
             thought_logprobs=list(probabilities), thought_logprobs_source=probability_source)
+        profile = getattr(completion, train_close.FIELD, None)
+        if profile is not None:
+            train_close.validate_configuration(profile)
+        fields = train_close.step_fields(completion, thought_tokens=(
+            profile["thought_tokens"] if profile is not None else max(1, completion.thought_token_count)))
+        row.update(fields)
         self.sink(row)
 
 
@@ -374,13 +382,17 @@ class ClosedPublicGroup:
 
 
 def verify_owned_native_group(task, results, owner_rows, traces, *, eos_ids, tokenizer,
-                              iteration, rank, web_train_prompt_history_config=None, history_budgets=None):
+                              iteration, rank, web_train_prompt_history_config=None, history_budgets=None,
+                              web_train_thought_budget_close=None):
     """Replay exact closed journal bytes, original schemas and actual token IDs."""
     from jsonschema import Draft202012Validator
     from .hf_native_policy import _strict_json
     from .hf_native_policy import CANCELLED_BEFORE_JSON, NativeHFRequestExpiredBeforeSubmission
     from .hf_native_structured import native_structured_schema_kind
     from .hf_policy import _chat_tokens
+    close_profile = web_train_thought_budget_close
+    if close_profile is not None:
+        train_close.validate_configuration(close_profile)
     history_config = (PromptHistoryConfig() if web_train_prompt_history_config is None
                       else web_train_prompt_history_config)
     if not isinstance(history_config, PromptHistoryConfig):
@@ -423,12 +435,18 @@ def verify_owned_native_group(task, results, owner_rows, traces, *, eos_ids, tok
                     or not _same(step.thought_logprobs, row["thought_logprobs"])
                     or step.thought_logprobs_source != row["thought_logprobs_source"]):
                 raise ValueError("Delivered step/completion owner differs")
+            expected_fields = train_close.step_fields(step, thought_tokens=(
+                close_profile["thought_tokens"] if close_profile is not None else max(1, step.thought_token_count)))
+            if ({key: row.get(key) for key in expected_fields} != expected_fields
+                    or (not expected_fields and any(key in row for key in (train_close.FIELD, train_close.POSITIONS)))):
+                raise ValueError("Delivered singleton policy owner differs")
         for row in rows:
             if row.get("request_status") == "error":
                 if (row.get("error_type") == NativeHFRequestExpiredBeforeSubmission.__name__
                         and (row.get("delivery") != "cancelled" or result.status != "infrastructure_error"
                              or any(key in row for key in ("trace_id", "completion", "completion_ids",
-                                 "thought_logprobs", "native_hf_preflight", FAILURE_FIELD)))):
+                                 "thought_logprobs", "native_hf_preflight", FAILURE_FIELD,
+                                 train_close.FIELD, train_close.POSITIONS)))):
                     raise ValueError("Unsubmitted expired request requires cancelled infrastructure outcome")
                 if result.status not in {"infrastructure_error", "context_budget_failure"}:
                     raise ValueError("Untraced native request error requires an unreliable episode")
@@ -445,6 +463,13 @@ def verify_owned_native_group(task, results, owner_rows, traces, *, eos_ids, tok
                             or preflight.get("generation_submitted") is not False
                             or _chat_tokens(tokenizer, row["messages"]) != preflight.get("prompt_ids")):
                         raise ValueError("Native HF preflight error request ownership differs")
+                    if preflight.get(train_close.FIELD) is not None:
+                        train_close.validate_configuration(preflight[train_close.FIELD])
+                    elif train_close.FIELD in preflight:
+                        raise ValueError("Legacy preflight cannot carry an empty singleton TRAIN identity")
+                    if (preflight.get(train_close.FIELD) != close_profile
+                            or preflight.get("thought_logprobs_source") != (train_close.SOURCE if close_profile is not None else BEHAVIOR_SCORES)):
+                        raise ValueError("Preflight differs from the actual owner thought policy")
                     if any(key in preflight for key in (*TRAIN_HISTORY_FIELDS, FAILURE_FIELD)):
                         raise ValueError("Original native HF preflight must retain its unchanged full-request proof")
                     if history_config.enabled:
@@ -454,7 +479,8 @@ def verify_owned_native_group(task, results, owner_rows, traces, *, eos_ids, tok
                             web_train_history_plan(tokenizer, row["messages"],
                                 config=history_config, **history_budgets)
                         except PromptHistoryBudgetExceeded as history_error:
-                            expected_failure = web_train_history_failure_fields(row["messages"], history_error, history_config)
+                            expected_failure = web_train_history_failure_fields(row["messages"], history_error, history_config,
+                                thought_policy=close_profile)
                         else:
                             raise ValueError("Web TRAIN history preflight rejected a request that can fit")
                         if (not _same(row.get(FAILURE_FIELD), expected_failure)
@@ -494,7 +520,8 @@ def verify_owned_native_group(task, results, owner_rows, traces, *, eos_ids, tok
                         config=history_config, **history_budgets)
                 except PromptHistoryBudgetExceeded as error:
                     raise ValueError("Saved Web TRAIN request has no fitting whole-turn plan") from error
-                expected_history = web_train_history_fields(row["messages"], plan.report, history_config)
+                expected_history = web_train_history_fields(row["messages"], plan.report, history_config,
+                    thought_policy=close_profile)
                 if (not _same({key: trace.get(key) for key in TRAIN_HISTORY_FIELDS}, expected_history)
                         or "native_web_prompt_history" in trace):
                     raise ValueError("Web TRAIN history trace differs from recomputed original request")
@@ -503,12 +530,27 @@ def verify_owned_native_group(task, results, owner_rows, traces, *, eos_ids, tok
                 if any(key in trace for key in (*TRAIN_HISTORY_FIELDS, "native_web_prompt_history")):
                     raise ValueError("Unexpected Web TRAIN history without explicit configuration")
                 expected_prompt = _chat_tokens(tokenizer, row["messages"])
+            fields = {}
+            if close_profile is not None:
+                train_close.validate_configuration(row.get(train_close.FIELD), thought_tokens=close_profile["thought_tokens"])
+                fields = train_close.validate_fields(close_profile, row.get(train_close.POSITIONS),
+                    row["completion_ids"][:count], row["thought_logprobs"],
+                    thought_tokens=close_profile["thought_tokens"])
+                trace_fields = train_close.validate_fields(trace.get(train_close.FIELD),
+                    trace.get(train_close.POSITIONS), trace.get("thought_ids"),
+                    trace.get("thought_logprobs"), thought_tokens=close_profile["thought_tokens"])
+                if ({key: row.get(key) for key in fields} != fields
+                        or trace_fields != fields):
+                    raise ValueError("Actual owner/native singleton policy differs")
+            elif any(key in row or key in trace for key in (train_close.FIELD, train_close.POSITIONS)):
+                raise ValueError("Unexpected singleton policy without the owner opt-in")
             if (not _same(expected_prompt, row["prompt_ids"])
-                    or trace.get("protocol") != HF_PROTOCOL or trace.get("task_id") != task.id
+                    or trace.get("protocol") != (train_close.PROTOCOL if close_profile is not None else HF_PROTOCOL)
+                    or trace.get("task_id") != task.id
                     or trace.get("thought_sampling_profile") != "raw"
-                    or trace.get("thought_logprobs_source") != BEHAVIOR_SCORES
+                    or trace.get("thought_logprobs_source") != (train_close.SOURCE if close_profile is not None else BEHAVIOR_SCORES)
                     or not _same(trace.get("thought_logprobs"), row["thought_logprobs"])
-                    or row.get("thought_logprobs_source") != BEHAVIOR_SCORES
+                    or row.get("thought_logprobs_source") != (train_close.SOURCE if close_profile is not None else BEHAVIOR_SCORES)
                     or trace.get("prompt_ids") != row["prompt_ids"]
                     or trace.get("thought_ids") != row["completion_ids"][:count]
                     or trace.get("json_ids") != row["completion_ids"][count:]
@@ -588,6 +630,8 @@ class PublicGroupJournals:
         prompts = verify_owned_native_group(self.task, results, saved["request_owners"],
             saved["native_traces"], eos_ids=policy.eos_ids, tokenizer=policy.tokenizer,
             iteration=self.iteration, rank=self.rank,
+            **({train_close.FIELD: train_close.configuration(policy.thought_tokens)}
+               if getattr(policy, train_close.FIELD, False) else {}),
             **(dict(web_train_prompt_history_config=policy.web_train_prompt_history_config,
                     history_budgets=web_train_history_budgets(policy))
                if getattr(getattr(policy, "web_train_prompt_history_config", None), "enabled", False) else {}))

@@ -12,6 +12,7 @@ import math
 
 import torch
 
+from . import web_train_thought_budget_close as train_close
 from .native_hf_context import (unreliable_context_or_environment_group,
                                 validated_thought_step)
 
@@ -24,6 +25,8 @@ class ThoughtSegment:
     prompt_ids: list[int]
     completion_ids: list[int]
     thought_logprobs: list[float]
+    web_train_thought_budget_close: dict | None = None
+    forced_thought_positions: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -74,7 +77,12 @@ def group_signal(results, *, group_size, max_steps, thought_tokens, advantage_no
         for step in result.steps:
             prompt, thought, behavior = validated_thought_step(step, thought_tokens=thought_tokens)
             if thought:
-                segments.append(ThoughtSegment(prompt, thought, behavior))
+                fields = train_close.step_fields(step, thought_tokens=thought_tokens)
+                if fields and result.benchmark != "widesearch":
+                    raise ValueError("Singleton thought control supports newly owned Web TRAIN only")
+                segments.append(ThoughtSegment(prompt, thought, behavior,
+                    **({train_close.FIELD: fields[train_close.FIELD],
+                        train_close.POSITIONS: tuple(fields[train_close.POSITIONS])} if fields else {})))
         if not segments:
             return GroupSignal([[] for _ in results], [0.0] * group_size, rewards, 0.0,
                                "missing_sampled_thought_group", advantage_normalization)
@@ -92,7 +100,8 @@ def group_signal(results, *, group_size, max_steps, thought_tokens, advantage_no
                        advantage_normalization=advantage_normalization)
 
 
-def thought_policy_loss(current, old, advantage, *, group_size, max_steps, thought_tokens, clip=0.2):
+def thought_policy_loss(current, old, advantage, *, group_size, max_steps, thought_tokens, clip=0.2,
+                        policy_mask=None):
     """Token-clipped GRPO with a fixed budget denominator.
 
     No division by observed response length or by observed successful turns:
@@ -110,6 +119,10 @@ def thought_policy_loss(current, old, advantage, *, group_size, max_steps, thoug
         raise ValueError("Thought scores exceed the declared sampled thought budget")
     ratio = (current - old).exp()
     surrogate = torch.minimum(ratio * advantage, ratio.clamp(1 - clip, 1 + clip) * advantage)
+    if policy_mask is not None:
+        if policy_mask.shape != current.shape or policy_mask.dtype != torch.bool or policy_mask.device != current.device:
+            raise ValueError("Aligned boolean deterministic-slot policy mask required")
+        surrogate = surrogate.masked_fill(~policy_mask, 0)
     return -surrogate.sum() / (group_size * max_steps * thought_tokens)
 
 
