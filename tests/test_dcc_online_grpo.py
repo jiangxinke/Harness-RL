@@ -703,10 +703,13 @@ def _distributed_update_worker(rank, rendezvous, output):
 
 
 def test_real_gloo_global_update_and_zero_signal_momentum(tmp_path):
+    import tempfile
     import torch.multiprocessing as mp
-    mp.spawn(_distributed_update_worker,
-        args=(str(tmp_path / "rendezvous"), str(tmp_path / "result-")),
-        nprocs=2, join=True)
+    # Gloo's file-store needs local coordination; artifacts may use a mount.
+    with tempfile.TemporaryDirectory(prefix="dcc-gloo-rendezvous-") as rendezvous_dir:
+        mp.spawn(_distributed_update_worker,
+            args=(str(Path(rendezvous_dir) / "rendezvous"), str(tmp_path / "result-")),
+            nprocs=2, join=True)
     assert [(tmp_path / f"result-{rank}").read_text() for rank in range(2)] == ["passed", "passed"]
 
 
