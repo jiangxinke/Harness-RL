@@ -53,8 +53,8 @@ from slime_plugins.dcc.native_joint_grpo import (JSON_SURROGATE_VARIANT,
 from slime_plugins.dcc.web_observation_budget import web_observation_budget_configuration
 from slime_plugins.dcc.web_train_prompt_history import (web_train_history_configuration,
     web_train_history_from_arguments)
-from slime_plugins.dcc.online_web import (ONLINE_REWARD_VARIANTS, TABLE_GROUNDED_REWARD,
-    online_reward_configuration)
+from slime_plugins.dcc.online_web import (MIXED_BENCHMARK_SCHEDULES, ONLINE_REWARD_VARIANTS,
+    TABLE_GROUNDED_REWARD, online_reward_configuration, validate_mixed_benchmark_schedule)
 from slime_plugins.dcc.retrieval import load_retrieval_profile
 from slime_plugins.dcc.tools import WebTools
 
@@ -347,6 +347,12 @@ def configuration(args, plan, tasks, world_size):
     from slime_plugins.dcc.web_reasoning import web_concise_reasoning_configuration
 
     train_history = web_train_history_from_arguments(args)
+    schedule = getattr(args, "mixed_benchmark_schedule", "slot-interleaved")
+    validate_mixed_benchmark_schedule(schedule, steps=getattr(args, "steps", None),
+        cuad_draws_per_cycle=getattr(args, "cuad_draws_per_cycle", 1),
+        web_draws_per_cycle=getattr(args, "web_draws_per_cycle", 1))
+    if schedule != "slot-interleaved" and not getattr(args, "enable_online_web", False):
+        raise ValueError("--mixed-benchmark-schedule iteration-blocked requires --enable-online-web")
     confidence_weight = getattr(args, "cuad_confidence_reward_weight", 0)
     validate_confidence_reward_weight(confidence_weight,
         joint_json_policy=getattr(args, "joint_json_policy", False),
@@ -381,6 +387,7 @@ def configuration(args, plan, tasks, world_size):
                    and (key != "json_surrogate_weight" or value != 1)
                    and (key != "cuad_confidence_reward_weight" or value != 0)
                    and (key != "web_observation_token_budget" or value is not None)
+                   and (key != "mixed_benchmark_schedule" or value != "slot-interleaved")
                    and (key != "web_train_prompt_history_whole_turns" or bool(value))
                    and (key != "web_train_prompt_history_keep_recent_turns" or value is not None)},
         compute_profile=compute_profile_configuration(getattr(args, "compute_profile", "legacy")),
@@ -460,6 +467,9 @@ def configuration(args, plan, tasks, world_size):
             online_train_reward=online_reward_configuration(
                 getattr(args, "web_train_reward_variant", TABLE_GROUNDED_REWARD)),
             labels="deserialized-only-after-own-group-durable-close")
+        if schedule == "iteration-blocked":
+            config["online_web"]["benchmark_schedule"] = dict(mode=schedule,
+                scope="global-iteration", optimization_order_changed=True)
     return config
 
 
@@ -823,6 +833,10 @@ def main(argv=None):
                         help="Online Web TRAIN only: original whole-table grounding (default), or per-row TP eligibility with full prediction/gold denominators")
     parser.add_argument("--cuad-draws-per-cycle", type=int, default=1)
     parser.add_argument("--web-draws-per-cycle", type=int, default=1)
+    parser.add_argument("--mixed-benchmark-schedule", choices=MIXED_BENCHMARK_SCHEDULES,
+                        default="slot-interleaved",
+                        help="Original flat-slot interleaving (default), or homogeneous global iterations; "
+                             "iteration-blocked requires complete benchmark cycles and changes optimizer order")
     parser.add_argument("--cuad-task-sampling",
                         choices=("stratified-3to1", "uniform", "stratified-3to1-span-cap5"),
                         default="stratified-3to1",
@@ -893,6 +907,11 @@ def main(argv=None):
     if args.policy_surrogate == "episode-gspo" and args.enable_online_web:
         parser.error("--policy-surrogate episode-gspo supports CUAD only and cannot be combined with --enable-online-web")
     try:
+        validate_mixed_benchmark_schedule(args.mixed_benchmark_schedule, steps=args.steps,
+            cuad_draws_per_cycle=args.cuad_draws_per_cycle,
+            web_draws_per_cycle=args.web_draws_per_cycle)
+        if args.mixed_benchmark_schedule != "slot-interleaved" and not args.enable_online_web:
+            raise ValueError("--mixed-benchmark-schedule iteration-blocked requires --enable-online-web")
         web_train_history_from_arguments(args)
         validate_reference_kl_beta(args.reference_kl_beta)
         validate_policy_surrogate(args.policy_surrogate, args.reference_kl_beta)
@@ -939,7 +958,8 @@ def main(argv=None):
         plan = mixed_task_plan(tasks, web_inputs.tasks, steps=args.steps, world_size=world_size,
             seed=args.seed, cuad_draws_per_cycle=args.cuad_draws_per_cycle,
             web_draws_per_cycle=args.web_draws_per_cycle,
-            cuad_plan=partial(task_plan, sampling=args.cuad_task_sampling))
+            cuad_plan=partial(task_plan, sampling=args.cuad_task_sampling),
+            schedule=args.mixed_benchmark_schedule)
         tasks = tasks + web_inputs.tasks
     else:
         if any(web_paths) or args.cuad_draws_per_cycle != 1 or args.web_draws_per_cycle != 1:

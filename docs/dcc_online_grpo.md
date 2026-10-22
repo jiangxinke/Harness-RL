@@ -72,6 +72,7 @@ compare base and trained adapters under this exact HF precision, harness, token
 budgets and evaluation sampling. Scores from older vLLM runs are not matched
 controls for this runtime. The matched CUAD evaluator rejects Web. The trainer offers separately reviewed
 Web TRAIN groups through the opt-in switch described in `dcc_online_web.md`.
+The optional [mixed benchmark schedule](dcc_mixed_benchmark_schedule.md) alternates homogeneous global iterations while preserving complete-cycle draw counts and disclosing the change in optimization order.
 
 For Web groups, the separate default-off
 [`--web-concise-reasoning`](dcc_web_concise_reasoning.md) adds generic prompt

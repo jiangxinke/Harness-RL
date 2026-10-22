@@ -38,6 +38,7 @@ BEHAVIOR_SCORES = "streaming-generation-raw-logits-v1"
 TABLE_GROUNDED_REWARD = "table-grounded-exact-v1"
 ROW_GROUNDED_REWARD = "per-row-grounded-exact-v1"
 ONLINE_REWARD_VARIANTS = (TABLE_GROUNDED_REWARD, ROW_GROUNDED_REWARD)
+MIXED_BENCHMARK_SCHEDULES = ("slot-interleaved", "iteration-blocked")
 ROW_REWARD_PROTOCOL = "dcc-web-online-train-per-row-grounded-exact-v1"
 ROW_REWARD_WRAPPER = "dcc-hf-online-web-public-closed-per-row-grounded-v1"
 ROW_REWARD_METRIC = "train_per_row_grounded_exact_f1"
@@ -237,12 +238,28 @@ class WebTrainingInputs:
         return labels[group.task.id]
 
 
+def validate_mixed_benchmark_schedule(schedule, *, steps, cuad_draws_per_cycle, web_draws_per_cycle):
+    """The opt-in schedule must preserve draw counts across complete cycles."""
+    if schedule not in MIXED_BENCHMARK_SCHEDULES:
+        raise ValueError("Unknown mixed benchmark schedule")
+    if schedule == "iteration-blocked":
+        if any(type(value) is not int or value < 1 for value in
+               (steps, cuad_draws_per_cycle, web_draws_per_cycle)):
+            raise ValueError("iteration-blocked requires positive integer steps and per-benchmark draws")
+        if steps % (cuad_draws_per_cycle + web_draws_per_cycle):
+            raise ValueError("iteration-blocked requires --steps to be a complete benchmark cycle "
+                             "(cuad_draws_per_cycle + web_draws_per_cycle)")
+
+
 def mixed_task_plan(cuad_tasks, web_tasks, *, steps, world_size, seed,
-                    cuad_draws_per_cycle=1, web_draws_per_cycle=1, cuad_plan):
+                    cuad_draws_per_cycle=1, web_draws_per_cycle=1, cuad_plan,
+                    schedule="slot-interleaved"):
     """Existing CUAD label strata; independent public-ID-only Web deck.
 
     This complete plan is not label-blind: the authorized CUAD planner retains
     its TRAIN gold positive/negative stratification. Web selection sees IDs only.
+    Iteration-blocked scheduling changes optimizer order while retaining each
+    benchmark's original draws and independent deck over complete cycles.
     """
     if any(type(v) is not int or v < 1 for v in
            (steps, world_size, cuad_draws_per_cycle, web_draws_per_cycle)):
@@ -250,8 +267,13 @@ def mixed_task_plan(cuad_tasks, web_tasks, *, steps, world_size, seed,
     ids = [task.id for task in cuad_tasks + web_tasks]
     if len(ids) != len(set(ids)):
         raise ValueError("CUAD and Web task identities must be globally unique")
+    validate_mixed_benchmark_schedule(schedule, steps=steps,
+        cuad_draws_per_cycle=cuad_draws_per_cycle, web_draws_per_cycle=web_draws_per_cycle)
     slots = (["cuad"] * cuad_draws_per_cycle + ["widesearch"] * web_draws_per_cycle)
-    kinds = [slots[index % len(slots)] for index in range(steps * world_size)]
+    if schedule == "iteration-blocked":
+        kinds = [slots[iteration % len(slots)] for iteration in range(steps) for _ in range(world_size)]
+    else:
+        kinds = [slots[index % len(slots)] for index in range(steps * world_size)]
     cuad_count = kinds.count("cuad")
     cuad_indices = iter(index for row in cuad_plan(cuad_tasks,
         steps=max(1, cuad_count), world_size=1, seed=seed) for index in row)
