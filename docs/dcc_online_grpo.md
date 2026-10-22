@@ -37,6 +37,29 @@ the relative phase gradients and can affect global gradient clipping and
 relative KL strength. This is a separate algorithm candidate whose benefit
 requires a matched evaluation.
 
+The default-off `--cuad-confidence-reward-weight 0.05` is a separate CUAD
+joint-training experiment. After each TRAIN rollout, it discounts the original
+F1-times-grounding reward by
+`1 - weight * min(1, sum_span_brier / max(1, gold_span_count))`. A span has target
+one if it matches any TRAIN gold span under the existing CUAD matching rule,
+and zero otherwise. Confidence values use the existing answer normalization.
+The denominator is fixed by TRAIN gold, so adding redundant, perfectly
+confident matching spans cannot dilute another span's error. Clipping keeps
+the discount bounded. Empty predictions receive no discount; failures and
+zero rewards stay zero.
+The finite weight must be in `[0, 1]`, and a nonzero weight requires CUAD-only
+`--joint-json-policy`. Use the same weight in CPU preflight and training.
+
+The original reward, Brier error and shaped reward are recorded per rollout.
+Default weight zero takes the original reward path and preserves configuration
+identity. Actor prompts, schemas, behavior logprobs, replay, benchmark scoring
+and reported confidence values are unchanged. This adds a calibration target
+that the original span-F1 reward does not identify; it does not establish an
+AUPR improvement. Multiplicative shaping supplies no calibration signal for
+zero-reward predictions, and a small nonzero discount can become a large
+advantage under standard-deviation normalization. A bounded candidate should
+use a declared advantage rule and be compared with a matched fresh base.
+
 Use fresh rollouts, a fresh output directory and a matched base/adapter
 evaluation for this experiment. Joint replay includes JSON in the decoder
 sequence and retains packed grammar masks, increasing compute and memory.

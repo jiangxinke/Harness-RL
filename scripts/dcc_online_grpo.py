@@ -31,6 +31,9 @@ from dcc_training_io import prepare_training_output, publish_checkpoint
 from dcc_train import validate_grpo_dropout
 from slime_plugins.dcc import EpisodeRunner, load_tasks
 from slime_plugins.dcc.cuad_reasoning import cuad_concise_reasoning_configuration
+from slime_plugins.dcc.cuad_confidence_reward import (
+    VARIANT as CONFIDENCE_REWARD_VARIANT, calibrate_cuad_train_group,
+    confidence_reward_configuration, validate_confidence_reward_weight)
 from slime_plugins.dcc.web_auto_read import auto_read_follow_docs_configuration
 from slime_plugins.dcc.durable_journal import OrderedDurableJSONLWriter, close_durable_journals
 from slime_plugins.dcc.hf_chunked_logprobs import resolve_logprob_backend
@@ -344,6 +347,11 @@ def configuration(args, plan, tasks, world_size):
     from slime_plugins.dcc.web_reasoning import web_concise_reasoning_configuration
 
     train_history = web_train_history_from_arguments(args)
+    confidence_weight = getattr(args, "cuad_confidence_reward_weight", 0)
+    validate_confidence_reward_weight(confidence_weight,
+        joint_json_policy=getattr(args, "joint_json_policy", False),
+        online_web=getattr(args, "enable_online_web", False),
+        benchmarks=(t.benchmark for t in tasks))
     surrogate = getattr(args, "policy_surrogate", "token-grpo")
     validate_policy_surrogate(surrogate, getattr(args, "reference_kl_beta", 0))
     weight = getattr(args, "json_surrogate_weight", 1)
@@ -371,6 +379,7 @@ def configuration(args, plan, tasks, world_size):
                    if (key not in {"joint_json_policy", "web_zip_member_fallback", "web_concise_reasoning"} or value)
                    and (key != "policy_surrogate" or value != "token-grpo")
                    and (key != "json_surrogate_weight" or value != 1)
+                   and (key != "cuad_confidence_reward_weight" or value != 0)
                    and (key != "web_observation_token_budget" or value is not None)
                    and (key != "web_train_prompt_history_whole_turns" or bool(value))
                    and (key != "web_train_prompt_history_keep_recent_turns" or value is not None)},
@@ -424,6 +433,11 @@ def configuration(args, plan, tasks, world_size):
         config["algorithm_variant"] = "+".join(filter(None,
             (config.get("algorithm_variant"), JSON_SURROGATE_VARIANT)))
         config["json_surrogate"] = json_surrogate_configuration(weight)
+    if confidence_weight:
+        config["algorithm"] += "+" + CONFIDENCE_REWARD_VARIANT
+        config["algorithm_variant"] = "+".join(filter(None,
+            (config.get("algorithm_variant"), CONFIDENCE_REWARD_VARIANT)))
+        config["cuad_train_confidence_reward"] = confidence_reward_configuration(confidence_weight)
     if getattr(args, "enable_online_web", False):
         from slime_plugins.dcc.online_web import binding_protocols
         if train_history is not None:
@@ -553,6 +567,10 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
         policy_surrogate=getattr(args, "policy_surrogate", "token-grpo"),
         online_web=getattr(args, "enable_online_web", False) or web_inputs is not None,
         benchmarks=(t.benchmark for t in tasks))
+    validate_confidence_reward_weight(getattr(args, "cuad_confidence_reward_weight", 0),
+        joint_json_policy=getattr(args, "joint_json_policy", False),
+        online_web=getattr(args, "enable_online_web", False) or web_inputs is not None,
+        benchmarks=(t.benchmark for t in tasks))
     if getattr(args, "policy_surrogate", "token-grpo") == "episode-gspo" and (
             getattr(args, "enable_online_web", False) or web_inputs is not None
             or any(t.benchmark != "cuad" for t in tasks)):
@@ -671,6 +689,8 @@ async def train(args, tasks, plan, world_size, *, web_inputs=None):
                        **web_reward)
             else:
                 results = await collect_group(runner, task, policy, group_size=args.group_size, rank=rank)
+                results = calibrate_cuad_train_group(task, results,
+                    weight=getattr(args, "cuad_confidence_reward_weight", 0))
             record(event="collect_end", iteration=iteration, task_id=task.id, episodes=len(results),
                    seconds=time.monotonic() - begin)
             for sample, result in enumerate(results):
@@ -821,6 +841,8 @@ def main(argv=None):
                         help="CUAD only: fresh raw-thought and grammar-masked stochastic-JSON GRPO; old greedy JSON traces are unsupported")
     parser.add_argument("--json-surrogate-weight", type=float, default=1,
                         help="Default 1 preserves the original loss; nondefault CUAD joint token-GRPO weights JSON policy surrogates only, with the original fixed denominator")
+    parser.add_argument("--cuad-confidence-reward-weight", type=float, default=0,
+                        help="Opt-in CUAD joint TRAIN reward discount by clipped gold-normalized span-confidence Brier error; 0 preserves original rewards and held-out scoring is unchanged")
     parser.add_argument("--web-observation-token-budget", type=int, default=None,
                         help="Opt-in Web tool observation JSON token cap, including all auto-reads and metadata; requires --enable-online-web")
     parser.add_argument("--web-train-prompt-history-whole-turns", action="store_true",
@@ -877,6 +899,8 @@ def main(argv=None):
         validate_json_surrogate_weight(args.json_surrogate_weight,
             joint_json_policy=args.joint_json_policy, policy_surrogate=args.policy_surrogate,
             online_web=args.enable_online_web)
+        validate_confidence_reward_weight(args.cuad_confidence_reward_weight,
+            joint_json_policy=args.joint_json_policy, online_web=args.enable_online_web)
         web_observation_budget_configuration(args.web_observation_token_budget)
         if args.web_observation_token_budget is not None and not args.enable_online_web:
             raise ValueError("Web observation token budget requires --enable-online-web")
