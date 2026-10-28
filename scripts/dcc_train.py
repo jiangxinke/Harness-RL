@@ -216,7 +216,9 @@ async def train(args):
         from slime_plugins.dcc.graphpo_runtime import GraphPOSummarizer, SentenceEmbedder
         summary_policy = HFPolicy(model, tokenizer, batch_size=1,
             max_prompt_tokens=32768, allow_truncation=False, raw_sampling=True)
-        graph_callbacks = (GraphPOSummarizer(summary_policy, tokenizer, protocol=runner.cuad_protocol), SentenceEmbedder(args.graphpo_embedding))
+        embedder = SentenceEmbedder(args.graphpo_embedding)
+        graph_callbacks = (GraphPOSummarizer(summary_policy, tokenizer, protocol=runner.cuad_protocol,
+            embedding_tokenizer=embedder.tokenizer, embedding_max_tokens=embedder.max_tokens), embedder)
     positives = [task for task in tasks if task.gold]
     negatives = [task for task in tasks if not task.gold]
     if not positives:

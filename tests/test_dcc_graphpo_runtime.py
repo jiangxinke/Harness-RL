@@ -70,8 +70,7 @@ def test_invalid_summary_is_logged_and_retried_without_fallback():
 
 
 @pytest.mark.parametrize("output", [
-    valid(facts=["HALLUCINATED CONTRACT"]), valid(stage="final"),
-    valid(last_action="search_document"), valid(facts="PROMOTION AGREEMENT."),
+    valid(facts=["HALLUCINATED CONTRACT"]), valid(facts="PROMOTION AGREEMENT."),
     valid(unresolved=["x" * 161]), valid(reward=1),
     '{"facts":[],"facts":[],"unresolved":[],"last_action":"none","stage":"initial"}',
 ])
@@ -132,8 +131,8 @@ def test_audited_rejected_actions_do_not_become_final_or_valid_summary_actions(a
     result = asyncio.run(GraphPOSummarizer(policy_with([output], calls), TOKENIZER)(messages))
     assert json.loads(result)["last_action"] == "invalid_output"
     request = json.loads(calls[0]["messages"][1]["content"])
-    assert request["required_stage"] == "active"
-    assert request["required_last_action"] == "invalid_output"
+    assert request["observed_stage"] == "active"
+    assert request["observed_last_action"] == "invalid_output"
 
 
 @pytest.mark.parametrize("action", ['[{"answer":[]}]', '{"answer":[],"answer":[]}'])
@@ -369,3 +368,73 @@ def test_embedding_provenance_rejects_other_model_or_revision(tmp_path, monkeypa
     (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="pinned BGE"):
         verify_embedding_model(tmp_path)
+
+
+def test_state_controls_are_derived_and_model_written_controls_are_logged():
+    calls = []
+    output = valid(last_action="read_document", stage="final")
+    summarizer = GraphPOSummarizer(policy_with([output], calls), TOKENIZER)
+    summary = json.loads(asyncio.run(summarizer(history())))
+    assert summary["last_action"] == "none"
+    assert summary["stage"] == "initial"
+    assert summarizer.records[0]["ignored_model_controls"] == {"last_action": "read_document", "stage": "final"}
+    assert summarizer.records[0]["derived_controls"] == {"last_action": "none", "stage": "initial"}
+    assert summarizer.records[0]["runtime_version"] == "graphpo-source-quotes-derived-controls-v2"
+    assert summarizer.usage["validation_failures"] == 0
+
+
+def test_model_can_return_only_semantic_fields():
+    output = json.dumps({"facts": ["PROMOTION AGREEMENT."], "unresolved": ["contract title"]})
+    summary = json.loads(asyncio.run(GraphPOSummarizer(policy_with([output], []), TOKENIZER)(history())))
+    assert set(summary) == {"facts", "unresolved", "last_action", "stage"}
+    assert summary["last_action"] == "none"
+
+
+def test_long_grounded_quotation_uses_embedding_tokens_not_character_limit():
+    quote = "The receiving party shall keep the confidential information secure. " * 6
+    messages = history()
+    messages[-1]["content"] = "Initial contract retrieval (source material):\n" + json.dumps({"text": quote})
+
+    class WordTokenizer:
+        def encode(self, text, *, add_special_tokens, truncation):
+            assert add_special_tokens and truncation is False
+            return list(range(len(text.split()) + 2))
+
+    output = json.dumps({"facts": [quote], "unresolved": []})
+    summarizer = GraphPOSummarizer(policy_with([output], []), TOKENIZER,
+                                   embedding_tokenizer=WordTokenizer(), embedding_max_tokens=512)
+    summary = json.loads(asyncio.run(summarizer(messages)))
+    assert len(quote) > 200
+    assert summary["facts"] == [quote]
+    assert summarizer.records[0]["embedding_tokens"] < 512
+    assert summarizer.records[0]["embedding_capacity_checked"]
+
+
+def test_embedding_overlength_retries_shorter_grounded_summary_without_truncation():
+    quote = "PROMOTION AGREEMENT. " + "The parties agree to maintain confidentiality. " * 10
+    messages = history()
+    messages[-1]["content"] = "Initial contract retrieval (source material):\n" + json.dumps({"text": quote})
+
+    class CharTokenizer:
+        def __init__(self):
+            self.seen = []
+
+        def encode(self, text, *, add_special_tokens, truncation):
+            assert add_special_tokens and truncation is False
+            self.seen.append(text)
+            return list(range(len(text) + 2))
+
+    embed_tokenizer = CharTokenizer()
+    outputs = [json.dumps({"facts": [quote], "unresolved": []}),
+               json.dumps({"facts": ["PROMOTION AGREEMENT."], "unresolved": []})]
+    summarizer = GraphPOSummarizer(policy_with(outputs, []), TOKENIZER,
+                                   embedding_tokenizer=embed_tokenizer, embedding_max_tokens=180)
+    result = asyncio.run(summarizer(messages))
+    assert json.loads(result)["facts"] == ["PROMOTION AGREEMENT."]
+    assert len(embed_tokenizer.seen) == 2
+    assert quote in json.loads(embed_tokenizer.seen[0])["facts"]
+    assert summarizer.records[0]["embedding_tokens"] > 180
+    assert not summarizer.records[0]["valid"]
+    assert summarizer.records[1]["embedding_tokens"] <= 180
+    assert summarizer.records[1]["valid"]
+    assert summarizer.usage["output_tokens"] == sum(len(record["completion_ids"]) for record in summarizer.records)
