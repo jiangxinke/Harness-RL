@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+import json
+import time
 
 import torch
 
@@ -118,12 +120,24 @@ class HFPolicy:
         self.raw_sampling = raw_sampling
         self.queue: asyncio.Queue = asyncio.Queue()
         self.worker: asyncio.Task | None = None
+        self._summary_tokenizer_data = None
+        self.summary_constraint_usage = dict(calls=0, setup_seconds=0.0)
 
     async def __call__(self, messages, *, max_new_tokens: int, temperature: float) -> PolicyCompletion:
+        return await self._enqueue(messages, max_new_tokens, temperature, None)
+
+    async def generate_summary(self, messages, *, selection_schema, max_new_tokens: int, temperature: float) -> PolicyCompletion:
+        """Constrain auxiliary excerpt selection without changing actor sampling."""
+        if temperature != 0:
+            raise ValueError("Summary selection requires deterministic decoding")
+        schema_key = json.dumps(selection_schema, sort_keys=True, separators=(",", ":"))
+        return await self._enqueue(messages, max_new_tokens, temperature, schema_key)
+
+    async def _enqueue(self, messages, max_new_tokens, temperature, schema_key):
         if self.worker is None:
             self.worker = asyncio.create_task(self._work())
         future = asyncio.get_running_loop().create_future()
-        await self.queue.put((messages, max_new_tokens, temperature, future))
+        await self.queue.put((messages, max_new_tokens, temperature, future, schema_key))
         return await future
 
     async def close(self):
@@ -145,15 +159,16 @@ class HFPolicy:
                     stop = True
                     break
                 requests.append(item)
-            groups: dict[tuple[int, float], list] = defaultdict(list)
+            groups: dict[tuple[int, float, str | None], list] = defaultdict(list)
             for request in requests:
                 if not request[3].done():
-                    groups[(request[1], request[2])].append(request)
-            for (limit, temperature), group in groups.items():
+                    groups[(request[1], request[2], request[4])].append(request)
+            for (limit, temperature, schema_key), group in groups.items():
                 try:
                     # The worker serializes model access. Tools remain free to
                     # perform network I/O while CUDA generation runs in a thread.
-                    values = await asyncio.to_thread(self.generate, [item[0] for item in group], limit, temperature)
+                    options = {"selection_schema": json.loads(schema_key)} if schema_key is not None else {}
+                    values = await asyncio.to_thread(self.generate, [item[0] for item in group], limit, temperature, **options)
                     for request, value in zip(group, values, strict=True):
                         if not request[3].done():
                             request[3].set_result(value)
@@ -165,7 +180,7 @@ class HFPolicy:
                 return
 
     @torch.inference_mode()
-    def generate(self, messages_batch, max_new_tokens: int, temperature: float) -> list[PolicyCompletion]:
+    def generate(self, messages_batch, max_new_tokens: int, temperature: float, *, selection_schema=None) -> list[PolicyCompletion]:
         if self.raw_sampling and temperature > 0 and temperature != 1.0:
             raise ValueError("Raw policy sampling requires temperature=1")
         prompts = [encode_messages(self.tokenizer, messages, self.max_prompt_tokens, allow_truncation=self.allow_truncation) for messages in messages_batch]
@@ -203,6 +218,27 @@ class HFPolicy:
                 "return_dict_in_generate": False,
             }
             options.update({key: value for key, value in neutral.items() if hasattr(self.model.generation_config, key)})
+        if selection_schema is not None:
+            if temperature != 0:
+                raise ValueError("Summary selection requires deterministic decoding")
+            from importlib.metadata import version
+            from lmformatenforcer import RegexParser
+            from lmformatenforcer.integrations.transformers import (
+                build_token_enforcer_tokenizer_data, build_transformers_prefix_allowed_tokens_fn,
+            )
+            from .graphpo_runtime import SUMMARY_CONSTRAINT_VERSION, summary_selection_regex
+
+            if version("lm-format-enforcer") != SUMMARY_CONSTRAINT_VERSION:
+                raise ValueError(f"Summary decoding requires lm-format-enforcer=={SUMMARY_CONSTRAINT_VERSION}")
+            started = time.monotonic()
+            if self._summary_tokenizer_data is None:
+                self._summary_tokenizer_data = build_token_enforcer_tokenizer_data(self.tokenizer)
+            parser = RegexParser(summary_selection_regex(selection_schema))
+            options["prefix_allowed_tokens_fn"] = build_transformers_prefix_allowed_tokens_fn(
+                self._summary_tokenizer_data, parser,
+            )
+            self.summary_constraint_usage["calls"] += len(messages_batch)
+            self.summary_constraint_usage["setup_seconds"] += time.monotonic() - started
         output = self.model.generate(
             input_ids=ids,
             attention_mask=attention,

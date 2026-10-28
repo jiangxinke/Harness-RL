@@ -18,7 +18,9 @@ from .graphpo_collector import chat_tokens
 
 
 BGE_MODEL_CARD = "https://huggingface.co/BAAI/bge-small-en-v1.5"
-SUMMARY_VERSION = "graphpo-extractive-public-state-v6"
+SUMMARY_VERSION = "graphpo-constrained-extractive-state-v7"
+SUMMARY_CONSTRAINT_VERSION = "0.11.3"
+SUMMARY_MAX_ITEMS = 8
 BGE_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
 BGE_FILE_HASHES = {
     "model.safetensors": "3c9f31665447c8911517620762200d2245a2518d6e7208acc78cd9db317e21ad",
@@ -292,7 +294,47 @@ def _task_question(history):
     return ""
 
 
-def validate_summary(text, history, *, last_action, stage, protocol):
+def summary_selection_schema(candidates, max_items=SUMMARY_MAX_ITEMS):
+    if type(max_items) is not int or not 1 <= max_items <= SUMMARY_MAX_ITEMS:
+        raise ValueError("Summary selection allows one to eight excerpts per domain")
+    properties = {}
+    for field, domain in (("fact_ids", "facts"), ("unresolved_ids", "unresolved"), ("claim_ids", "claims")):
+        ids = [entry["id"] for entry in candidates[domain]]
+        properties[field] = {"type": "array", "items": {"type": "integer", "enum": ids},
+                             "maxItems": min(len(ids), max_items)}
+    return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
+
+
+def summary_selection_regex(schema):
+    """Compile the finite selection schema, including an exactly empty domain.
+
+    LMFE 0.11.3 permits a first item despite maxItems=0. Its regex parser
+    avoids that boundary bug; duplicate selections remain visible in the log.
+    """
+    fields = ["fact_ids", "unresolved_ids", "claim_ids"]
+    if (schema.get("type") != "object" or schema.get("required") != fields
+            or schema.get("additionalProperties") is not False or set(schema.get("properties", {})) != set(fields)):
+        raise ValueError("Only the three-domain summary selection schema is supported")
+    parts = []
+    for field in fields:
+        array = schema["properties"][field]
+        ids = array.get("items", {}).get("enum")
+        limit = array.get("maxItems")
+        if (array.get("type") != "array" or array.get("items", {}).get("type") != "integer"
+                or not isinstance(ids, list) or any(type(index) is not int or index < 1 for index in ids)
+                or len(ids) != len(set(ids)) or type(limit) is not int
+                or not 0 <= limit <= min(len(ids), SUMMARY_MAX_ITEMS)):
+            raise ValueError("Summary arrays require positive integer enums and explicit bounds")
+        if not limit:
+            values = r"\[\]"
+        else:
+            choice = "(" + "|".join(map(str, ids)) + ")"
+            values = r"\[(" + choice + "(," + choice + "){0," + str(limit - 1) + r"})?\]"
+        parts.append(re.escape(json.dumps(field) + ":") + values)
+    return r"\{" + ",".join(parts) + r"\}"
+
+
+def validate_summary(text, history, *, last_action, stage, protocol, allow_duplicate_ids=False, selection_log=None):
     try:
         value = json.loads(text, object_pairs_hook=_unique_object,
                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("Nonfinite summary value")))
@@ -315,10 +357,18 @@ def validate_summary(text, history, *, last_action, stage, protocol):
             ids = value[id_key]
             pool = candidates[domain]
             if (not isinstance(ids, list) or any(type(index) is not int for index in ids)
-                    or len(ids) != len(set(ids)) or any(not 1 <= index <= len(pool) for index in ids)):
+                    or (not allow_duplicate_ids and len(ids) != len(set(ids)))
+                    or any(not 1 <= index <= len(pool) for index in ids)):
                 role = "assistant-only" if domain == "claims" else "observed-source" if domain == "facts" else "task-question"
-                raise SummaryValidationError(f"{id_key} must be distinct integer IDs from the supplied {role} candidates")
-            value[text_key] = [pool[index - 1]["text"] for index in ids]
+                raise SummaryValidationError(f"{id_key} must be distinct integer IDs from the supplied {role} candidates; allowed IDs: {list(range(1, len(pool) + 1))}")
+            unique, duplicates = [], []
+            for index in ids:
+                (duplicates if index in unique else unique).append(index)
+            if selection_log is not None:
+                selection_log[id_key] = {"requested_ids": list(ids), "retained_ids": unique,
+                                         "duplicate_ids": duplicates,
+                                         "normalization": "stable set of selected excerpts; no invalid IDs removed"}
+            value[text_key] = [pool[index - 1]["text"] for index in unique]
     value.setdefault("agent_claims", [])
     for key in ("facts", "unresolved", "agent_claims"):
         values = value[key]
@@ -389,7 +439,8 @@ def verify_embedding_model(local_model_path):
 
 class GraphPOSummarizer:
     def __init__(self, policy, tokenizer, max_new_tokens=512, *, max_attempts=2,
-                 protocol="cuad-audited-v1", embedding_tokenizer=None, embedding_max_tokens=512):
+                 protocol="cuad-audited-v1", embedding_tokenizer=None, embedding_max_tokens=512,
+                 max_selected_items=SUMMARY_MAX_ITEMS):
         if type(max_new_tokens) is not int or max_new_tokens < 1:
             raise ValueError("GraphPO summary token limit must be positive")
         if type(max_attempts) is not int or not 1 <= max_attempts <= 3:
@@ -398,11 +449,14 @@ class GraphPOSummarizer:
             raise ValueError("GraphPO summarizer needs the actual CUAD runner protocol")
         if type(embedding_max_tokens) is not int or embedding_max_tokens < 1:
             raise ValueError("GraphPO embedding summary token limit must be positive")
+        if type(max_selected_items) is not int or not 1 <= max_selected_items <= SUMMARY_MAX_ITEMS:
+            raise ValueError("Summary selection allows one to eight excerpts per domain")
         self.policy, self.tokenizer = policy, tokenizer
         self.max_new_tokens, self.max_attempts = max_new_tokens, max_attempts
         self.protocol = protocol
         self.version = SUMMARY_VERSION
         self.embedding_tokenizer, self.embedding_max_tokens = embedding_tokenizer, embedding_max_tokens
+        self.max_selected_items = max_selected_items
         self.usage = dict(input_tokens=0, output_tokens=0, calls=0, seconds=0.0,
                           validation_failures=0, failed_states=0, capacity_failures=0)
         self.records = []
@@ -436,8 +490,16 @@ class GraphPOSummarizer:
         has_assistant = any(message["role"] == "assistant" for message in public_history)
         all_candidates = state_candidates(public_history, self.protocol)
         candidates = all_candidates["claims"]
+        constrained = callable(getattr(self.policy, "generate_summary", None))
+        selection_schema = summary_selection_schema(all_candidates, self.max_selected_items) if constrained else None
         instructions = SUMMARY_PROMPT
-        if not has_assistant:
+        if constrained:
+            instructions += (f" Decoding is constrained to the three listed ID arrays, in that order, without whitespace. "
+                f"Each domain permits at most {self.max_selected_items} selections; select only its most relevant excerpts. "
+                "An empty domain must be []. The program records repeated selections and retains each selected excerpt once.")
+            if not has_assistant:
+                instructions += " No prior assistant message exists; claim_ids must be []."
+        elif not has_assistant:
             instructions = instructions.replace('"fact_ids", "unresolved_ids", and "claim_ids".', '"fact_ids" and "unresolved_ids".')
             start = instructions.index('"claim_ids" is a list')
             end = instructions.index("The program derives", start)
@@ -459,6 +521,7 @@ class GraphPOSummarizer:
                                           for candidate in all_candidates["unresolved"]],
                 "claim_candidates": [{key: candidate[key] for key in ("id", "text", "message_index", "role")}
                                      for candidate in candidates],
+                **({"selection_schema": selection_schema} if constrained else {}),
             }, ensure_ascii=False)},
         ]
         for attempt in range(self.max_attempts):
@@ -471,12 +534,23 @@ class GraphPOSummarizer:
                       "fact_candidates": copy.deepcopy(all_candidates["facts"]),
                       "unresolved_candidates": copy.deepcopy(all_candidates["unresolved"]),
                       "summary_adaptation": "extractive CUAD interface; candidate selection is not an official author summary prompt",
+                      "selection_decoder": "lm-format-enforcer" if constrained else "unconstrained_legacy",
+                      "selection_decoder_version": SUMMARY_CONSTRAINT_VERSION if constrained else None,
+                      "selection_schema": copy.deepcopy(selection_schema),
+                      "selection_max_items_per_domain": self.max_selected_items if constrained else None,
+                      "selection_regex": summary_selection_regex(selection_schema) if constrained else None,
                       "claim_candidate_strategy": "unique continuous newline/sentence excerpts from public assistant raw messages and parsed string values; not exhaustive semantic coverage",
                       "embedding_capacity_checked": self.embedding_tokenizer is not None}
             started = time.monotonic()
             self.usage["calls"] += 1
             try:
-                result = await self.policy(messages, max_new_tokens=self.max_new_tokens, temperature=0.0)
+                setup_before = getattr(self.policy, "summary_constraint_usage", {}).get("setup_seconds", 0.0)
+                if constrained:
+                    result = await self.policy.generate_summary(messages, selection_schema=selection_schema,
+                                                               max_new_tokens=self.max_new_tokens, temperature=0.0)
+                else:
+                    result = await self.policy(messages, max_new_tokens=self.max_new_tokens, temperature=0.0)
+                record["constraint_setup_seconds"] = getattr(self.policy, "summary_constraint_usage", {}).get("setup_seconds", 0.0) - setup_before
                 if not isinstance(result, PolicyCompletion):
                     raise TypeError("GraphPO summarizer policy must return PolicyCompletion")
                 record.update(output=result.text, prompt_ids=list(result.prompt_ids),
@@ -502,8 +576,12 @@ class GraphPOSummarizer:
                                                                   for key in ("fact_ids", "unresolved_ids", "claim_ids") if key in requested}
                 except (ValueError, TypeError):
                     pass
+                if constrained and re.fullmatch(record["selection_regex"], result.text) is None:
+                    raise SummaryValidationError("Summary output violated its exact constrained selection schema")
+                record["selection_normalization"] = {}
                 summary = validate_summary(result.text, public_history, last_action=last_action, stage=stage,
-                                           protocol=self.protocol)
+                                           protocol=self.protocol, allow_duplicate_ids=constrained,
+                                           selection_log=record["selection_normalization"])
                 model_fields = json.loads(result.text)
                 record["selected_claim_ids"] = model_fields.get("claim_ids")
                 record["selected_fact_ids"] = model_fields.get("fact_ids")

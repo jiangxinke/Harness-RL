@@ -11,6 +11,7 @@ from slime_plugins.dcc.graphpo_runtime import (
     EmbeddingInputTooLong, GraphPOSummarizer, SentenceEmbedder, SummaryValidationError, SummaryCapacityError,
     BGE_REVISION, GTE_REVISION, verify_embedding_model,
     claim_candidates, state_candidates, remaining_decisions,
+    summary_selection_schema, summary_selection_regex,
 )
 
 
@@ -23,6 +24,77 @@ class Tokenizer:
 
 
 TOKENIZER = Tokenizer()
+
+
+def _accepts_selection(schema, text):
+    lmfe = pytest.importorskip("lmformatenforcer")
+    parser = lmfe.RegexParser(summary_selection_regex(schema))
+    for character in text:
+        if character not in parser.get_allowed_characters():
+            return False
+        parser = parser.add_character(character)
+    return parser.can_end()
+
+
+def test_actual_lmfe_selection_enforces_domain_enum_empty_arrays_and_item_cap():
+    candidates = {"facts": [{"id": index} for index in range(1, 70)],
+                  "unresolved": [{"id": index} for index in range(1, 7)], "claims": []}
+    schema = summary_selection_schema(candidates)
+    assert _accepts_selection(schema, '{"fact_ids":[19,66],"unresolved_ids":[1,6],"claim_ids":[]}')
+    assert _accepts_selection(schema, '{"fact_ids":[19,19],"unresolved_ids":[],"claim_ids":[]}')
+    for text in (
+        '{"fact_ids":[],"unresolved_ids":[19],"claim_ids":[]}',
+        '{"fact_ids":[],"unresolved_ids":[],"claim_ids":[1]}',
+        '{"fact_ids":[1,2,3,4,5,6,7,8,9],"unresolved_ids":[],"claim_ids":[]}',
+        '{"fact_ids":[70],"unresolved_ids":[],"claim_ids":[]}',
+        '{"fact_ids":[true],"unresolved_ids":[],"claim_ids":[]}',
+        '{"fact_ids":[1.0],"unresolved_ids":[],"claim_ids":[]}',
+        '{"fact_ids":[],"unresolved_ids":[],"claim_ids":[],"reward":1}',
+    ):
+        assert not _accepts_selection(schema, text), text
+
+
+class ConstrainedSummaryPolicy:
+    def __init__(self, output):
+        self.output, self.calls = output, []
+        self.summary_constraint_usage = dict(setup_seconds=0.0)
+
+    async def __call__(self, *args, **kwargs):
+        raise AssertionError("The constrained summary must not use the free actor call")
+
+    async def generate_summary(self, messages, *, selection_schema, max_new_tokens, temperature):
+        self.calls.append((messages, selection_schema))
+        self.summary_constraint_usage["setup_seconds"] += 0.25
+        return PolicyCompletion(self.output, chat_tokens(TOKENIZER, messages), TOKENIZER.encode(self.output))
+
+
+def test_constrained_summary_logs_duplicate_selections_and_restores_source_once():
+    messages = history()
+    messages[1]["content"] = "Initial contract retrieval (source material):\n" + json.dumps({
+        "hits": [{"text": "PROMOTION AGREEMENT.\nRenewal applies."}]})
+    policy = ConstrainedSummaryPolicy('{"fact_ids":[1,1],"unresolved_ids":[],"claim_ids":[]}')
+    summarizer = GraphPOSummarizer(policy, TOKENIZER)
+    result = json.loads(asyncio.run(summarizer(messages)))
+    assert result["facts"] == ["PROMOTION AGREEMENT."]
+    record = summarizer.records[0]
+    assert record["selected_fact_ids"] == [1, 1]
+    assert record["selection_normalization"]["fact_ids"]["duplicate_ids"] == [1]
+    assert record["selection_normalization"]["fact_ids"]["retained_ids"] == [1]
+    assert record["selection_decoder_version"] == "0.11.3"
+    assert record["selection_max_items_per_domain"] == 8
+    assert record["constraint_setup_seconds"] == 0.25
+    assert record["resolved_facts"] == result["facts"]
+    assert policy.calls[0][1]["properties"]["claim_ids"]["maxItems"] == 0
+
+
+def test_constrained_backend_violation_is_not_filtered_or_replaced():
+    policy = ConstrainedSummaryPolicy('{"fact_ids":[1],"unresolved_ids":[19],"claim_ids":[]}')
+    summarizer = GraphPOSummarizer(policy, TOKENIZER, max_attempts=1)
+    with pytest.raises(SummaryValidationError, match="violated its exact constrained"):
+        asyncio.run(summarizer(history()))
+    assert summarizer.records[0]["output"] == policy.output
+    assert not summarizer.records[0]["valid"]
+    assert summarizer.usage["failed_states"] == 1
 
 
 def history():
@@ -395,7 +467,7 @@ def test_state_controls_are_derived_and_model_written_controls_are_logged():
     assert summarizer.records[0]["ignored_model_controls"] == {"last_action": "read_document", "stage": "final"}
     assert summarizer.records[0]["derived_controls"] == {"last_action": "none", "stage": "initial", "submitted_answer": None,
                                                        "remaining_decisions": None}
-    assert summarizer.records[0]["runtime_version"] == "graphpo-extractive-public-state-v6"
+    assert summarizer.records[0]["runtime_version"] == "graphpo-constrained-extractive-state-v7"
     assert summarizer.usage["validation_failures"] == 0
 
 
