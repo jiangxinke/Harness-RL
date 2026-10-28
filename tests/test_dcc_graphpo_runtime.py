@@ -56,6 +56,18 @@ def test_summary_uses_zero_temperature_exact_context_and_counts_actual_tokens():
     assert json.loads(calls[0]["messages"][1]["content"])["public_history"] == history()
 
 
+def test_initial_summary_does_not_ask_model_to_invent_nonexistent_agent_claims():
+    calls = []
+    output = json.dumps({"facts": ["PROMOTION AGREEMENT."], "unresolved": []})
+    summary = GraphPOSummarizer(policy_with([output], calls), TOKENIZER)
+    result = json.loads(asyncio.run(summary(history())))
+    assert result["agent_claims"] == [] and result["submitted_answer"] is None
+    instructions = calls[0]["messages"][0]["content"]
+    assert '"facts" and "unresolved".' in instructions
+    assert '"agent_claims" is a list' not in instructions
+    assert json.loads(calls[0]["messages"][1]["content"])["latest_assistant_message"] is None
+
+
 def test_invalid_summary_is_logged_and_retried_without_fallback():
     calls = []
     summary = GraphPOSummarizer(policy_with(["not JSON", valid()], calls), TOKENIZER)

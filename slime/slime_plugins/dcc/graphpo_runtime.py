@@ -165,9 +165,13 @@ def validate_summary(text, history, *, last_action, stage, protocol):
                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("Nonfinite summary value")))
     except (ValueError, TypeError) as exc:
         raise SummaryValidationError(f"Summary must be one complete JSON object: {exc}") from exc
-    if (not isinstance(value, dict) or not {"facts", "unresolved", "agent_claims"} <= set(value)
+    required = {"facts", "unresolved"}
+    if any(message["role"] == "assistant" for message in history):
+        required.add("agent_claims")
+    if (not isinstance(value, dict) or not required <= set(value)
             or not set(value) <= {"facts", "unresolved", "agent_claims", "last_action", "stage", "submitted_answer"}):
         raise SummaryValidationError("Summary needs facts, unresolved, and agent_claims; model-written control/answer fields are ignored and logged")
+    value.setdefault("agent_claims", [])
     for key in ("facts", "unresolved", "agent_claims"):
         values = value[key]
         if not isinstance(values, list) or any(not isinstance(item, str) or not item.strip() for item in values):
@@ -265,12 +269,23 @@ class GraphPOSummarizer:
                                      "embedding_tokens": minimum_tokens, "embedding_max_tokens": self.embedding_max_tokens,
                                      "generation_submitted": False, "truncated": False, "error": reason})
                 raise SummaryCapacityError(reason)
+        has_assistant = any(message["role"] == "assistant" for message in public_history)
+        instructions = SUMMARY_PROMPT
+        if not has_assistant:
+            instructions = instructions.replace('"facts", "unresolved", and "agent_claims".', '"facts" and "unresolved".')
+            start = instructions.index('"agent_claims" is a list')
+            end = instructions.index("The program derives", start)
+            instructions = (instructions[:start]
+                + "There are no prior assistant messages, so no agent claims exist. Do not generate agent_claims. "
+                + instructions[end:])
         messages = [
-            {"role": "system", "content": SUMMARY_PROMPT},
+            {"role": "system", "content": instructions},
             {"role": "user", "content": json.dumps({
                 "observed_last_action": last_action, "observed_stage": stage,
                 "program_retained_submitted_answer": submitted_answer,
                 "public_history": public_history,
+                "latest_assistant_message": next((m["content"] for m in reversed(public_history)
+                                                   if m["role"] == "assistant"), None),
             }, ensure_ascii=False)},
         ]
         for attempt in range(self.max_attempts):
