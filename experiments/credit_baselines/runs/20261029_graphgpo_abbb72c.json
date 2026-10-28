@@ -1,0 +1,177 @@
+{
+  "method": "graphgpo",
+  "verdict": "verified_record_consistency",
+  "check_counts": {
+    "passed": 4060,
+    "missing": 2
+  },
+  "training_statistics": {
+    "rollout_count": 96,
+    "distinct_tasks": 12,
+    "completed_count": 96,
+    "success_count": 44,
+    "success_rate": 0.4583333333333333,
+    "mean_reward": 0.47222222222222227,
+    "mean_f1": 0.47222222222222227,
+    "mean_observed_grounding": 0.9479166666666666,
+    "statuses": {
+      "completed": 96
+    },
+    "unique_decisions": 126,
+    "invalid_decisions": 20,
+    "repeated_return_decisions": 6,
+    "repeated_error_feedback_decisions": 6,
+    "repeated_source_return_decisions": 0,
+    "repeated_action_decisions": 0,
+    "generated_response_tokens": 6198,
+    "generated_prompt_tokens": 164816,
+    "credit_components": {
+      "local_advantage": {
+        "recorded": 126,
+        "zero": 71,
+        "invalid_action_positive": 1,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "graph_advantage": {
+        "recorded": 126,
+        "zero": 71,
+        "invalid_action_positive": 1,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "node_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "edge_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "correctness_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "efficiency_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      }
+    }
+  },
+  "evaluation_statistics": {
+    "rollout_count": 16,
+    "distinct_tasks": 4,
+    "completed_count": 16,
+    "success_count": 7,
+    "success_rate": 0.4375,
+    "mean_reward": 0.4375,
+    "mean_f1": 0.5,
+    "mean_observed_grounding": 0.9375,
+    "statuses": {
+      "completed": 16
+    },
+    "unique_decisions": 18,
+    "invalid_decisions": 2,
+    "repeated_return_decisions": 0,
+    "repeated_error_feedback_decisions": 0,
+    "repeated_source_return_decisions": 0,
+    "repeated_action_decisions": 0,
+    "generated_response_tokens": 345,
+    "generated_prompt_tokens": 18255,
+    "credit_components": {
+      "local_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "graph_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "node_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "edge_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "correctness_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "efficiency_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      }
+    }
+  },
+  "group_statistics": {
+    "groups": 25,
+    "singleton_groups": 9,
+    "mixed_evidence_history_groups": 2,
+    "constant_input_nonzero_local_groups": 0
+  },
+  "costs": {
+    "train_elapsed_seconds": 135.9647679552436,
+    "train_peak_cuda_allocated_bytes": 9957437440,
+    "evaluation_seconds": 5.487692717462778,
+    "evaluation_peak_cuda_allocated_bytes": 6722810368,
+    "generated_response_tokens": 6198,
+    "generated_prompt_tokens": 164816,
+    "graph_auxiliary_costs": []
+  },
+  "source_commit": "abbb72c25a4666b48bf7fa07269b1a06398d8b7d",
+  "audit_commit": "9b241bb0ec1d68c153c0f75cab224dfddaa0e4b4",
+  "status": "completed",
+  "protocol": "cuad-audited-v3",
+  "optimizer_steps": 12,
+  "artifact_root": "outputs/credit-rebuild-20261029/abbb72c/graphgpo",
+  "files_sha256": {
+    "train\\rollouts_rank0.jsonl": "550df75a0bb260d8f402e250faff700cc1e94b0d9ee064968c5de490f4611fff",
+    "train\\train_rank0.jsonl": "625c523f6f2543cef88cd1a17f4308728a5cd6cfc72d934f038251b7a8813166",
+    "evaluation\\rollouts.jsonl": "bd3c7bd574b3a0de2df96fef68b136a7202f2dd6f6e5e72299131037b16f0bf9",
+    "audit.json": "9c1aaa4ee9ca703915197ee3c094696055e83e7238f9ef6350bac4cd448b7cc4"
+  }
+}
