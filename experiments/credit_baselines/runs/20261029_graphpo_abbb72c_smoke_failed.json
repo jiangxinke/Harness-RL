@@ -1,0 +1,17 @@
+{
+  "method": "graphpo",
+  "source_commit": "abbb72c25a4666b48bf7fa07269b1a06398d8b7d",
+  "status": "preflight_failed",
+  "training": false,
+  "train_rollouts": 0,
+  "failure": "The 3B summary quotes exceeded the custom 200-character per-quote limit; required action metadata was also generated incorrectly. The graph was not created.",
+  "summary_calls": 2,
+  "summary_input_tokens": 2812,
+  "summary_output_tokens": 386,
+  "artifact_root": "outputs/credit-rebuild-20261029/graphpo-smoke-v3",
+  "files_sha256": {
+    "auxiliary.json": "b8431258d5d004263d23963e5bb835bd0a3b48a47d9900d7d256d2c01808e5de",
+    "status.json": "d03f095736676f605c4bdb613253aaa7a7000b52c5341a4494d02c8b05a3b56e"
+  },
+  "usable_for_algorithm_shortcoming": false
+}
