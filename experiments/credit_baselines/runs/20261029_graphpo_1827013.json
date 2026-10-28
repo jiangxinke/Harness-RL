@@ -1,0 +1,223 @@
+{
+  "method": "graphpo",
+  "source_commit": "1827013a75bfdd9067bddf78cc41f1d15fcddd1b",
+  "audit_commit": "1827013a75bfdd9067bddf78cc41f1d15fcddd1b",
+  "status": "completed_verified",
+  "protocol": "cuad-audited-v3",
+  "audit_verdict": "verified_record_consistency",
+  "check_counts": {
+    "passed": 8616,
+    "missing": 1
+  },
+  "training_statistics": {
+    "rollout_count": 124,
+    "distinct_tasks": 12,
+    "completed_count": 123,
+    "success_count": 54,
+    "success_rate": 0.43548387096774194,
+    "mean_reward": 0.43548387096774194,
+    "mean_f1": 0.44715447154471544,
+    "mean_observed_grounding": 0.9349593495934959,
+    "statuses": {
+      "completed": 123,
+      "max_steps": 1
+    },
+    "unique_decisions": 229,
+    "invalid_decisions": 89,
+    "repeated_return_decisions": 62,
+    "repeated_error_feedback_decisions": 60,
+    "repeated_source_return_decisions": 2,
+    "repeated_action_decisions": 2,
+    "generated_response_tokens": 13081,
+    "generated_prompt_tokens": 399291,
+    "credit_components": {
+      "local_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "graph_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "node_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "edge_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "correctness_advantage": {
+        "recorded": 229,
+        "zero": 163,
+        "invalid_action_positive": 13,
+        "unsuccessful_terminal_positive": 1,
+        "repeated_return_positive": 9,
+        "repeated_source_return_positive": 1
+      },
+      "efficiency_advantage": {
+        "recorded": 229,
+        "zero": 209,
+        "invalid_action_positive": 4,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 1,
+        "repeated_source_return_positive": 1
+      }
+    }
+  },
+  "evaluation_statistics": {
+    "rollout_count": 16,
+    "distinct_tasks": 4,
+    "completed_count": 16,
+    "success_count": 5,
+    "success_rate": 0.3125,
+    "mean_reward": 0.3125,
+    "mean_f1": 0.375,
+    "mean_observed_grounding": 0.9375,
+    "statuses": {
+      "completed": 16
+    },
+    "unique_decisions": 31,
+    "invalid_decisions": 14,
+    "repeated_return_decisions": 11,
+    "repeated_error_feedback_decisions": 11,
+    "repeated_source_return_decisions": 0,
+    "repeated_action_decisions": 0,
+    "generated_response_tokens": 827,
+    "generated_prompt_tokens": 39073,
+    "credit_components": {
+      "local_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "graph_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "node_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "edge_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "correctness_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "efficiency_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      }
+    }
+  },
+  "sampling_rounds": 48,
+  "optimizer_steps": 47,
+  "rounds_with_nonzero_task_advantages": 14,
+  "optimizer_updates_without_nonzero_task_advantages": 33,
+  "costs": {
+    "train_elapsed_seconds": 933.3442334579304,
+    "train_peak_cuda_allocated_bytes": 8575627776,
+    "evaluation_seconds": 12.869653340429068,
+    "evaluation_peak_cuda_allocated_bytes": 6722810368,
+    "generated_response_tokens": 13081,
+    "generated_prompt_tokens": 399291
+  },
+  "auxiliary_cost_totals": {
+    "generated_edges": 229.0,
+    "generated_prompt_tokens": 399291.0,
+    "generated_response_tokens": 13081.0,
+    "replayed_decisions": 433.0,
+    "terminal_rollouts": 124.0,
+    "summary_calls": 277.0,
+    "embedding_calls": 277.0,
+    "summary_call_seconds_sum": 388.02727392408997,
+    "embedding_call_seconds_sum": 75.03746460098773,
+    "summarizer_usage.input_tokens": 1340548.0,
+    "summarizer_usage.output_tokens": 11510.0,
+    "summarizer_usage.calls": 277.0,
+    "summarizer_usage.seconds": 384.6596748838201,
+    "summarizer_usage.validation_failures": 0.0,
+    "summarizer_usage.failed_states": 0.0,
+    "summarizer_usage.capacity_failures": 0.0,
+    "embedder_usage.input_tokens": 106118.0,
+    "embedder_usage.calls": 277.0,
+    "embedder_usage.texts": 277.0,
+    "embedder_usage.seconds": 74.91246854420751,
+    "embedder_usage.overlength_rejections": 0.0,
+    "embedder_usage.truncated_inputs": 0.0
+  },
+  "artifact_root": "outputs/credit-rebuild-20261029/1827013/graphpo",
+  "files_sha256": {
+    "audit.json": "60b6219e96bea7ef0b6a230aad9a9b562beb325e5cc7b46b05f8d0de4c7055b3",
+    "audit.log": "a01656a29f3c2823b3babae1dac80cae2165f88d35c6a2e18d66ecf9b6df8bc2",
+    "evaluate.log": "07d4aab77c56ab15e73961df846a9d3fd58d6a9da262235cc9b7d952e5aa2c67",
+    "evaluation/rollouts.jsonl": "45c86594f0497fd73f9d86c40c546f63e7528e3f2ca136123810f838f0606696",
+    "evaluation/summary.json": "b2534ab7c13ada5ec560b0649b4e31bc8ee1ab7495aa4d7a1cd6e9ba1a036e99",
+    "manifest.json": "950ecd09e55f34b91d15a1ea9d5660c1cba0794abefaac4ce0247ea17bd23ff1",
+    "status.json": "ca7511d0431b8a6aef42da1a45a4be0bf60fb555a87e7a4ed86aecbe21ef7ee5",
+    "train/final/adapter_config.json": "48c504a7c7e86508cbb5507ee287576fa450ffb8afbb55c5f74f3e86fc15f1bd",
+    "train/final/added_tokens.json": "58b54bbe36fc752f79a24a271ef66a0a0830054b4dfad94bde757d851968060b",
+    "train/final/chat_template.jinja": "cd8e9439f0570856fd70470bf8889ebd8b5d1107207f67a5efb46e342330527f",
+    "train/final/merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+    "train/final/README.md": "c3221b8e5d20c4ab1c408903e3983532b2898c7f3ab4c0b973a7552f4dc03919",
+    "train/final/special_tokens_map.json": "76862e765266b85aa9459767e33cbaf13970f327a0e88d1c65846c2ddd3a1ecd",
+    "train/final/tokenizer.json": "9c5ae00e602b8860cbd784ba82a8aa14e8feecec692e7076590d014d7b7fdafa",
+    "train/final/tokenizer_config.json": "0a04a9d7d4a62b28482bdfe726c122756de85714fb64166ace92ae75b8f57614",
+    "train/final/training_config.json": "f808b58511c9ae97cd3456803abecccc70f9fb3114564f563dd5860e4505d1ba",
+    "train/final/vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+    "train/graphpo_auxiliary_rank0.jsonl": "040d3086ad4bca353663ddf3aec6b20d022050b9301024be0d9e90fa00d28bb4",
+    "train/rollouts_rank0.jsonl": "e7c3d85a7a8f8b54adde5a8e2ff00a5d538225410d9b77d908ba1202060cf104",
+    "train/train_rank0.jsonl": "262f55f120fb10cdb78f9248462c5b837e6a35773d63dd56c5610261c91cb3d8",
+    "train/training_decisions_rank0.jsonl": "d7f53e8885549c6ec67875ddf805b855f4a6aa70ae7b3dccbe13f6330b571acc",
+    "train.log": "9a1fbfd7788a546878c378869c1af51f51334b2a1dd63705c8200e92a369424a"
+  },
+  "interpretation": [
+    "Paper-based CUAD implementation; no matching official GraphPO source was located.",
+    "Actor and summarizer Qwen2.5-3B-Instruct; GTE ModernBERT base replaces paper SFR-Embedding-2_R. Extractive selection with at most eight candidates per domain is an explicit representation adaptation.",
+    "124 terminal paths were collected over four complete 12-task cycles to exceed the 96-path target. Shared generated edges are trained only once. This is not equal-update or equal-compute comparison against the 96-path methods.",
+    "The 16 held-out samples are four questions repeated four times; this pilot does not establish a method ranking.",
+    "Legitimate excerpt selection and source validation do not establish semantic sufficiency or state equivalence."
+  ]
+}
