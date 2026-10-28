@@ -1,0 +1,11 @@
+{
+  "method": "graphpo",
+  "status": "preflight_failed",
+  "training": false,
+  "generated_actor_decisions": 0,
+  "summary_attempts": 2,
+  "patch_sha256": "d8d55fff863df181a64ec4432043f10108017ed3c69180ed0b13595729d773b4",
+  "artifact_remote": "runs/credit-rebuild-20261029/graphpo-smoke-claims-v3",
+  "failure": "At the root there are no prior assistant messages. The summary model invented agent_claims twice; validation rejected both. No graph or training was performed.",
+  "usable_for_algorithm_shortcoming": false
+}

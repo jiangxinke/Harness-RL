@@ -792,7 +792,7 @@ def audit_run(run_dir):
             costs = by_iteration.get(entry.get("iteration"), {}).get("credit", {}).get("costs", {})
             summaries, embeddings = entry.get("summaries", []), entry.get("embeddings", [])
             for key, value in (
-                ("calls", len(summaries)),
+                ("calls", sum(s.get("generation_submitted", True) for s in summaries)),
                 ("input_tokens", sum(len(s.get("prompt_ids", [])) for s in summaries)),
                 ("output_tokens", sum(len(s.get("completion_ids", [])) for s in summaries)),
             ):

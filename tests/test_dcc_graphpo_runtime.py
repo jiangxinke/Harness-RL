@@ -8,7 +8,7 @@ import pytest
 from slime_plugins.dcc.episode import PolicyCompletion
 from slime_plugins.dcc.graphpo_collector import chat_tokens
 from slime_plugins.dcc.graphpo_runtime import (
-    EmbeddingInputTooLong, GraphPOSummarizer, SentenceEmbedder, SummaryValidationError,
+    EmbeddingInputTooLong, GraphPOSummarizer, SentenceEmbedder, SummaryValidationError, SummaryCapacityError,
     BGE_REVISION, verify_embedding_model,
 )
 
@@ -31,7 +31,7 @@ def history():
 
 
 def valid(**updates):
-    return json.dumps({"facts": ["PROMOTION AGREEMENT."], "unresolved": [],
+    return json.dumps({"facts": ["PROMOTION AGREEMENT."], "unresolved": [], "agent_claims": [],
                        "last_action": "none", "stage": "initial", **updates})
 
 
@@ -378,15 +378,15 @@ def test_state_controls_are_derived_and_model_written_controls_are_logged():
     assert summary["last_action"] == "none"
     assert summary["stage"] == "initial"
     assert summarizer.records[0]["ignored_model_controls"] == {"last_action": "read_document", "stage": "final"}
-    assert summarizer.records[0]["derived_controls"] == {"last_action": "none", "stage": "initial"}
-    assert summarizer.records[0]["runtime_version"] == "graphpo-source-quotes-derived-controls-v2"
+    assert summarizer.records[0]["derived_controls"] == {"last_action": "none", "stage": "initial", "submitted_answer": None}
+    assert summarizer.records[0]["runtime_version"] == "graphpo-source-and-agent-claims-v3"
     assert summarizer.usage["validation_failures"] == 0
 
 
 def test_model_can_return_only_semantic_fields():
-    output = json.dumps({"facts": ["PROMOTION AGREEMENT."], "unresolved": ["contract title"]})
+    output = json.dumps({"facts": ["PROMOTION AGREEMENT."], "unresolved": ["contract title"], "agent_claims": []})
     summary = json.loads(asyncio.run(GraphPOSummarizer(policy_with([output], []), TOKENIZER)(history())))
-    assert set(summary) == {"facts", "unresolved", "last_action", "stage"}
+    assert set(summary) == {"facts", "unresolved", "agent_claims", "last_action", "stage", "submitted_answer"}
     assert summary["last_action"] == "none"
 
 
@@ -400,7 +400,7 @@ def test_long_grounded_quotation_uses_embedding_tokens_not_character_limit():
             assert add_special_tokens and truncation is False
             return list(range(len(text.split()) + 2))
 
-    output = json.dumps({"facts": [quote], "unresolved": []})
+    output = json.dumps({"facts": [quote], "unresolved": [], "agent_claims": []})
     summarizer = GraphPOSummarizer(policy_with([output], []), TOKENIZER,
                                    embedding_tokenizer=WordTokenizer(), embedding_max_tokens=512)
     summary = json.loads(asyncio.run(summarizer(messages)))
@@ -425,16 +425,100 @@ def test_embedding_overlength_retries_shorter_grounded_summary_without_truncatio
             return list(range(len(text) + 2))
 
     embed_tokenizer = CharTokenizer()
-    outputs = [json.dumps({"facts": [quote], "unresolved": []}),
-               json.dumps({"facts": ["PROMOTION AGREEMENT."], "unresolved": []})]
+    outputs = [json.dumps({"facts": [quote], "unresolved": [], "agent_claims": []}),
+               json.dumps({"facts": ["PROMOTION AGREEMENT."], "unresolved": [], "agent_claims": []})]
     summarizer = GraphPOSummarizer(policy_with(outputs, []), TOKENIZER,
                                    embedding_tokenizer=embed_tokenizer, embedding_max_tokens=180)
     result = asyncio.run(summarizer(messages))
     assert json.loads(result)["facts"] == ["PROMOTION AGREEMENT."]
-    assert len(embed_tokenizer.seen) == 2
-    assert quote in json.loads(embed_tokenizer.seen[0])["facts"]
+    assert len(embed_tokenizer.seen) == 3
+    assert quote in json.loads(embed_tokenizer.seen[1])["facts"]
     assert summarizer.records[0]["embedding_tokens"] > 180
     assert not summarizer.records[0]["valid"]
     assert summarizer.records[1]["embedding_tokens"] <= 180
     assert summarizer.records[1]["valid"]
     assert summarizer.usage["output_tokens"] == sum(len(record["completion_ids"]) for record in summarizer.records)
+
+
+def test_same_evidence_different_submitted_answers_produce_different_states():
+    outputs = []
+    for text in ("PROMOTION AGREEMENT.", "MAINTENANCE AGREEMENT."):
+        messages = history() + [{"role": "assistant", "content": json.dumps({
+            "answer": [{"text": text, "confidence": 0.9}]})}]
+        summary = asyncio.run(GraphPOSummarizer(policy_with([valid()], []), TOKENIZER,
+                                                protocol="cuad-audited-v3")(messages))
+        outputs.append(json.loads(summary))
+    assert outputs[0]["facts"] == outputs[1]["facts"]
+    assert outputs[0]["last_action"] == outputs[1]["last_action"] == "submit_answer"
+    assert outputs[0]["submitted_answer"] == [{"text": "PROMOTION AGREEMENT.", "confidence": 0.9}]
+    assert outputs[1]["submitted_answer"] == [{"text": "MAINTENANCE AGREEMENT.", "confidence": 0.9}]
+    assert outputs[0] != outputs[1]
+
+
+def test_empty_submission_is_distinct_from_no_submission():
+    pending = json.loads(asyncio.run(GraphPOSummarizer(policy_with([valid()], []), TOKENIZER)(history())))
+    ended = history() + [{"role": "assistant", "content": "[]"}]
+    completed = json.loads(asyncio.run(GraphPOSummarizer(policy_with([valid()], []), TOKENIZER,
+                                                       protocol="cuad-audited-v3")(ended)))
+    assert pending["submitted_answer"] is None
+    assert completed["submitted_answer"] == []
+
+
+def test_public_agent_claim_is_retained_as_claim_but_not_source_fact():
+    claim = "I believe this contract does not require further review."
+    messages = history() + [{"role": "assistant", "content": claim}]
+    summary = json.loads(asyncio.run(GraphPOSummarizer(policy_with([valid(agent_claims=[claim])], []),
+                                                      TOKENIZER)(messages)))
+    assert summary["agent_claims"] == [claim]
+    assert claim not in summary["facts"]
+    with pytest.raises(SummaryValidationError, match="observed contract"):
+        asyncio.run(GraphPOSummarizer(policy_with([valid(facts=[claim])], []), TOKENIZER,
+                                     max_attempts=1)(messages))
+
+
+@pytest.mark.parametrize("claim", ["The warranty lasts 36 months.", "PROMOTION AGREEMENT."])
+def test_claim_must_come_from_assistant_role_not_source_or_invention(claim):
+    with pytest.raises(SummaryValidationError, match="actual public assistant"):
+        asyncio.run(GraphPOSummarizer(policy_with([valid(agent_claims=[claim])], []), TOKENIZER,
+                                     max_attempts=1)(history()))
+
+
+def test_claim_can_quote_decoded_public_action_text():
+    text = 'Clause "A" is applicable.'
+    messages = history() + [{"role": "assistant", "content": json.dumps({
+        "answer": [{"text": text, "confidence": 0.8}]})}]
+    summary = json.loads(asyncio.run(GraphPOSummarizer(policy_with([valid(agent_claims=[text])], []),
+                                                      TOKENIZER)(messages)))
+    assert summary["agent_claims"] == [text]
+    assert summary["submitted_answer"][0]["text"] == text
+
+
+def test_model_cannot_replace_the_actual_submitted_answer():
+    messages = history() + [{"role": "assistant", "content": '{"answer":[]}'}]
+    output = valid(submitted_answer=[{"text": "invented replacement", "confidence": 1}])
+    summarizer = GraphPOSummarizer(policy_with([output], []), TOKENIZER)
+    summary = json.loads(asyncio.run(summarizer(messages)))
+    assert summary["submitted_answer"] == []
+    assert summarizer.records[0]["ignored_model_controls"]["submitted_answer"][0]["text"] == "invented replacement"
+
+
+def test_required_answer_over_embedding_capacity_fails_before_generation_without_truncation():
+    text = "a long publicly submitted answer " * 40
+    messages = history() + [{"role": "assistant", "content": json.dumps({
+        "answer": [{"text": text, "confidence": 1}]})}]
+
+    class CharTokenizer:
+        def encode(self, text, *, add_special_tokens, truncation):
+            assert add_special_tokens and truncation is False
+            return list(range(len(text) + 2))
+
+    calls = []
+    summarizer = GraphPOSummarizer(policy_with([], calls), TOKENIZER,
+                                   embedding_tokenizer=CharTokenizer(), embedding_max_tokens=512)
+    with pytest.raises(SummaryCapacityError, match="refusing to truncate"):
+        asyncio.run(summarizer(messages))
+    assert calls == []
+    assert summarizer.usage["calls"] == 0
+    assert summarizer.usage["capacity_failures"] == 1
+    assert not summarizer.records[0]["generation_submitted"]
+    assert summarizer.records[0]["derived_controls"]["submitted_answer"][0]["text"] == text
