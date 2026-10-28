@@ -1,0 +1,809 @@
+{
+  "receipt_version": "graphpo-training-attempt-receipt-v1",
+  "method": "graphpo",
+  "run_kind": "training_attempt",
+  "source_commit": "68390e19eb6edf61a3978e7d91f2d586a8c1d94b",
+  "audit_commit": "68390e19eb6edf61a3978e7d91f2d586a8c1d94b",
+  "source_evidence": "manifest.json及train.log中的source-68390e1路径一致。",
+  "status": "training_failed_before_any_update",
+  "recorded_status": {
+    "state": "failed",
+    "stage": "train",
+    "returncode": 1,
+    "time": 1793228877.3230548
+  },
+  "training_attempted": true,
+  "training_completed": false,
+  "optimizer_updates": 0,
+  "parameters_updated": false,
+  "evaluation_executed": false,
+  "final_checkpoint_saved": false,
+  "usable_for_algorithm_shortcoming": false,
+  "outcome": "第1轮完成两条一步交空答案的轨迹，终局奖励、Acor、Aeff及合计均为0，未执行参数更新。第2轮构图过程中，摘要模型两次把19到66填入只有1到6可选的unresolved_ids，校验拒绝后退出。",
+  "failure": {
+    "category": "summary_interface_validation",
+    "stage": "iteration_2_state_summary",
+    "attempts": [
+      {
+        "iteration": 2,
+        "auxiliary_record_index_1based": 6,
+        "attempt": 1,
+        "error": "unresolved_ids must be distinct integer IDs from the supplied task-question candidates",
+        "runtime_version": "graphpo-extractive-public-state-v6",
+        "derived_controls": {
+          "last_action": "invalid_output",
+          "stage": "active",
+          "submitted_answer": null,
+          "remaining_decisions": 6
+        },
+        "allowed_unresolved_ids": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "requested_unresolved_ids": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60,
+          61,
+          62,
+          63,
+          64,
+          65,
+          66
+        ],
+        "out_of_domain_ids": [
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60,
+          61,
+          62,
+          63,
+          64,
+          65,
+          66
+        ],
+        "out_of_domain_ids_also_exist_in_fact_domain": true,
+        "model_output": "{\n    \"fact_ids\": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67],\n    \"unresolved_ids\": [1, 2, 3, 4, 5, 6, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66],\n    \"claim_ids\": [1, 2, 3, 4]\n}",
+        "input_tokens": 6948,
+        "output_tokens": 500,
+        "public_task_message": "Requested field: Competitive Restriction Exception\nQuestion: This category includes the exceptions or carveouts to Non-Compete, Exclusivity and No-Solicit of Customers above.\nExtract the contract text that answers this question. Return source quotations, not yes/no. For a document name, return the actual title. The field label is not a phrase that must appear in the contract."
+      },
+      {
+        "iteration": 2,
+        "auxiliary_record_index_1based": 7,
+        "attempt": 2,
+        "error": "unresolved_ids must be distinct integer IDs from the supplied task-question candidates",
+        "runtime_version": "graphpo-extractive-public-state-v6",
+        "derived_controls": {
+          "last_action": "invalid_output",
+          "stage": "active",
+          "submitted_answer": null,
+          "remaining_decisions": 6
+        },
+        "allowed_unresolved_ids": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "requested_unresolved_ids": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60,
+          61,
+          62,
+          63,
+          64,
+          65,
+          66
+        ],
+        "out_of_domain_ids": [
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60,
+          61,
+          62,
+          63,
+          64,
+          65,
+          66
+        ],
+        "out_of_domain_ids_also_exist_in_fact_domain": true,
+        "model_output": "{\n    \"fact_ids\": [],\n    \"unresolved_ids\": [1, 2, 3, 4, 5, 6, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66],\n    \"claim_ids\": []\n}",
+        "input_tokens": 7511,
+        "output_tokens": 231,
+        "public_task_message": "Requested field: Competitive Restriction Exception\nQuestion: This category includes the exceptions or carveouts to Non-Compete, Exclusivity and No-Solicit of Customers above.\nExtract the contract text that answers this question. Return source quotations, not yes/no. For a document name, return the actual title. The field label is not a phrase that must appear in the contract."
+      }
+    ],
+    "interpretation": "错误编号同时属于fact候选的编号范围，表现为候选域混淆；未接受这些编号、未放宽事实校验、未把失败记作GraphPO算法不足。"
+  },
+  "planned_execution": {
+    "method": "graphpo",
+    "source_commit": "68390e19eb6edf61a3978e7d91f2d586a8c1d94b",
+    "protocol": "cuad-audited-v3",
+    "audit_commit": "68390e19eb6edf61a3978e7d91f2d586a8c1d94b",
+    "commands": {
+      "train": [
+        "/data2/pkuiti/geyugong/dcc-credit-baselines/.venv/bin/python",
+        "/data2/pkuiti/geyugong/dcc-credit-baselines/source-68390e1/scripts/dcc_train.py",
+        "--model",
+        "/data2/pkuiti/geyugong/dcc-credit-baselines/models/Qwen2.5-3B-Instruct",
+        "--train-data",
+        "/data2/pkuiti/geyugong/dcc-credit-baselines/data/cuad/pilot_train.jsonl",
+        "--output-dir",
+        "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/68390e1/graphpo/train",
+        "--adv-estimator",
+        "graphpo",
+        "--cuad-protocol",
+        "cuad-audited-v3",
+        "--task-order",
+        "sequential",
+        "--sft-steps",
+        "0",
+        "--sft-coefficient",
+        "0",
+        "--rl-steps",
+        "48",
+        "--group-size",
+        "8",
+        "--target-rollouts",
+        "96",
+        "--max-steps",
+        "8",
+        "--max-new-tokens",
+        "768",
+        "--max-prompt-tokens",
+        "24576",
+        "--initial-chunks",
+        "2",
+        "--learning-rate",
+        "1e-5",
+        "--lora-rank",
+        "8",
+        "--kl-coefficient",
+        ".001",
+        "--invalid-action-penalty",
+        ".1",
+        "--save-every",
+        "0",
+        "--seed",
+        "47",
+        "--graphpo-embedding",
+        "/data2/pkuiti/geyugong/dcc-credit-baselines/models/gte-modernbert-base"
+      ],
+      "evaluate": [
+        "/data2/pkuiti/geyugong/dcc-credit-baselines/.venv/bin/python",
+        "/data2/pkuiti/geyugong/dcc-credit-baselines/source-68390e1/scripts/dcc_credit_evaluate.py",
+        "--model",
+        "/data2/pkuiti/geyugong/dcc-credit-baselines/models/Qwen2.5-3B-Instruct",
+        "--data",
+        "/data2/pkuiti/geyugong/dcc-credit-baselines/data/cuad/pilot_validation.jsonl",
+        "--output-dir",
+        "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/68390e1/graphpo/evaluation",
+        "--repeats",
+        "4",
+        "--seed",
+        "147",
+        "--cuad-protocol",
+        "cuad-audited-v3",
+        "--adapter",
+        "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/68390e1/graphpo/train/final"
+      ],
+      "audit": [
+        "/data2/pkuiti/geyugong/dcc-credit-baselines/.venv/bin/python",
+        "/data2/pkuiti/geyugong/dcc-credit-baselines/source-68390e1/scripts/dcc_credit_audit.py",
+        "--run-dir",
+        "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/68390e1/graphpo",
+        "--output",
+        "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/68390e1/graphpo/audit.json"
+      ]
+    },
+    "gpu": 6,
+    "algorithm_variant": "graphpo",
+    "dataset_sha256": {
+      "pilot_train.jsonl": "ddc28d8b04b0feef5dc1694a73ff3add309a74519ce588bec5fb9b77010d9cbd",
+      "pilot_validation.jsonl": "9a258c700a9eda5d902c4b2b130de0610dd61ace837890f1c838fc68a1b9be93"
+    },
+    "auxiliary_model": "Alibaba-NLP/gte-modernbert-base",
+    "auxiliary_revision": "e7f32e3c00f91d699e8c43b53106206bcc72bb22",
+    "auxiliary_adaptation": "GTE ModernBERT base replaces paper SFR-Embedding-2_R",
+    "correctness_scale": [
+      0,
+      1
+    ],
+    "invalid_action_penalty_effective": 0,
+    "branching_factors": [
+      2,
+      2,
+      2,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "group_size_meaning": "generation batch size, not terminal leaf count"
+  },
+  "completed_iterations": 1,
+  "started_iterations": 2,
+  "completed_first_iteration": {
+    "iteration": 1,
+    "step": 0,
+    "optimizer_step_applied": false,
+    "gradient_norm": 0.0,
+    "loss": 0.0,
+    "kl_mean": 0.0,
+    "rewards": [
+      0.0,
+      0.0
+    ],
+    "task": "VAXCYTE,INC_05_22_2020-EX-10.19-SUPPLY AGREEMENT__Document Name",
+    "statuses": [
+      "completed",
+      "completed"
+    ],
+    "unique_training_decisions": 2,
+    "nonzero_policy_advantages": 0,
+    "rollout_count": 2,
+    "seconds": 13.32836407981813
+  },
+  "saved_rollouts": {
+    "count": 2,
+    "scope": "仅第1轮完整返回的rollouts；第2轮部分状态保存在auxiliary日志，未形成完整round记录。",
+    "answers": [
+      [],
+      []
+    ],
+    "rewards": [
+      0.0,
+      0.0
+    ],
+    "model_calls": [
+      1,
+      1
+    ]
+  },
+  "first_iteration_credit": {
+    "version": "graphpo-paper-cuad-v1",
+    "implementation": "paper-based CUAD adaptation; no official code available",
+    "threshold": 0.92,
+    "pooling_weight": 0.7,
+    "efficiency_weight": 1.0,
+    "branching": [
+      2,
+      2,
+      2,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "training_edge_ids": [
+      1,
+      2
+    ],
+    "terminal_paths": [
+      {
+        "result_index": 0,
+        "node": 1,
+        "edges": [
+          1
+        ],
+        "binary_success": 0.0,
+        "common_success_reward": 0.0,
+        "runner_reward": 0.0,
+        "runner_metrics": {
+          "valid_format": 1.0,
+          "model_calls": 1,
+          "tool_calls": 0,
+          "cuad_protocol": "cuad-audited-v3",
+          "protocol_aliases": [
+            {
+              "step": 0,
+              "aliases": [
+                "answer_array"
+              ]
+            }
+          ],
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "no_answer_correct": 0.0,
+          "tp": 0.0,
+          "fp": 0.0,
+          "fn": 1.0,
+          "verbatim_span_fraction": 1.0,
+          "source_token_span_fraction": 1.0,
+          "observed_token_span_fraction": 1.0
+        }
+      },
+      {
+        "result_index": 1,
+        "node": 2,
+        "edges": [
+          2
+        ],
+        "binary_success": 0.0,
+        "common_success_reward": 0.0,
+        "runner_reward": 0.0,
+        "runner_metrics": {
+          "valid_format": 1.0,
+          "model_calls": 1,
+          "tool_calls": 0,
+          "cuad_protocol": "cuad-audited-v3",
+          "protocol_aliases": [
+            {
+              "step": 0,
+              "aliases": [
+                "answer_array"
+              ]
+            }
+          ],
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "no_answer_correct": 0.0,
+          "tp": 0.0,
+          "fp": 0.0,
+          "fn": 1.0,
+          "verbatim_span_fraction": 1.0,
+          "source_token_span_fraction": 1.0,
+          "observed_token_span_fraction": 1.0
+        }
+      }
+    ],
+    "edges": [
+      {
+        "edge": 1,
+        "parent": 0,
+        "child": 1,
+        "score_parent": 0.0,
+        "score_child": 0.0,
+        "similarity": 0.9964289721024541,
+        "novelty": 0.003571027897545931,
+        "step_reward": 0.0,
+        "correctness_advantage": 0.0,
+        "efficiency_advantage": 0.0,
+        "correctness_estimated": true,
+        "efficiency_supported": true,
+        "estimated": true,
+        "advantage": 0.0,
+        "correctness_missing_reason": null
+      },
+      {
+        "edge": 2,
+        "parent": 0,
+        "child": 2,
+        "score_parent": 0.0,
+        "score_child": 0.0,
+        "similarity": 0.9964289721024541,
+        "novelty": 0.003571027897545931,
+        "step_reward": 0.0,
+        "correctness_advantage": 0.0,
+        "efficiency_advantage": 0.0,
+        "correctness_estimated": true,
+        "efficiency_supported": true,
+        "estimated": true,
+        "advantage": 0.0,
+        "correctness_missing_reason": null
+      }
+    ],
+    "correctness_groups": [
+      {
+        "source_class": [
+          0
+        ],
+        "edges": [
+          1,
+          2
+        ],
+        "edge_rewards": [
+          0.0,
+          0.0
+        ],
+        "advantages": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "source_class": [
+          1,
+          2
+        ],
+        "edges": [],
+        "edge_rewards": [],
+        "advantages": []
+      }
+    ],
+    "efficiency_groups": [
+      {
+        "members": [
+          1,
+          2
+        ],
+        "common_ancestor": 0,
+        "routes": [
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ],
+        "lengths": [
+          1,
+          1
+        ],
+        "gate": 0.0,
+        "advantages": [
+          0.0,
+          0.0
+        ]
+      }
+    ]
+  },
+  "auxiliary_iterations": [
+    {
+      "iteration": 1,
+      "summary_calls": 3,
+      "valid_summaries": 3,
+      "validation_failures": 0,
+      "summary_input_tokens": 9303,
+      "summary_output_tokens": 405,
+      "summary_seconds": 10.335254178382456,
+      "embedding_calls": 3,
+      "embedding_input_tokens": 2431,
+      "actual_embedding_token_lengths": [
+        809,
+        811,
+        811
+      ],
+      "embedding_seconds": 1.7672343729063869,
+      "embedding_inputs_truncated": false
+    },
+    {
+      "iteration": 2,
+      "summary_calls": 7,
+      "valid_summaries": 5,
+      "validation_failures": 2,
+      "summary_input_tokens": 44837,
+      "summary_output_tokens": 2014,
+      "summary_seconds": 48.2510663671419,
+      "embedding_calls": 5,
+      "embedding_input_tokens": 8322,
+      "actual_embedding_token_lengths": [
+        304,
+        1984,
+        1986,
+        2064,
+        1984
+      ],
+      "embedding_seconds": 7.276311942376196,
+      "embedding_inputs_truncated": false
+    }
+  ],
+  "encoder": {
+    "repository": "Alibaba-NLP/gte-modernbert-base",
+    "revision": "e7f32e3c00f91d699e8c43b53106206bcc72bb22",
+    "model_card": "https://huggingface.co/Alibaba-NLP/gte-modernbert-base",
+    "model_type": "modernbert",
+    "embedding_dimension": 768,
+    "max_input_tokens": 8192,
+    "verified_files": [
+      {
+        "file": "model.safetensors",
+        "sha256": "3e85899d5728cb7de79781c0c3acfb91ccef9f875f1f7e0b3c9f3dd4b6a724ba",
+        "bytes": 298041568
+      },
+      {
+        "file": "config.json",
+        "sha256": "8ba54dc3d35d7194f5178a4194b649f146753e02dabd22bdca5c5cbac15069ed",
+        "bytes": 1184
+      },
+      {
+        "file": "tokenizer.json",
+        "sha256": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30",
+        "bytes": 3583228
+      },
+      {
+        "file": "tokenizer_config.json",
+        "sha256": "9654072f7c873161814043cf08cb5ed72f71d0b935abcd4e267935cb34352c21",
+        "bytes": 20867
+      },
+      {
+        "file": "special_tokens_map.json",
+        "sha256": "ea97ecdbcc73713039d8d64dbb05e3689495c96657fbd9a18f5bed381be81049",
+        "bytes": 694
+      },
+      {
+        "file": "1_Pooling/config.json",
+        "sha256": "4bf279dd9204db673304cab6e7db8448f427412a0d87f04c3e19f1de55dd98cd",
+        "bytes": 297
+      },
+      {
+        "file": "config_sentence_transformers.json",
+        "sha256": "f6bbc7812d09c4ae1cba610fbdad3aea0ca9b3b8affe5a130d31709bdbc94e99",
+        "bytes": 205
+      },
+      {
+        "file": "modules.json",
+        "sha256": "8f4b264b80206c830bebbdcae377e137925650a433b689343a63bdc9b3145460",
+        "bytes": 229
+      },
+      {
+        "file": "README.md",
+        "sha256": "97d40aa325f0e6eaddf77edc7187b7bba6fd3e31a555be3b5766f015c6c27550",
+        "bytes": 13983
+      }
+    ],
+    "pooling": "CLS",
+    "l2_normalized": true,
+    "load_options": {
+      "device": "cpu",
+      "dtype": "float32",
+      "attention": "sdpa",
+      "trust_remote_code": false,
+      "reference_compile": false
+    },
+    "paper_encoder": "SFR-Embedding-2_R",
+    "material_adaptation": true,
+    "interpretation": "GTE ModernBERT替代论文SFR编码器；8192为实际原生容量，0.92相似度阈值不保证数值冲突或否定冲突分开。"
+  },
+  "summary_adaptation": "graphpo-extractive-public-state-v6：fact_ids/unresolved_ids/claim_ids必须属于各自公开来源候选；程序恢复原文，保留完整submitted_answer和remaining_decisions。本次尚无约束解码。",
+  "costs": {
+    "summary_calls": 10,
+    "summary_input_tokens": 54140,
+    "summary_output_tokens": 2419,
+    "embedding_calls": 8,
+    "embedding_input_tokens": 10753,
+    "first_completed_iteration": {
+      "generated_edges": 2,
+      "generated_response_tokens": 4,
+      "generated_prompt_tokens": 2156,
+      "replayed_decisions": 0,
+      "terminal_rollouts": 2,
+      "summary_calls": 3,
+      "summary_source_tokens": 3246,
+      "summary_text_tokens": 2421,
+      "summary_token_count_note": "source/text counts; actual summarizer request usage is reported separately by callback",
+      "summary_call_seconds_sum": 10.37644125893712,
+      "embedding_calls": 3,
+      "embedding_call_seconds_sum": 1.770368430763483,
+      "summarizer_usage": {
+        "input_tokens": 9303.0,
+        "output_tokens": 405.0,
+        "calls": 3.0,
+        "seconds": 10.335254178382456,
+        "validation_failures": 0.0,
+        "failed_states": 0.0,
+        "capacity_failures": 0.0
+      },
+      "embedder_usage": {
+        "input_tokens": 2431.0,
+        "calls": 3.0,
+        "texts": 3.0,
+        "seconds": 1.7672343729063869,
+        "overlength_rejections": 0.0,
+        "truncated_inputs": 0.0
+      },
+      "wall_seconds": 12.481684553436935
+    },
+    "partial_iteration_actor_generation_total": null,
+    "note": "第2轮因摘要异常未返回collection，不能从已保存两条rollout推断全程actor生成成本。"
+  },
+  "verification": {
+    "manifest_source_verified": true,
+    "status_failure_and_log_error_agree": true,
+    "first_round_no_optimizer_update": true,
+    "saved_zero_training_advantages_match_journal": true,
+    "valid_summary_matches_embedding_text": true,
+    "summary_prompt_ids_match_recorded_request": true,
+    "no_silent_embedding_truncation": true,
+    "failure_ids_outside_question_domain": true
+  },
+  "artifact_root": "outputs/credit-rebuild-20261029/68390e1/graphpo",
+  "files_sha256": {
+    "manifest.json": "4a5b5460e2b1474e7035a8c9df6a4276d1d7b917053c53c9aa59a0939bbd7c09",
+    "status.json": "d4c9038883ed00ad5b1dd3b1b7a3a0215323458aad69684ceb94bdc8e54cf70e",
+    "train/.dcc-training-owner.json": "b71db144f47195891168cea5649a9298d95055d74e75fa600ca6b8aee580c9b5",
+    "train/graphpo_auxiliary_rank0.jsonl": "f48a68a31b60539e87033d4edd0d31c2759b0edfcfb5662c5b6c79771f20d23c",
+    "train/rollouts_rank0.jsonl": "2f528a07f1da58a7b1028205aa74c7de436e9b11c03f247c6c1ed4f8a218327e",
+    "train/train_rank0.jsonl": "0a8fbcae34f25cf9eff1fd6b0aa56594c5fb1bdb402a3e9a573f178818487c37",
+    "train/training_decisions_rank0.jsonl": "cab3fafed3a5fab44d83397512ae4268b0463fd20de735bb1ea3939614660574",
+    "train.log": "509cb7043b09aff9a2fa46f4dd662f84fdaa012cdc38b4c154bb12bd66a3d047"
+  },
+  "files_bytes": {
+    "manifest.json": 3400,
+    "status.json": 82,
+    "train/.dcc-training-owner.json": 43,
+    "train/graphpo_auxiliary_rank0.jsonl": 1236333,
+    "train/rollouts_rank0.jsonl": 22314,
+    "train/train_rank0.jsonl": 103859,
+    "train/training_decisions_rank0.jsonl": 12218,
+    "train.log": 109329
+  },
+  "missing_outputs": [
+    "train finished事件",
+    "第2轮完整graph/rollout/训练条目日志",
+    "train/final checkpoint",
+    "evaluation结果",
+    "完成后的audit结果"
+  ],
+  "interpretation": "正式训练尝试失败，实际优化器更新为0；不能计入已完成训练方法的效果比较，也不能把摘要接口错误归于GraphPO信用公式。"
+}
