@@ -10,7 +10,7 @@ from slime_plugins.dcc.graphpo_collector import chat_tokens
 from slime_plugins.dcc.graphpo_runtime import (
     EmbeddingInputTooLong, GraphPOSummarizer, SentenceEmbedder, SummaryValidationError, SummaryCapacityError,
     BGE_REVISION, GTE_REVISION, verify_embedding_model,
-    claim_candidates, remaining_decisions,
+    claim_candidates, state_candidates, remaining_decisions,
 )
 
 
@@ -64,7 +64,7 @@ def test_initial_summary_does_not_ask_model_to_invent_nonexistent_agent_claims()
     result = json.loads(asyncio.run(summary(history())))
     assert result["agent_claims"] == [] and result["submitted_answer"] is None
     instructions = calls[0]["messages"][0]["content"]
-    assert '"facts" and "unresolved".' in instructions
+    assert '"fact_ids" and "unresolved_ids".' in instructions
     assert '"agent_claims" is a list' not in instructions
     assert json.loads(calls[0]["messages"][1]["content"])["latest_assistant_message"] is None
 
@@ -395,7 +395,7 @@ def test_state_controls_are_derived_and_model_written_controls_are_logged():
     assert summarizer.records[0]["ignored_model_controls"] == {"last_action": "read_document", "stage": "final"}
     assert summarizer.records[0]["derived_controls"] == {"last_action": "none", "stage": "initial", "submitted_answer": None,
                                                        "remaining_decisions": None}
-    assert summarizer.records[0]["runtime_version"] == "graphpo-public-state-and-budget-v5"
+    assert summarizer.records[0]["runtime_version"] == "graphpo-extractive-public-state-v6"
     assert summarizer.usage["validation_failures"] == 0
 
 
@@ -555,7 +555,8 @@ def test_claim_id_selection_restores_exact_excerpt_and_records_origin():
     result = json.loads(asyncio.run(summarizer(messages)))
     assert result["agent_claims"] == [chosen["text"]]
     request = json.loads(calls[0]["messages"][1]["content"])
-    assert request["claim_candidates"] == candidates
+    assert request["claim_candidates"] == [{key: candidate[key] for key in ("id", "text", "message_index", "role")}
+                                           for candidate in candidates]
     record = summarizer.records[0]
     assert record["claim_candidates"] == candidates
     assert record["selected_claim_ids"] == [chosen["id"]]
@@ -770,3 +771,101 @@ def test_each_encoder_rejects_its_own_overlength_input_without_silent_truncation
     assert seen == ["retain this full text"]
     assert encoder.usage["overlength_rejections"] == 1
     assert encoder.usage["truncated_inputs"] == 0
+
+
+def extractive_output(fact_ids=None, unresolved_ids=None, claim_ids=None, **updates):
+    value = {"fact_ids": [1] if fact_ids is None else fact_ids,
+             "unresolved_ids": [] if unresolved_ids is None else unresolved_ids, **updates}
+    if claim_ids is not None:
+        value["claim_ids"] = claim_ids
+    return json.dumps(value)
+
+
+def test_extractive_domains_restore_exact_public_text_and_full_audit_provenance():
+    messages = history() + [{"role": "assistant", "content": "I need to verify the actual title."}]
+    candidates = state_candidates(messages, "cuad-audited-v3")
+    calls = []
+    summarizer = GraphPOSummarizer(policy_with([extractive_output([1], [1], [1])], calls), TOKENIZER,
+                                   protocol="cuad-audited-v3")
+    state = json.loads(asyncio.run(summarizer(messages)))
+    assert state["facts"] == ["PROMOTION AGREEMENT."]
+    assert state["unresolved"] == ["Find the contract title."]
+    assert state["agent_claims"] == ["I need to verify the actual title."]
+    request = json.loads(calls[0]["messages"][1]["content"])
+    for field in ("fact_candidates", "unresolved_candidates", "claim_candidates"):
+        assert all(set(candidate) == {"id", "text", "message_index", "role"} for candidate in request[field])
+        assert all("source_text_sha256" in candidate for candidate in summarizer.records[0][field])
+    fact = candidates["facts"][0]
+    assert fact["message_index"] == 2 and fact["role"] == "user"
+    assert fact["json_path"] == ["hits", 0, "text"]
+    assert fact["document_start"] == 0 and fact["document_end"] == 20
+    assert fact["source_text_sha256"] == hashlib.sha256("PROMOTION AGREEMENT.".encode()).hexdigest()
+    assert summarizer.records[0]["selected_fact_ids"] == [1]
+    assert summarizer.records[0]["selected_unresolved_ids"] == [1]
+    assert summarizer.records[0]["resolved_facts"] == state["facts"]
+
+
+@pytest.mark.parametrize("field,value", [("fact_ids", [0]), ("fact_ids", [999]), ("fact_ids", [True]),
+                                         ("unresolved_ids", [1.0]), ("unresolved_ids", [1, 1])])
+def test_invalid_fact_or_question_ids_are_rejected(field, value):
+    arguments = {"fact_ids": [1], "unresolved_ids": [], field: value}
+    summarizer = GraphPOSummarizer(policy_with([json.dumps(arguments)], []), TOKENIZER, max_attempts=1)
+    with pytest.raises(SummaryValidationError, match="distinct integer IDs"):
+        asyncio.run(summarizer(history()))
+    assert field in summarizer.records[0]["requested_selection_ids_json"]
+
+
+@pytest.mark.parametrize("text_key,id_key", [("facts", "fact_ids"), ("unresolved", "unresolved_ids")])
+def test_ids_and_legacy_text_cannot_mix_within_same_domain(text_key, id_key):
+    arguments = {"fact_ids": [1], "unresolved_ids": [], text_key: []}
+    summarizer = GraphPOSummarizer(policy_with([json.dumps(arguments)], []), TOKENIZER, max_attempts=1)
+    with pytest.raises(SummaryValidationError, match=f"Do not mix {id_key}"):
+        asyncio.run(summarizer(history()))
+
+
+def test_task_question_and_assistant_claims_never_become_fact_candidates():
+    messages = [{"role": "user", "content": "Find the warranty duration of 36 months."},
+                {"role": "assistant", "content": "I believe the warranty lasts 24 months."}]
+    pools = state_candidates(messages, "cuad-audited-v3")
+    assert pools["facts"] == []
+    assert pools["unresolved"][0]["text"] == messages[0]["content"]
+    assert pools["claims"][0]["text"] == messages[1]["content"]
+    summarizer = GraphPOSummarizer(policy_with([extractive_output([1], [], [])], []), TOKENIZER,
+                                   max_attempts=1)
+    with pytest.raises(SummaryValidationError, match="observed-source candidates"):
+        asyncio.run(summarizer(messages))
+
+
+def test_fact_candidate_offsets_are_contiguous_and_not_joined_across_sources():
+    source1 = "The warranty lasts 24 months.\nExceptions apply."
+    source2 = "The warranty lasts 36 months."
+    messages = [{"role": "user", "content": "Check warranty."},
+                {"role": "user", "content": "Initial contract retrieval (source material):\n" + json.dumps({
+                    "hits": [{"text": source1, "start": 10, "end": 10 + len(source1)},
+                             {"text": source2, "start": 200, "end": 200 + len(source2)}]})}]
+    pools = state_candidates(messages, "cuad-audited-v3")
+    for candidate in pools["facts"]:
+        source = [source1, source2][candidate["json_path"][1]]
+        assert source[candidate["source_start"]:candidate["source_end"]] == candidate["text"]
+        assert candidate["source_text_sha256"] == hashlib.sha256(source.encode()).hexdigest()
+    assert [candidate["text"] for candidate in pools["facts"]] == [
+        "The warranty lasts 24 months.", "Exceptions apply.", "The warranty lasts 36 months."]
+
+
+def test_root_extractive_summary_needs_no_assistant_claim_field():
+    calls = []
+    summarizer = GraphPOSummarizer(policy_with([extractive_output([1], [1])], calls), TOKENIZER)
+    result = json.loads(asyncio.run(summarizer(history())))
+    assert result["agent_claims"] == []
+    assert json.loads(calls[0]["messages"][1]["content"])["claim_candidates"] == []
+    assert '"fact_ids" and "unresolved_ids".' in calls[0]["messages"][0]["content"]
+
+
+def test_extractive_selection_cannot_rewrite_the_actual_final_answer():
+    original = [{"text": "PROMOTION AGREEMENT", "confidence": 0.9}]
+    messages = history() + [{"role": "assistant", "content": json.dumps({"answer": original})}]
+    output = extractive_output([1], [], [], submitted_answer=[{"text": "invented", "confidence": 1}])
+    summarizer = GraphPOSummarizer(policy_with([output], []), TOKENIZER, protocol="cuad-audited-v3")
+    result = json.loads(asyncio.run(summarizer(messages)))
+    assert result["submitted_answer"] == original
+    assert summarizer.records[0]["ignored_model_controls"]["submitted_answer"][0]["text"] == "invented"
