@@ -1,0 +1,533 @@
+{
+  "receipt_version": "graphpo-smoke-receipt-v1",
+  "method": "graphpo",
+  "run_kind": "collection_smoke",
+  "source_commit": "68390e19eb6edf61a3978e7d91f2d586a8c1d94b",
+  "source_commit_evidence": "本轮执行记录明确指定该commit；下载产物的runtime_version与该commit一致。",
+  "runtime_versions": [
+    "graphpo-extractive-public-state-v6"
+  ],
+  "status": "preflight_completed",
+  "recorded_status": {
+    "state": "finished",
+    "leaves": 2,
+    "training_items": 2,
+    "nonzero_advantages": 0,
+    "training": false
+  },
+  "training": false,
+  "optimizer_updates": 0,
+  "usable_for_algorithm_shortcoming": false,
+  "outcome": "编号摘录摘要通过；完成根节点与两条一步终止分支的采样、语义合并及信用计算。仅准备训练条目，未执行优化器更新。",
+  "artifact_root": "outputs/credit-rebuild-20261029/graphpo-smoke-extractive",
+  "files_sha256": {
+    "auxiliary.json": "b0c199455f474eba91d772ab79a766fc520e6f3615b81b12ccadd44e21678d1e",
+    "diagnostics.json": "14df788630cbe4553d0c0622f7b772a07e7391ca5859ba8cb018ef3c0d83b654",
+    "rollouts.jsonl": "41b7cb4d64697b34fe9af1c2020924e11f62d308e4fde460a1412760e0495c1c",
+    "status.json": "61dca2bbe1c6943cf8ad30f2a32befa17749739a3ca69f68a87c14eacd9967dd"
+  },
+  "files_bytes": {
+    "auxiliary.json": 408799,
+    "diagnostics.json": 148153,
+    "rollouts.jsonl": 26859,
+    "status.json": 99
+  },
+  "driver_reference": {
+    "artifact": ".cache/baseline-rebuild-20261029/graphpo-smoke.py",
+    "sha256": "2e3d0b3f4fe1af8c293967330aac773217f501bb6c6fa5d8661609e2e3e113ca",
+    "historical_exact_driver_verified": false,
+    "note": "保存的通用smoke驱动只执行采样和信用计算，不含优化器；各历史启动命令及驱动快照未包含在各自目录。"
+  },
+  "actor_and_summary_model": {
+    "name": "Qwen2.5-3B-Instruct",
+    "shared_model": true,
+    "trainable": false,
+    "evidence": "已保存smoke驱动加载同一3B模型供actor与summary使用；各目录未单独保存权重manifest。"
+  },
+  "task": {
+    "id": "MEDALISTDIVERSIFIEDREIT,INC_05_18_2020-EX-10.1-CONSULTING AGREEMENT__Change Of Control",
+    "benchmark": "CUAD",
+    "public_task_message": "Requested field: Change Of Control\nQuestion: Does one party have the right to terminate or is consent or notice required of the counterparty if such party undergoes a change of control, such as a merger, stock sale, transfer of all or substantially all of its assets or business, or assignment by operation of law?\nExtract the contract text that answers this question. Return source quotations, not yes/no. For a document name, return the actual title. The field label is not a phrase that must appear in the contract.",
+    "selection_in_saved_driver": "pilot_train.jsonl第12条"
+  },
+  "encoder": {
+    "repository": "Alibaba-NLP/gte-modernbert-base",
+    "revision": "e7f32e3c00f91d699e8c43b53106206bcc72bb22",
+    "model_card": "https://huggingface.co/Alibaba-NLP/gte-modernbert-base",
+    "model_type": "modernbert",
+    "embedding_dimension": 768,
+    "max_input_tokens": 8192,
+    "verified_files": [
+      {
+        "file": "model.safetensors",
+        "sha256": "3e85899d5728cb7de79781c0c3acfb91ccef9f875f1f7e0b3c9f3dd4b6a724ba",
+        "bytes": 298041568
+      },
+      {
+        "file": "config.json",
+        "sha256": "8ba54dc3d35d7194f5178a4194b649f146753e02dabd22bdca5c5cbac15069ed",
+        "bytes": 1184
+      },
+      {
+        "file": "tokenizer.json",
+        "sha256": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30",
+        "bytes": 3583228
+      },
+      {
+        "file": "tokenizer_config.json",
+        "sha256": "9654072f7c873161814043cf08cb5ed72f71d0b935abcd4e267935cb34352c21",
+        "bytes": 20867
+      },
+      {
+        "file": "special_tokens_map.json",
+        "sha256": "ea97ecdbcc73713039d8d64dbb05e3689495c96657fbd9a18f5bed381be81049",
+        "bytes": 694
+      },
+      {
+        "file": "1_Pooling/config.json",
+        "sha256": "4bf279dd9204db673304cab6e7db8448f427412a0d87f04c3e19f1de55dd98cd",
+        "bytes": 297
+      },
+      {
+        "file": "config_sentence_transformers.json",
+        "sha256": "f6bbc7812d09c4ae1cba610fbdad3aea0ca9b3b8affe5a130d31709bdbc94e99",
+        "bytes": 205
+      },
+      {
+        "file": "modules.json",
+        "sha256": "8f4b264b80206c830bebbdcae377e137925650a433b689343a63bdc9b3145460",
+        "bytes": 229
+      },
+      {
+        "file": "README.md",
+        "sha256": "97d40aa325f0e6eaddf77edc7187b7bba6fd3e31a555be3b5766f015c6c27550",
+        "bytes": 13983
+      }
+    ],
+    "pooling": "CLS",
+    "l2_normalized": true,
+    "load_options": {
+      "device": "cpu",
+      "dtype": "float32",
+      "attention": "sdpa",
+      "trust_remote_code": false,
+      "reference_compile": false
+    },
+    "effective_max_input_tokens": 8192,
+    "capacity_basis": "固定模型原生config及实际摘要校验上限；不使用tokenizer的大整数占位上限。",
+    "paper_encoder": "SFR-Embedding-2_R",
+    "material_adaptation": true,
+    "interpretation": "当前编码器替代论文使用的SFR-Embedding-2_R；当前相似度表现不代表原论文编码器表现。"
+  },
+  "summary_attempts": [
+    {
+      "record_index": 1,
+      "attempt": 1,
+      "runtime_version": "graphpo-extractive-public-state-v6",
+      "public_stage": "initial",
+      "valid": true,
+      "error": null,
+      "embedding_tokens": 706,
+      "embedding_max_tokens": 8192,
+      "input_tokens": 2693,
+      "output_tokens": 103,
+      "output_sha256": "dcd368ad6f75c6be115bee473a705234de6cd5b87e415b1c61645c6ebae12522",
+      "selected_fact_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20
+      ],
+      "selected_unresolved_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "selected_claim_ids": null
+    },
+    {
+      "record_index": 2,
+      "attempt": 1,
+      "runtime_version": "graphpo-extractive-public-state-v6",
+      "public_stage": "final",
+      "valid": true,
+      "error": null,
+      "embedding_tokens": 516,
+      "embedding_max_tokens": 8192,
+      "input_tokens": 3592,
+      "output_tokens": 49,
+      "output_sha256": "53aaba37d3e03fc3aa073f01f92677186902cb069668bf66b4b2b15ec66072cc",
+      "selected_fact_ids": [
+        4,
+        5,
+        6
+      ],
+      "selected_unresolved_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "selected_claim_ids": [
+        1
+      ]
+    },
+    {
+      "record_index": 3,
+      "attempt": 1,
+      "runtime_version": "graphpo-extractive-public-state-v6",
+      "public_stage": "final",
+      "valid": true,
+      "error": null,
+      "embedding_tokens": 766,
+      "embedding_max_tokens": 8192,
+      "input_tokens": 3807,
+      "output_tokens": 64,
+      "output_sha256": "39eb0c2a36bce8fb3713f091c7e5cea36e57b7f6db9b5e04dad02789114544ce",
+      "selected_fact_ids": [
+        3,
+        4,
+        5,
+        6
+      ],
+      "selected_unresolved_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "selected_claim_ids": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    }
+  ],
+  "effects": {
+    "collection_returned": true,
+    "valid_summaries": 3,
+    "embedding_calls": 3,
+    "observed_actor_decisions_in_longest_saved_public_history": 1,
+    "terminal_rollouts_saved": 2,
+    "training_items_prepared": 2,
+    "nonzero_advantages": 0,
+    "parameters_updated": false,
+    "inputs_truncated": false,
+    "graph_nodes": 3,
+    "graph_classes": 2,
+    "accepted_merges": 1
+  },
+  "costs": {
+    "summary_usage": {
+      "input_tokens": 10092,
+      "output_tokens": 216,
+      "calls": 3,
+      "seconds": 4.678842990659177,
+      "validation_failures": 0,
+      "failed_states": 0,
+      "capacity_failures": 0
+    },
+    "embedding_usage": {
+      "input_tokens": 1988,
+      "calls": 3,
+      "texts": 3,
+      "seconds": 1.3942538583651185,
+      "overlength_rejections": 0,
+      "truncated_inputs": 0
+    },
+    "collection": {
+      "generated_edges": 2,
+      "generated_response_tokens": 323,
+      "generated_prompt_tokens": 1926,
+      "replayed_decisions": 0,
+      "terminal_rollouts": 2,
+      "summary_calls": 3,
+      "summary_source_tokens": 3220,
+      "summary_text_tokens": 1951,
+      "summary_token_count_note": "source/text counts; actual summarizer request usage is reported separately by callback",
+      "summary_call_seconds_sum": 4.726888310164213,
+      "embedding_calls": 3,
+      "embedding_call_seconds_sum": 1.3973554410040379,
+      "summarizer_usage": {
+        "input_tokens": 10092.0,
+        "output_tokens": 216.0,
+        "calls": 3.0,
+        "seconds": 4.678842990659177,
+        "validation_failures": 0.0,
+        "failed_states": 0.0,
+        "capacity_failures": 0.0
+      },
+      "embedder_usage": {
+        "input_tokens": 1988.0,
+        "calls": 3.0,
+        "texts": 3.0,
+        "seconds": 1.3942538583651185,
+        "overlength_rejections": 0.0,
+        "truncated_inputs": 0.0
+      },
+      "wall_seconds": 11.153650645166636
+    }
+  },
+  "record_consistency_checks": {
+    "summary_call_count_and_actual_tokens_match": true,
+    "valid_summary_equals_embedding_input": true,
+    "embedding_token_totals_match": true,
+    "embedding_inputs_not_truncated": true,
+    "status_rollout_and_training_item_counts_match": true,
+    "nonzero_advantages_match": true,
+    "graph_summary_equals_embedding_input": true
+  },
+  "interpretation": "运行适配检查。摘要协议拒绝或编码器容量限制不构成GraphPO算法不足的实验结论；成功smoke也不等于完成RL训练。",
+  "graph": {
+    "version": "graphpo-paper-cuad-v1",
+    "implementation": "paper-based CUAD adaptation; no official code available",
+    "threshold": 0.92,
+    "pooling_weight": 0.7,
+    "efficiency_weight": 1.0,
+    "branching": [
+      2,
+      2,
+      2,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "training_edge_ids": [
+      1,
+      2
+    ],
+    "terminal_paths": [
+      {
+        "result_index": 0,
+        "node": 1,
+        "edges": [
+          1
+        ],
+        "binary_success": 1.0,
+        "common_success_reward": 10.0,
+        "runner_reward": 1.0,
+        "runner_metrics": {
+          "valid_format": 1.0,
+          "model_calls": 1,
+          "tool_calls": 0,
+          "cuad_protocol": "cuad-audited-v3",
+          "protocol_aliases": [],
+          "f1": 1.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "no_answer_correct": 0.0,
+          "tp": 1.0,
+          "fp": 0.0,
+          "fn": 0.0,
+          "verbatim_span_fraction": 1.0,
+          "source_token_span_fraction": 1.0,
+          "observed_token_span_fraction": 1.0
+        }
+      },
+      {
+        "result_index": 1,
+        "node": 2,
+        "edges": [
+          2
+        ],
+        "binary_success": 1.0,
+        "common_success_reward": 10.0,
+        "runner_reward": 1.0,
+        "runner_metrics": {
+          "valid_format": 1.0,
+          "model_calls": 1,
+          "tool_calls": 0,
+          "cuad_protocol": "cuad-audited-v3",
+          "protocol_aliases": [],
+          "f1": 1.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "no_answer_correct": 0.0,
+          "tp": 1.0,
+          "fp": 0.0,
+          "fn": 0.0,
+          "verbatim_span_fraction": 1.0,
+          "source_token_span_fraction": 1.0,
+          "observed_token_span_fraction": 1.0
+        }
+      }
+    ],
+    "merges": [
+      {
+        "left": 0,
+        "right": 1,
+        "similarity": 0.8996076727535167,
+        "accepted": false,
+        "reason": "ancestor_descendant"
+      },
+      {
+        "left": 0,
+        "right": 2,
+        "similarity": 0.9052530745172991,
+        "accepted": false,
+        "reason": "ancestor_descendant"
+      },
+      {
+        "left": 1,
+        "right": 2,
+        "similarity": 0.9620112680634954,
+        "accepted": true,
+        "reason": null
+      }
+    ],
+    "edges": [
+      {
+        "edge": 1,
+        "parent": 0,
+        "child": 1,
+        "score_parent": 1.0,
+        "score_child": 1.0,
+        "similarity": 0.8996076727535167,
+        "novelty": 0.10039232724648328,
+        "step_reward": 0.0,
+        "correctness_advantage": 0.0,
+        "efficiency_advantage": 0.0,
+        "correctness_estimated": true,
+        "efficiency_supported": true,
+        "estimated": true,
+        "advantage": 0.0,
+        "correctness_missing_reason": null
+      },
+      {
+        "edge": 2,
+        "parent": 0,
+        "child": 2,
+        "score_parent": 1.0,
+        "score_child": 1.0,
+        "similarity": 0.9052530745172991,
+        "novelty": 0.09474692548270092,
+        "step_reward": 0.0,
+        "correctness_advantage": 0.0,
+        "efficiency_advantage": 0.0,
+        "correctness_estimated": true,
+        "efficiency_supported": true,
+        "estimated": true,
+        "advantage": 0.0,
+        "correctness_missing_reason": null
+      }
+    ],
+    "correctness_groups": [
+      {
+        "source_class": [
+          0
+        ],
+        "edges": [
+          1,
+          2
+        ],
+        "edge_rewards": [
+          0.0,
+          0.0
+        ],
+        "advantages": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "source_class": [
+          1,
+          2
+        ],
+        "edges": [],
+        "edge_rewards": [],
+        "advantages": []
+      }
+    ],
+    "efficiency_groups": [
+      {
+        "members": [
+          1,
+          2
+        ],
+        "common_ancestor": 0,
+        "routes": [
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ],
+        "lengths": [
+          1,
+          1
+        ],
+        "gate": 1.0,
+        "advantages": [
+          0.0,
+          0.0
+        ]
+      }
+    ],
+    "exhaustion": null,
+    "open_unfinished_nodes": []
+  },
+  "actual_summary_embedding_tokens": [
+    706,
+    516,
+    766
+  ],
+  "summary_adaptation": {
+    "type": "grounded_candidate_id_selection",
+    "facts": "只能从已观察合同片段的连续摘录中选择fact_ids。",
+    "unresolved": "只能从原始公开任务文本的连续摘录中选择unresolved_ids。",
+    "claims": "只能从真实公开assistant输出的连续摘录中选择claim_ids；根节点无claims。",
+    "restoration": "程序恢复原文，保留完整submitted_answer及真实remaining_decisions；模型不重写摘录。",
+    "not_official_author_prompt": true,
+    "does_not_prove_semantic_completeness": true
+  },
+  "validation": {
+    "server_cpu_tests": {
+      "passed": 123,
+      "evidence": "本轮执行记录确认；下载的smoke目录未附pytest stdout。"
+    },
+    "local_independent_review": {
+      "artifact": ".cache/baseline-rebuild-20261029/g2po/graphpo_extractive_v6_review.json",
+      "sha256": "60735ecde5d9bbac3d91391703a9c97a77c6c35b65c2aa7f77bd11c2df009a72",
+      "passed": 121,
+      "skipped_torch_tests": 2
+    }
+  },
+  "limitations": [
+    "两条分支均一步正确提交，Acor和Aeff都为0；不能验证非零信用推动参数学习。",
+    "只覆盖根和两条终止分支，未验证长程采样、错误恢复或多层图扩展的实际效果。",
+    "辅助GTE与摘录式摘要是CUAD适配条件；阈值0.92不保证数值或否定冲突一定分开。"
+  ],
+  "missing_evidence": [
+    "各目录独立的权重manifest",
+    "服务器CPU测试原始stdout"
+  ]
+}
