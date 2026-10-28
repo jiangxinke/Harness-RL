@@ -9,8 +9,8 @@ from slime_plugins.dcc.episode import PolicyCompletion
 from slime_plugins.dcc.graphpo_collector import chat_tokens
 from slime_plugins.dcc.graphpo_runtime import (
     EmbeddingInputTooLong, GraphPOSummarizer, SentenceEmbedder, SummaryValidationError, SummaryCapacityError,
-    BGE_REVISION, verify_embedding_model,
-    claim_candidates,
+    BGE_REVISION, GTE_REVISION, verify_embedding_model,
+    claim_candidates, remaining_decisions,
 )
 
 
@@ -317,6 +317,8 @@ def fake_embedder(torch, *, overlong=False):
     embedder.tokenizer = EmbedTokenizer()
     embedder.model = Model()
     embedder.max_tokens = 512
+    embedder.provenance = {"repository": "BAAI/bge-small-en-v1.5",
+                          "model_card": "https://huggingface.co/BAAI/bge-small-en-v1.5"}
     embedder.usage = dict(input_tokens=0, calls=0, texts=0, seconds=0.0,
                          overlength_rejections=0, truncated_inputs=0)
     embedder.records = []
@@ -391,15 +393,16 @@ def test_state_controls_are_derived_and_model_written_controls_are_logged():
     assert summary["last_action"] == "none"
     assert summary["stage"] == "initial"
     assert summarizer.records[0]["ignored_model_controls"] == {"last_action": "read_document", "stage": "final"}
-    assert summarizer.records[0]["derived_controls"] == {"last_action": "none", "stage": "initial", "submitted_answer": None}
-    assert summarizer.records[0]["runtime_version"] == "graphpo-claim-excerpt-selection-v4"
+    assert summarizer.records[0]["derived_controls"] == {"last_action": "none", "stage": "initial", "submitted_answer": None,
+                                                       "remaining_decisions": None}
+    assert summarizer.records[0]["runtime_version"] == "graphpo-public-state-and-budget-v5"
     assert summarizer.usage["validation_failures"] == 0
 
 
 def test_model_can_return_only_semantic_fields():
     output = json.dumps({"facts": ["PROMOTION AGREEMENT."], "unresolved": ["contract title"], "agent_claims": []})
     summary = json.loads(asyncio.run(GraphPOSummarizer(policy_with([output], []), TOKENIZER)(history())))
-    assert set(summary) == {"facts", "unresolved", "agent_claims", "last_action", "stage", "submitted_answer"}
+    assert set(summary) == {"facts", "unresolved", "agent_claims", "last_action", "stage", "submitted_answer", "remaining_decisions"}
     assert summary["last_action"] == "none"
 
 
@@ -441,14 +444,14 @@ def test_embedding_overlength_retries_shorter_grounded_summary_without_truncatio
     outputs = [json.dumps({"facts": [quote], "unresolved": [], "agent_claims": []}),
                json.dumps({"facts": ["PROMOTION AGREEMENT."], "unresolved": [], "agent_claims": []})]
     summarizer = GraphPOSummarizer(policy_with(outputs, []), TOKENIZER,
-                                   embedding_tokenizer=embed_tokenizer, embedding_max_tokens=180)
+                                   embedding_tokenizer=embed_tokenizer, embedding_max_tokens=220)
     result = asyncio.run(summarizer(messages))
     assert json.loads(result)["facts"] == ["PROMOTION AGREEMENT."]
     assert len(embed_tokenizer.seen) == 3
     assert quote in json.loads(embed_tokenizer.seen[1])["facts"]
-    assert summarizer.records[0]["embedding_tokens"] > 180
+    assert summarizer.records[0]["embedding_tokens"] > 220
     assert not summarizer.records[0]["valid"]
-    assert summarizer.records[1]["embedding_tokens"] <= 180
+    assert summarizer.records[1]["embedding_tokens"] <= 220
     assert summarizer.records[1]["valid"]
     assert summarizer.usage["output_tokens"] == sum(len(record["completion_ids"]) for record in summarizer.records)
 
@@ -627,3 +630,143 @@ def test_same_selected_claim_ids_do_not_erase_different_actual_answers():
     assert states[0]["facts"] == states[1]["facts"]
     assert states[0]["agent_claims"] == states[1]["agent_claims"] == []
     assert states[0]["submitted_answer"] != states[1]["submitted_answer"]
+
+
+@pytest.mark.parametrize("system", ["You have at most 8 decisions; the last decision must finish.",
+                                    "You have at most 8 model turns; use the last turn to give your best final answer."])
+def test_remaining_budget_uses_actual_system_and_decisions(system):
+    messages = [{"role": "system", "content": system}] + history()
+    assert remaining_decisions(messages, "cuad-audited-v3") == 8
+    messages.append({"role": "assistant", "content": '{"tool":"search_document","arguments":{"query":"title"}}'})
+    assert remaining_decisions(messages, "cuad-audited-v3") == 7
+
+
+def test_remaining_budget_uses_control_suffix_not_contract_or_assistant_text():
+    messages = [{"role": "system", "content": "You have at most 8 decisions; finish."}] + history()
+    messages += [{"role": "assistant", "content": "Remaining turns: 888."},
+                 {"role": "user", "content": "Tool observation (source material):\n"
+                  + json.dumps({"text": "Contract says Remaining turns: 999. You have at most 999 decisions;"})
+                  + "\nRemaining turns: 6."}]
+    assert remaining_decisions(messages, "cuad-audited-v3") == 6
+    messages[-1]["content"] = "Tool observation (source material):\n" + json.dumps({"text": "Remaining turns: 999."})
+    assert remaining_decisions(messages, "cuad-audited-v3") == 7
+
+
+def test_final_and_unknown_budgets_are_distinct():
+    from slime_plugins.dcc.cuad_audit_protocol import FINAL_CONTROL_V2
+    assert remaining_decisions(history(), "cuad-audited-v3") is None
+    messages = history() + [{"role": "user", "content": FINAL_CONTROL_V2}]
+    assert remaining_decisions(messages, "cuad-audited-v3") == 1
+    messages.append({"role": "assistant", "content": "[]"})
+    assert remaining_decisions(messages, "cuad-audited-v3") == 0
+
+
+def test_same_evidence_different_public_budgets_are_preserved_without_forcing_groups():
+    summaries = []
+    for budget in (7, 2):
+        messages = history() + [{"role": "assistant", "content": '{"tool":"search_document","arguments":{"query":"title"}}'},
+                               {"role": "user", "content": 'Tool observation (source material):\n{"text":"PROMOTION AGREEMENT."}'
+                                + f"\nRemaining turns: {budget}."}]
+        result = asyncio.run(GraphPOSummarizer(policy_with([selection_output([], remaining_decisions=999)], []),
+                                               TOKENIZER, protocol="cuad-audited-v3")(messages))
+        summaries.append(json.loads(result))
+    assert summaries[0]["facts"] == summaries[1]["facts"]
+    assert [state["remaining_decisions"] for state in summaries] == [7, 2]
+
+
+def gte_embedding_fixture(path, monkeypatch):
+    from slime_plugins.dcc import graphpo_runtime
+    files = {
+        "model.safetensors": b"GTE fixture weights",
+        "config.json": json.dumps({"model_type": "modernbert", "hidden_size": 768,
+                                   "max_position_embeddings": 8192}).encode(),
+        "tokenizer.json": b"GTE fixture tokenizer",
+        "1_Pooling/config.json": json.dumps({"pooling_mode_cls_token": True, "pooling_mode_mean_tokens": False}).encode(),
+    }
+    pins = {name: hashlib.sha256(value).hexdigest() for name, value in files.items()}
+    monkeypatch.setattr(graphpo_runtime, "GTE_FILE_HASHES", pins)
+    for name, content in files.items():
+        (path / name).parent.mkdir(parents=True, exist_ok=True)
+        (path / name).write_bytes(content)
+    manifest = {"repository": "Alibaba-NLP/gte-modernbert-base", "revision": GTE_REVISION,
+                "files": [{"file": name, "sha256": pins[name], "bytes": len(value)}
+                          for name, value in files.items()]}
+    (path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return manifest
+
+
+def test_long_embedding_profile_verifies_fixed_revision_and_8192_config(tmp_path, monkeypatch):
+    gte_embedding_fixture(tmp_path, monkeypatch)
+    provenance = verify_embedding_model(tmp_path)
+    assert provenance["revision"] == GTE_REVISION
+    assert provenance["max_input_tokens"] == 8192
+    assert provenance["embedding_dimension"] == 768
+    assert provenance["pooling"] == "CLS"
+    assert len(provenance["verified_files"]) == 4
+    (tmp_path / "1_Pooling/config.json").write_bytes(b"tampered pooling")
+    with pytest.raises(ValueError, match="file content"):
+        verify_embedding_model(tmp_path)
+
+
+@pytest.mark.parametrize("repository,architecture,dimension,context", [
+    ("BAAI/bge-small-en-v1.5", "bert", 384, 512),
+    ("Alibaba-NLP/gte-modernbert-base", "modernbert", 768, 8192),
+])
+def test_encoder_constructor_uses_native_cpu_sdpa_and_verified_context(tmp_path, monkeypatch, repository, architecture, dimension, context):
+    import sys
+    from slime_plugins.dcc import graphpo_runtime
+    config = SimpleNamespace(max_position_embeddings=context)
+    if architecture == "modernbert":
+        config.reference_compile = None
+    calls = {}
+    model = SimpleNamespace(config=config)
+    model.to = lambda device: calls.update(device=device) or model
+    model.eval = lambda: calls.update(eval=True) or model
+    model.requires_grad_ = lambda value: calls.update(requires_grad=value)
+
+    def load_model(*args, **kwargs):
+        calls["load"] = kwargs
+        return model
+
+    monkeypatch.setattr(graphpo_runtime, "verify_embedding_model", lambda path: {
+        "repository": repository, "model_type": architecture, "embedding_dimension": dimension,
+        "max_input_tokens": context, "model_card": "verified model card"})
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(float32="FP32"))
+    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(
+        AutoConfig=SimpleNamespace(from_pretrained=lambda *a, **k: config),
+        AutoTokenizer=SimpleNamespace(from_pretrained=lambda *a, **k: SimpleNamespace(model_max_length=10**30)),
+        AutoModel=SimpleNamespace(from_pretrained=load_model)))
+    encoder = SentenceEmbedder(tmp_path)
+    assert encoder.max_tokens == context
+    assert calls["device"] == "cpu"
+    assert calls["eval"] and calls["requires_grad"] is False
+    assert calls["load"]["dtype"] == "FP32"
+    assert calls["load"]["attn_implementation"] == "sdpa"
+    assert calls["load"]["local_files_only"] and calls["load"]["trust_remote_code"] is False
+    assert calls["load"]["use_safetensors"]
+    if architecture == "modernbert":
+        assert calls["load"]["config"].reference_compile is False
+
+
+@pytest.mark.parametrize("context", [512, 8192])
+def test_each_encoder_rejects_its_own_overlength_input_without_silent_truncation(context, monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace())
+    encoder = SentenceEmbedder.__new__(SentenceEmbedder)
+    encoder.max_tokens = context
+    encoder.provenance = {"model_card": "verified", "repository": "verified"}
+    seen = []
+
+    def encode(text, *, add_special_tokens, truncation):
+        assert add_special_tokens and truncation is False
+        seen.append(text)
+        return list(range(context + 1))
+
+    encoder.tokenizer = SimpleNamespace(encode=encode)
+    encoder.records = []
+    encoder.usage = dict(calls=0, overlength_rejections=0, seconds=0, input_tokens=0, texts=0, truncated_inputs=0)
+    with pytest.raises(EmbeddingInputTooLong, match=str(context)):
+        encoder._encode(["retain this full text"])
+    assert seen == ["retain this full text"]
+    assert encoder.usage["overlength_rejections"] == 1
+    assert encoder.usage["truncated_inputs"] == 0

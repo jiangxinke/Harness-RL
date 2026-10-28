@@ -18,7 +18,7 @@ from .graphpo_collector import chat_tokens
 
 
 BGE_MODEL_CARD = "https://huggingface.co/BAAI/bge-small-en-v1.5"
-SUMMARY_VERSION = "graphpo-claim-excerpt-selection-v4"
+SUMMARY_VERSION = "graphpo-public-state-and-budget-v5"
 BGE_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
 BGE_FILE_HASHES = {
     "model.safetensors": "3c9f31665447c8911517620762200d2245a2518d6e7208acc78cd9db317e21ad",
@@ -27,6 +27,19 @@ BGE_FILE_HASHES = {
     "tokenizer.json": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
     "tokenizer_config.json": "9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3",
     "vocab.txt": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+}
+GTE_MODEL_CARD = "https://huggingface.co/Alibaba-NLP/gte-modernbert-base"
+GTE_REVISION = "e7f32e3c00f91d699e8c43b53106206bcc72bb22"
+GTE_FILE_HASHES = {
+    "model.safetensors": "3e85899d5728cb7de79781c0c3acfb91ccef9f875f1f7e0b3c9f3dd4b6a724ba",
+    "config.json": "8ba54dc3d35d7194f5178a4194b649f146753e02dabd22bdca5c5cbac15069ed",
+    "tokenizer.json": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30",
+    "tokenizer_config.json": "9654072f7c873161814043cf08cb5ed72f71d0b935abcd4e267935cb34352c21",
+    "special_tokens_map.json": "ea97ecdbcc73713039d8d64dbb05e3689495c96657fbd9a18f5bed381be81049",
+    "1_Pooling/config.json": "4bf279dd9204db673304cab6e7db8448f427412a0d87f04c3e19f1de55dd98cd",
+    "config_sentence_transformers.json": "f6bbc7812d09c4ae1cba610fbdad3aea0ca9b3b8affe5a130d31709bdbc94e99",
+    "modules.json": "8f4b264b80206c830bebbdcae377e137925650a433b689343a63bdc9b3145460",
+    "README.md": "97d40aa325f0e6eaddf77edc7187b7bba6fd3e31a555be3b5766f015c6c27550",
 }
 SUMMARY_PROMPT = (
     "Summarize the semantic state of this contract-reading agent using only the supplied public history. "
@@ -44,7 +57,7 @@ SUMMARY_PROMPT = (
     "Do not rewrite, summarize, or invent claim text: the program restores the selected exact excerpts as agent_claims. "
     "These are unverified agent claims, not source facts. Candidate coverage is limited to excerpts of actual assistant output. "
     "Use an empty claim_ids list if no candidate is useful. Do not output an agent_claims field. "
-    "The program derives the actual last action and stage from the history; do not generate those fields. "
+    "The program derives the actual last action, stage, and remaining decision budget from the history; do not generate those fields. "
     "The program also retains the complete submitted_answer from any actual final response, including an empty answer. "
     "Do not repeat that submitted answer in facts or agent_claims merely to preserve it. "
     "Keep the complete JSON compact, preferably under 250 tokens. Empty lists are valid when no facts or "
@@ -113,6 +126,33 @@ def _submitted_answer(history, protocol):
         if message["role"] == "assistant":
             parsed = _parse_public_action(message["content"], protocol)
             return copy.deepcopy(parsed["answer"]) if parsed is not None and "answer" in parsed else None
+    return None
+
+
+def remaining_decisions(history, protocol):
+    if _submitted_answer(history, protocol) is not None:
+        return 0
+    prefixes = ("Initial contract retrieval (source material):\n", "Tool observation (source material):\n")
+    for message in reversed(history):
+        if message["role"] != "user":
+            continue
+        content = message["content"]
+        prefix = next((prefix for prefix in prefixes if content.startswith(prefix)), None)
+        if prefix is not None:
+            source_payload(content)
+            _, end = json.JSONDecoder().raw_decode(content[len(prefix):])
+            suffix = content[len(prefix) + end:]
+            match = re.fullmatch(r"\nRemaining turns: (\d+)\.\s*", suffix)
+            if match:
+                return int(match[1])
+    for message in reversed(history):
+        if message["role"] == "system":
+            match = re.search(r"You have at most (\d+) (?:model turns|decisions);", message["content"])
+            if match:
+                used = sum(message["role"] == "assistant" for message in history)
+                return max(0, int(match[1]) - used)
+    if any(message["role"] == "user" and is_final_control(message["content"]) for message in history):
+        return 1
     return None
 
 
@@ -214,7 +254,7 @@ def validate_summary(text, history, *, last_action, stage, protocol):
         raise SummaryValidationError(f"Summary must be one complete JSON object: {exc}") from exc
     required = {"facts", "unresolved"}
     if (not isinstance(value, dict) or not required <= set(value)
-            or not set(value) <= {"facts", "unresolved", "claim_ids", "agent_claims", "last_action", "stage", "submitted_answer"}):
+            or not set(value) <= {"facts", "unresolved", "claim_ids", "agent_claims", "last_action", "stage", "submitted_answer", "remaining_decisions"}):
         raise SummaryValidationError("Summary needs facts, unresolved, and claim_ids selected from candidates; control fields are program-derived")
     if "claim_ids" in value and "agent_claims" in value:
         raise SummaryValidationError("Do not mix claim_ids with legacy agent_claims")
@@ -247,39 +287,53 @@ def validate_summary(text, history, *, last_action, stage, protocol):
             raise SummaryValidationError("Summary agent_claims must quote actual public assistant text or parsed action output")
     return json.dumps({"facts": value["facts"], "unresolved": value["unresolved"],
                        "agent_claims": value["agent_claims"], "last_action": last_action, "stage": stage,
-                       "submitted_answer": _submitted_answer(history, protocol)},
+                       "submitted_answer": _submitted_answer(history, protocol),
+                       "remaining_decisions": remaining_decisions(history, protocol)},
                       ensure_ascii=False, separators=(",", ":"))
 
 
 def verify_embedding_model(local_model_path):
     path = Path(local_model_path).resolve()
     if not path.is_dir() or not (path / "manifest.json").is_file():
-        raise ValueError("GraphPO BGE model needs a local directory and download manifest.json")
+        raise ValueError("GraphPO embedding model needs a local directory and download manifest.json")
     manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
-    if manifest.get("repository") != "BAAI/bge-small-en-v1.5" or manifest.get("revision") != BGE_REVISION:
-        raise ValueError("GraphPO embedding manifest does not identify the pinned BGE-small-en-v1.5 revision")
+    repository = manifest.get("repository")
+    if repository == "BAAI/bge-small-en-v1.5":
+        revision, hashes, card, architecture, dimension, context = BGE_REVISION, BGE_FILE_HASHES, BGE_MODEL_CARD, "bert", 384, 512
+    elif repository == "Alibaba-NLP/gte-modernbert-base":
+        revision, hashes, card, architecture, dimension, context = GTE_REVISION, GTE_FILE_HASHES, GTE_MODEL_CARD, "modernbert", 768, 8192
+    else:
+        raise ValueError("GraphPO embedding manifest does not identify a pinned BGE or GTE encoder")
+    if manifest.get("revision") != revision:
+        raise ValueError("GraphPO embedding manifest does not identify the pinned BGE or GTE revision")
     entries = manifest.get("files", [])
     by_name = {entry["file"]: entry for entry in entries}
     if len(by_name) != len(entries):
         raise ValueError("GraphPO embedding manifest contains duplicate file entries")
     checked = []
-    for name, expected in BGE_FILE_HASHES.items():
+    for name, expected in hashes.items():
         entry = by_name.get(name)
         target = path / name
         if not entry or entry.get("sha256") != expected or not target.is_file():
-            raise ValueError(f"GraphPO BGE pinned file is missing or has an unexpected manifest hash: {name}")
+            raise ValueError(f"GraphPO encoder pinned file is missing or has an unexpected manifest hash: {name}")
         digest = hashlib.sha256()
         with target.open("rb") as stream:
             while chunk := stream.read(1024 * 1024):
                 digest.update(chunk)
         if digest.hexdigest() != expected or target.stat().st_size != entry.get("bytes"):
-            raise ValueError(f"GraphPO BGE file content does not match its pinned provenance: {name}")
+            raise ValueError(f"GraphPO encoder file content does not match its pinned provenance: {name}")
         checked.append({"file": name, "sha256": expected, "bytes": target.stat().st_size})
     config = json.loads((path / "config.json").read_text(encoding="utf-8"))
-    if config.get("model_type") != "bert" or config.get("hidden_size") != 384 or config.get("max_position_embeddings") != 512:
-        raise ValueError("GraphPO embedding config is not the expected BGE-small-en-v1.5 architecture")
-    return {"repository": manifest["repository"], "revision": BGE_REVISION,
-            "model_card": BGE_MODEL_CARD, "verified_files": checked}
+    if (config.get("model_type") != architecture or config.get("hidden_size") != dimension
+            or config.get("max_position_embeddings") != context or config.get("auto_map")):
+        raise ValueError("GraphPO embedding config is not the expected native pinned architecture")
+    if architecture == "modernbert":
+        pooling = json.loads((path / "1_Pooling/config.json").read_text(encoding="utf-8"))
+        if pooling.get("pooling_mode_cls_token") is not True or pooling.get("pooling_mode_mean_tokens") is not False:
+            raise ValueError("GraphPO GTE pooling config must use the official CLS representation")
+    return {"repository": repository, "revision": revision, "model_card": card,
+            "model_type": architecture, "embedding_dimension": dimension, "max_input_tokens": context,
+            "verified_files": checked, "pooling": "CLS", "l2_normalized": True}
 
 
 class GraphPOSummarizer:
@@ -310,7 +364,9 @@ class GraphPOSummarizer:
             raise ValueError("GraphPO summary input must contain public role/content messages only")
         last_action, stage = _state_controls(public_history, self.protocol)
         submitted_answer = _submitted_answer(public_history, self.protocol)
-        derived = {"last_action": last_action, "stage": stage, "submitted_answer": submitted_answer}
+        budget = remaining_decisions(public_history, self.protocol)
+        derived = {"last_action": last_action, "stage": stage, "submitted_answer": submitted_answer,
+                   "remaining_decisions": budget}
         if self.embedding_tokenizer is not None:
             minimum = json.dumps({"facts": [], "unresolved": [], "agent_claims": [], **derived},
                                  ensure_ascii=False, separators=(",", ":"))
@@ -340,6 +396,7 @@ class GraphPOSummarizer:
             {"role": "system", "content": instructions},
             {"role": "user", "content": json.dumps({
                 "observed_last_action": last_action, "observed_stage": stage,
+                "observed_remaining_decisions": budget,
                 "program_retained_submitted_answer": submitted_answer,
                 "public_history": public_history,
                 "latest_assistant_message": next((m["content"] for m in reversed(public_history)
@@ -388,7 +445,7 @@ class GraphPOSummarizer:
                 record["selected_claim_ids"] = model_fields.get("claim_ids")
                 record["claim_selection_mode"] = "ids" if "claim_ids" in model_fields else "legacy_exact_quotes" if "agent_claims" in model_fields else "none"
                 record["resolved_agent_claims"] = json.loads(summary)["agent_claims"]
-                record["ignored_model_controls"] = {key: model_fields[key] for key in ("last_action", "stage", "submitted_answer") if key in model_fields}
+                record["ignored_model_controls"] = {key: model_fields[key] for key in ("last_action", "stage", "submitted_answer", "remaining_decisions") if key in model_fields}
                 if self.embedding_tokenizer is not None:
                     length = len(self.embedding_tokenizer.encode(summary, add_special_tokens=True, truncation=False))
                     record.update(embedding_tokens=length, embedding_max_tokens=self.embedding_max_tokens)
@@ -424,17 +481,27 @@ class GraphPOSummarizer:
 
 
 class SentenceEmbedder:
-    """BGE-small-en-v1.5 model-card CLS pooling and L2 normalization on CPU."""
+    """Pinned native BGE/GTE encoders with CLS pooling and L2 normalization on CPU."""
 
     def __init__(self, local_model_path):
         path = Path(local_model_path).resolve()
         self.provenance = verify_embedding_model(path)
-        from transformers import AutoModel, AutoTokenizer
+        import torch
+        from transformers import AutoConfig, AutoModel, AutoTokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(str(path), local_files_only=True, trust_remote_code=False)
+        config = AutoConfig.from_pretrained(str(path), local_files_only=True, trust_remote_code=False)
+        if self.provenance["model_type"] == "modernbert":
+            config.reference_compile = False
         self.model = AutoModel.from_pretrained(str(path), local_files_only=True, trust_remote_code=False,
-                                              use_safetensors=True).to("cpu").eval()
+                                              use_safetensors=True, config=config, dtype=torch.float32,
+                                              attn_implementation="sdpa").to("cpu").eval()
         self.model.requires_grad_(False)
-        self.max_tokens = min(512, int(self.model.config.max_position_embeddings))
+        self.max_tokens = int(self.provenance["max_input_tokens"])
+        if int(self.model.config.max_position_embeddings) != self.max_tokens:
+            raise ValueError("Loaded encoder context differs from its verified pinned config")
+        self.provenance["load_options"] = {"device": "cpu", "dtype": "float32", "attention": "sdpa",
+                                           "trust_remote_code": False,
+                                           "reference_compile": getattr(config, "reference_compile", None)}
         self.model_path = str(path)
         self.usage = dict(input_tokens=0, calls=0, texts=0, seconds=0.0,
                           overlength_rejections=0, truncated_inputs=0)
@@ -453,7 +520,8 @@ class SentenceEmbedder:
         import torch
 
         started = time.monotonic()
-        record = {"texts": list(texts), "model_card": BGE_MODEL_CARD,
+        record = {"texts": list(texts), "model_card": self.provenance["model_card"],
+                  "repository": self.provenance["repository"],
                   "pooling": "CLS", "l2_normalized": True, "device": "cpu", "truncated": False}
         self.usage["calls"] += 1
         try:
@@ -461,15 +529,15 @@ class SentenceEmbedder:
             record["token_lengths"] = lengths
             if any(length > self.max_tokens for length in lengths):
                 self.usage["overlength_rejections"] += 1
-                raise EmbeddingInputTooLong(f"GraphPO summary exceeds BGE's {self.max_tokens}-token context: {lengths}")
+                raise EmbeddingInputTooLong(f"GraphPO summary exceeds the encoder's {self.max_tokens}-token context: {lengths}")
             encoded = self.tokenizer(texts, padding=True, truncation=False, return_tensors="pt")
             with torch.inference_mode():
                 hidden = self.model(**encoded).last_hidden_state[:, 0]
                 if not torch.isfinite(hidden).all() or torch.any(torch.linalg.vector_norm(hidden, dim=1) == 0):
-                    raise ValueError("BGE returned an invalid CLS embedding")
+                    raise ValueError("GraphPO encoder returned an invalid CLS embedding")
                 vectors = torch.nn.functional.normalize(hidden, p=2, dim=1).cpu().tolist()
             if any(not all(math.isfinite(value) for value in vector) for vector in vectors):
-                raise ValueError("BGE returned a nonfinite normalized embedding")
+                raise ValueError("GraphPO encoder returned a nonfinite normalized embedding")
             self.usage["input_tokens"] += sum(lengths)
             self.usage["texts"] += len(texts)
             record["dimensions"] = len(vectors[0])
