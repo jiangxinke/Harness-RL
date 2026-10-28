@@ -1,0 +1,198 @@
+{
+  "receipt_version": "graphpo-smoke-receipt-v1",
+  "method": "graphpo",
+  "run_kind": "collection_smoke",
+  "source_commit": null,
+  "source_commit_evidence": "下载产物记录了runtime_version和source-v3-candidate路径，但没有不可变源码提交SHA，历史source_commit留空。",
+  "runtime_versions": [
+    "graphpo-public-state-and-budget-v5"
+  ],
+  "status": "preflight_failed",
+  "recorded_status": {
+    "state": "failed",
+    "error": "GraphPO summary failed validation after 2 attempts: Summary facts must quote observed contract source text"
+  },
+  "training": false,
+  "optimizer_updates": 0,
+  "usable_for_algorithm_shortcoming": false,
+  "outcome": "已选择8192-token GTE编码器；根摘要第一次改写任务问题，第二次改写来源事实，两次均被校验拒绝，尚未执行embedding前向或actor决策。",
+  "artifact_root": "outputs/credit-rebuild-20261029/graphpo-smoke-long",
+  "files_sha256": {
+    "auxiliary.json": "14c10ae0f0087ab26bb25c3f69a9b9133a4b06cf63f6e2076ad6b222a8f20c24",
+    "status.json": "5bbe33fc44f2236da3777fe63a8dabf7a8d342a69faa94c9594735cb10b7801c"
+  },
+  "files_bytes": {
+    "auxiliary.json": 100255,
+    "status.json": 2354
+  },
+  "driver_reference": {
+    "artifact": ".cache/baseline-rebuild-20261029/graphpo-smoke.py",
+    "sha256": "2e3d0b3f4fe1af8c293967330aac773217f501bb6c6fa5d8661609e2e3e113ca",
+    "historical_exact_driver_verified": false,
+    "note": "保存的通用smoke驱动只执行采样和信用计算，不含优化器；各历史启动命令及驱动快照未包含在各自目录。"
+  },
+  "actor_and_summary_model": {
+    "name": "Qwen2.5-3B-Instruct",
+    "shared_model": true,
+    "trainable": false,
+    "evidence": "已保存smoke驱动加载同一3B模型供actor与summary使用；各目录未单独保存权重manifest。"
+  },
+  "task": {
+    "id": "MEDALISTDIVERSIFIEDREIT,INC_05_18_2020-EX-10.1-CONSULTING AGREEMENT__Change Of Control",
+    "benchmark": "CUAD",
+    "public_task_message": "Requested field: Change Of Control\nQuestion: Does one party have the right to terminate or is consent or notice required of the counterparty if such party undergoes a change of control, such as a merger, stock sale, transfer of all or substantially all of its assets or business, or assignment by operation of law?\nExtract the contract text that answers this question. Return source quotations, not yes/no. For a document name, return the actual title. The field label is not a phrase that must appear in the contract.",
+    "selection_in_saved_driver": "pilot_train.jsonl第12条"
+  },
+  "encoder": {
+    "repository": "Alibaba-NLP/gte-modernbert-base",
+    "revision": "e7f32e3c00f91d699e8c43b53106206bcc72bb22",
+    "model_card": "https://huggingface.co/Alibaba-NLP/gte-modernbert-base",
+    "model_type": "modernbert",
+    "embedding_dimension": 768,
+    "max_input_tokens": 8192,
+    "verified_files": [
+      {
+        "file": "model.safetensors",
+        "sha256": "3e85899d5728cb7de79781c0c3acfb91ccef9f875f1f7e0b3c9f3dd4b6a724ba",
+        "bytes": 298041568
+      },
+      {
+        "file": "config.json",
+        "sha256": "8ba54dc3d35d7194f5178a4194b649f146753e02dabd22bdca5c5cbac15069ed",
+        "bytes": 1184
+      },
+      {
+        "file": "tokenizer.json",
+        "sha256": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30",
+        "bytes": 3583228
+      },
+      {
+        "file": "tokenizer_config.json",
+        "sha256": "9654072f7c873161814043cf08cb5ed72f71d0b935abcd4e267935cb34352c21",
+        "bytes": 20867
+      },
+      {
+        "file": "special_tokens_map.json",
+        "sha256": "ea97ecdbcc73713039d8d64dbb05e3689495c96657fbd9a18f5bed381be81049",
+        "bytes": 694
+      },
+      {
+        "file": "1_Pooling/config.json",
+        "sha256": "4bf279dd9204db673304cab6e7db8448f427412a0d87f04c3e19f1de55dd98cd",
+        "bytes": 297
+      },
+      {
+        "file": "config_sentence_transformers.json",
+        "sha256": "f6bbc7812d09c4ae1cba610fbdad3aea0ca9b3b8affe5a130d31709bdbc94e99",
+        "bytes": 205
+      },
+      {
+        "file": "modules.json",
+        "sha256": "8f4b264b80206c830bebbdcae377e137925650a433b689343a63bdc9b3145460",
+        "bytes": 229
+      },
+      {
+        "file": "README.md",
+        "sha256": "97d40aa325f0e6eaddf77edc7187b7bba6fd3e31a555be3b5766f015c6c27550",
+        "bytes": 13983
+      }
+    ],
+    "pooling": "CLS",
+    "l2_normalized": true,
+    "load_options": {
+      "device": "cpu",
+      "dtype": "float32",
+      "attention": "sdpa",
+      "trust_remote_code": false,
+      "reference_compile": false
+    },
+    "effective_max_input_tokens": 8192,
+    "capacity_basis": "固定模型原生config及实际摘要校验上限；不使用tokenizer的大整数占位上限。",
+    "paper_encoder": "SFR-Embedding-2_R",
+    "material_adaptation": true,
+    "interpretation": "当前编码器替代论文使用的SFR-Embedding-2_R；当前相似度表现不代表原论文编码器表现。"
+  },
+  "summary_attempts": [
+    {
+      "record_index": 1,
+      "attempt": 1,
+      "runtime_version": "graphpo-public-state-and-budget-v5",
+      "public_stage": "initial",
+      "valid": false,
+      "error": "Summary unresolved items must quote the original task question",
+      "embedding_tokens": null,
+      "embedding_max_tokens": null,
+      "input_tokens": 1374,
+      "output_tokens": 101,
+      "output_sha256": "60107686573f980b806adf840b77f63bd4445ae8ad4e30709c59ff9d9237f345",
+      "selected_fact_ids": null,
+      "selected_unresolved_ids": null,
+      "selected_claim_ids": null
+    },
+    {
+      "record_index": 2,
+      "attempt": 2,
+      "runtime_version": "graphpo-public-state-and-budget-v5",
+      "public_stage": "initial",
+      "valid": false,
+      "error": "Summary facts must quote observed contract source text",
+      "embedding_tokens": null,
+      "embedding_max_tokens": null,
+      "input_tokens": 1531,
+      "output_tokens": 94,
+      "output_sha256": "dc83e6ddad628f2422dd8ea03c2da82c79a6ab0a8731c40bb2bd2b1c616e55f9",
+      "selected_fact_ids": null,
+      "selected_unresolved_ids": null,
+      "selected_claim_ids": null
+    }
+  ],
+  "effects": {
+    "collection_returned": false,
+    "valid_summaries": 0,
+    "embedding_calls": 0,
+    "observed_actor_decisions_in_longest_saved_public_history": 0,
+    "terminal_rollouts_saved": 0,
+    "training_items_prepared": null,
+    "nonzero_advantages": null,
+    "parameters_updated": false,
+    "inputs_truncated": false
+  },
+  "costs": {
+    "summary_usage": {
+      "input_tokens": 2905,
+      "output_tokens": 195,
+      "calls": 2,
+      "seconds": 3.8367601186037064,
+      "validation_failures": 2,
+      "failed_states": 1,
+      "capacity_failures": 0
+    },
+    "embedding_usage": {
+      "input_tokens": 0,
+      "calls": 0,
+      "texts": 0,
+      "seconds": 0.0,
+      "overlength_rejections": 0,
+      "truncated_inputs": 0
+    }
+  },
+  "record_consistency_checks": {
+    "summary_call_count_and_actual_tokens_match": true,
+    "valid_summary_equals_embedding_input": true,
+    "embedding_token_totals_match": true,
+    "embedding_inputs_not_truncated": true
+  },
+  "interpretation": "运行适配检查。摘要协议拒绝或编码器容量限制不构成GraphPO算法不足的实验结论；成功smoke也不等于完成RL训练。",
+  "failure": {
+    "stage": "root_summary",
+    "message": "GraphPO summary failed validation after 2 attempts: Summary facts must quote observed contract source text",
+    "traceback_artifact": "status.json",
+    "category": "summary_interface_validation",
+    "algorithm_effectiveness_tested": false
+  },
+  "missing_evidence": [
+    "不可变历史source_commit",
+    "完整actor轨迹与最终图诊断（收集失败，未保存）",
+    "历史启动命令与pytest原始日志"
+  ]
+}
