@@ -1,0 +1,239 @@
+{
+  "method": "GraphPO",
+  "paper": "2606.18954v1",
+  "paper_sha256": "6d231ffe755f06a8e25250566ee1244a33c0c04bbc590d872777987d301cfd99",
+  "reading": {
+    "pages_read": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25
+    ],
+    "complete_body_appendices_references": true,
+    "rendered_checked": [
+      3,
+      4,
+      6,
+      8,
+      9,
+      14,
+      16,
+      17,
+      20
+    ],
+    "scope": "All 25 pages read in five sequential tool outputs; formulas and algorithm visually checked."
+  },
+  "official_code": {
+    "status": "No matching public official implementation located",
+    "paper_statement": "The code will be released soon.",
+    "checked": [
+      "https://arxiv.org/abs/2606.18954",
+      "https://arxiv.org/html/2606.18954v1",
+      "https://api.github.com/users/whynot-zyl/repos?per_page=100",
+      "https://api.github.com/search/repositories?q=GraphPO+in%3Aname&per_page=100",
+      "https://api.github.com/search/repositories?q=%22Graph-based+Policy+Optimization%22"
+    ],
+    "evidence_files": [
+      "arxiv_abs.html",
+      "arxiv_html.html",
+      "github_author_repos.json",
+      "github_exact.json",
+      "github_exact_page2.json",
+      "github_title.json"
+    ],
+    "caveat": "Public absence is based on these searches, not proof no private code exists."
+  },
+  "essential_components": [
+    {
+      "pages": [
+        5,
+        14,
+        16
+      ],
+      "component": "layerwise tree branching and adaptive budget",
+      "requirement": "Sample multiple next decisions from each original prefix; equivalent longer/frontier paths have next-layer budget halved with minimum one, saved budget reassigned to novel frontier nodes; count unique generated edges, leaves and summary/embedding costs."
+    },
+    {
+      "pages": [
+        5,
+        14,
+        23,
+        25
+      ],
+      "component": "semantic states",
+      "requirement": "Structured summary of entire actual prompt-to-node path, policy/self frozen-per-iteration extractor; cosine embedding similarity threshold0.92. Original empirics use SFR-Embedding-2_R. Preserve original contexts, virtual suffix sharing only."
+    },
+    {
+      "pages": [
+        5,
+        14,
+        17
+      ],
+      "component": "equivalence classes",
+      "requirement": "Union-find on non-ancestor-descendant nodes. Must validate quotient DAG before union, because pairwise non-causal alone is insufficient under transitive merging."
+    },
+    {
+      "pages": [
+        5,
+        6,
+        14
+      ],
+      "component": "pooled outcome score",
+      "requirement": "Own direct-provenance terminal reward sum c and count t; S=(c_v+w*sum c_q)/(t_v+w*sum t_q), w=.7; never propagate pooled values as own counts; no-positive-denominator score remains unestimated."
+    },
+    {
+      "pages": [
+        6,
+        14
+      ],
+      "component": "novelty-gated edge reward",
+      "requirement": "r=(S_child-S_actual_parent)*(1-max(0,cos(parent,child))); shared suffix edges must retain their actual generated parent."
+    },
+    {
+      "pages": [
+        6,
+        14
+      ],
+      "component": "correctness advantage",
+      "requirement": "Normalize generated edge rewards among direct+shared outgoing edges of each equivalence class; deduplicate shared edges; preserve separate A_cor diagnostic."
+    },
+    {
+      "pages": [
+        6,
+        14,
+        23
+      ],
+      "component": "efficiency advantage",
+      "requirement": "Find deepest common original-generation ancestor, compare negative numbers of direct steps to equivalent nodes, normalize and gate by meanS; assign to route edges; preserve separate A_eff diagnostic."
+    },
+    {
+      "pages": [
+        6,
+        7,
+        14
+      ],
+      "component": "policy loss",
+      "requirement": "Use unique generated direct edges only, exact original prompt and completion token ids; no fabricated shared path likelihood; preserve A_dual=A_cor+lambda_eff*A_eff."
+    }
+  ],
+  "paper_ambiguities": [
+    {
+      "pages": [
+        5,
+        23,
+        25
+      ],
+      "issue": "Section4.2 says policy itself summarizes; AppendixG says frozen extractor. Freeze policy during each collection iteration is a defensible mapping, but record implementation."
+    },
+    {
+      "pages": [
+        6,
+        14
+      ],
+      "issue": "Eq8 clips combined A_dual whereas AlgorithmS1 sums separately clipped A_cor/A_eff losses; these differ when signs oppose. Choose and label Eq8 implementation, do not claim both identical."
+    },
+    {
+      "pages": [
+        6,
+        23
+      ],
+      "issue": "Uniform efficiency distribution could mean divide by path length or same value each edge; Lemma4 log-prob path derivative supports same value each route edge. Multiple class contributions on same edge unspecified; document sum policy."
+    },
+    {
+      "pages": [
+        14,
+        15,
+        16
+      ],
+      "issue": "No executable code, summary schema/prompt, agent branching schedule, epsilon/ddof, lambda_eff value, terminal equivalence handling, budget recipient/tie-breaking, or exhausted-no-leaf behavior fully specified."
+    },
+    {
+      "pages": [
+        20
+      ],
+      "issue": "Proposition1 S15/S16 claims (1-1/K)*sigma2 decreases with K; it increases. K2=.5sigma2, K4=.75sigma2. This refutes that narrow stated proof, not every pooling-variance result."
+    },
+    {
+      "pages": [
+        24
+      ],
+      "issue": "Novelty gate is actual parent-child similarity, while semantic merges are non-causal node pairs. A false-positive cross-branch merge does not necessarily make either actual edge endpoint similarity high; self-correcting-gate explanation not unconditional."
+    }
+  ],
+  "interface_proposal": {
+    "collector": "collect_graph(task, runner_step_or_replay, policy, summarize, embed, branching, edge_budget, token_budget) -> generated unique edges + own tree + terminal results + summaries + embeddings + equivalence/budget log",
+    "pure_estimator": "graph_advantages(nodes, edges, terminal_rewards, embeddings, equivalence_classes, pooling_weight=.7, efficiency_weight=...) -> per_unique_edge correct/eff/dual + diagnostics",
+    "training_boundary": "No GPU loading in algorithm module. Return ordered original PolicyCompletion records for trainer; independent evaluator uses standard complete EpisodeRunner with same horizon and reward for all methods."
+  },
+  "reference_tests": [
+    "Pure own counts root2/3, a1/2, b1/1; a,b equivalent w.7 gives Sa1.7/2.7 and Sb1.7/2.4, root stays2/3. No double counting terminal descendants.",
+    "Shared actual-edge reward uses S_b when edge originated from b, never S_a for virtual a->child(b).",
+    "Identical source/end embeddings => zero r_step; all-zero terminals => zero scores/correctness/efficiency where observed.",
+    "Equivalent route lengths1,2 and shared score.65 with population std => A_eff +.65,-.65; same-length paths =>0.",
+    "No equivalent nodes or w0 => tree estimator; exclude ancestor-descendant and transitive cycle.",
+    "Duplicate prefix edges appear once in PPO loss even if carried by multiple terminal paths.",
+    "Halving budget retains >=1 continuation and exactly redistributes savings subject to global budget.",
+    "Replayed prefix prompts and tokens match recorded originals; frozen repeated summary incurs no policy training loss; summary never sees gold or verifier."
+  ],
+  "proposed_diagnostics": [
+    "equivalence candidates and accepted/rejected merges",
+    "summary facts versus actual evidence and answer corruption",
+    "same-class downstream reward dispersion",
+    "incoming path lengths and efficiency credit",
+    "A_cor/A_eff/A_dual separately",
+    "novelty coefficient for useful repeated-context actions",
+    "unique generated tokens versus summary+embedding total cost",
+    "budget reassignment and final outcomes",
+    "unestimated nodes and zero-variance groups"
+  ],
+  "cuad_adaptation_warning": "Actor Qwen2.5-3B-Instruct only. Original SFR7B embedder conflicts if no other model allowed. If actor hidden-state embedding replaces it, mark this as material representation adaptation; do not silently use lexical similarity as original semantic GraphPO.",
+  "cuad_collector_design": {
+    "branching": [
+      2,
+      2,
+      2,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "max_decisions": 8,
+    "no_early_finish_leaves": 8,
+    "no_early_finish_unique_edges": 54,
+    "chain_equivalent_max_edges": 64,
+    "early_finish": "Report fewer leaves honestly; collect additional independent graphs if total rollout count substantially below comparators, record all collection cost.",
+    "redundancy_rule": "Class representative=min(depth,node_creation_id); other active members next budget=max(1,floor(base/2)); redistribute saved integer slots round-robin to active representatives/novel states. If none novel, preserve savings rather than falsely claiming reallocation; log unused budget.",
+    "replay": "For CUAD only, each edge expansion calls original EpisodeRunner with cached-prefix policy; validate every original token prompt, generate exactly one new completion, capture next request via custom yield exception. Deterministic contract tools rerun for cached prefix, no GPU generation; record repeated infrastructure work separately. Terminal result keeps original score path.",
+    "train": "Unique generated direct edges only; a leaf record may reference shared prefix edge IDs but cannot duplicate their PPO losses. Summaries/embeddings excluded from actor loss and counted separately."
+  },
+  "implementation": {
+    "reference": "paper equations2-8; no public official implementation located",
+    "auxiliary_embedding": "BAAI/bge-small-en-v1.5; original paper uses SFR-Embedding-2_R",
+    "actor": "Qwen2.5-3B-Instruct",
+    "collector": "full layerwise branching with deterministic CUAD prefix replay and exact token validation",
+    "normalization": "population std plus1e-6 for GraphPO; ambiguous paper choice explicit",
+    "independent_review": ".cache/baseline-rebuild-20261029/g2po/graphpo_independent_review.json"
+  }
+}
