@@ -10,6 +10,7 @@ from slime_plugins.dcc.graphpo_collector import chat_tokens
 from slime_plugins.dcc.graphpo_runtime import (
     EmbeddingInputTooLong, GraphPOSummarizer, SentenceEmbedder, SummaryValidationError, SummaryCapacityError,
     BGE_REVISION, verify_embedding_model,
+    claim_candidates,
 )
 
 
@@ -391,7 +392,7 @@ def test_state_controls_are_derived_and_model_written_controls_are_logged():
     assert summary["stage"] == "initial"
     assert summarizer.records[0]["ignored_model_controls"] == {"last_action": "read_document", "stage": "final"}
     assert summarizer.records[0]["derived_controls"] == {"last_action": "none", "stage": "initial", "submitted_answer": None}
-    assert summarizer.records[0]["runtime_version"] == "graphpo-source-and-agent-claims-v3"
+    assert summarizer.records[0]["runtime_version"] == "graphpo-claim-excerpt-selection-v4"
     assert summarizer.usage["validation_failures"] == 0
 
 
@@ -534,3 +535,95 @@ def test_required_answer_over_embedding_capacity_fails_before_generation_without
     assert summarizer.usage["capacity_failures"] == 1
     assert not summarizer.records[0]["generation_submitted"]
     assert summarizer.records[0]["derived_controls"]["submitted_answer"][0]["text"] == text
+
+
+def selection_output(ids, **updates):
+    return json.dumps({"facts": ["PROMOTION AGREEMENT."], "unresolved": [], "claim_ids": ids, **updates})
+
+
+def test_claim_id_selection_restores_exact_excerpt_and_records_origin():
+    statement = "I think the contract is long.\nI still need to verify the title."
+    messages = history() + [{"role": "assistant", "content": statement}]
+    candidates = claim_candidates(messages, "cuad-audited-v3")
+    chosen = next(candidate for candidate in candidates if candidate["text"] == "I still need to verify the title.")
+    calls = []
+    summarizer = GraphPOSummarizer(policy_with([selection_output([chosen["id"]])], calls), TOKENIZER,
+                                   protocol="cuad-audited-v3")
+    result = json.loads(asyncio.run(summarizer(messages)))
+    assert result["agent_claims"] == [chosen["text"]]
+    request = json.loads(calls[0]["messages"][1]["content"])
+    assert request["claim_candidates"] == candidates
+    record = summarizer.records[0]
+    assert record["claim_candidates"] == candidates
+    assert record["selected_claim_ids"] == [chosen["id"]]
+    assert record["resolved_agent_claims"] == [chosen["text"]]
+    assert record["claim_selection_mode"] == "ids"
+    assert chosen["message_index"] == 3
+    assert statement[chosen["source_start"]:chosen["source_end"]] == chosen["text"]
+    assert chosen["source_text_sha256"] == hashlib.sha256(statement.encode()).hexdigest()
+
+
+@pytest.mark.parametrize("ids", [[0], [999], [True], [1.0], ["1"], [1, 1], "1"])
+def test_invalid_claim_ids_fail_without_text_fallback(ids):
+    messages = history() + [{"role": "assistant", "content": "Need to check the title."}]
+    summarizer = GraphPOSummarizer(policy_with([selection_output(ids)], []), TOKENIZER, max_attempts=1)
+    with pytest.raises(SummaryValidationError, match="distinct integer IDs"):
+        asyncio.run(summarizer(messages))
+    assert summarizer.records[0]["requested_claim_ids_json"] == json.dumps(ids)
+    assert not summarizer.records[0]["valid"]
+
+
+def test_claim_ids_cannot_be_mixed_with_legacy_agent_claims():
+    messages = history() + [{"role": "assistant", "content": "Need to check the title."}]
+    summarizer = GraphPOSummarizer(policy_with([selection_output([1], agent_claims=[])], []), TOKENIZER,
+                                   max_attempts=1)
+    with pytest.raises(SummaryValidationError, match="Do not mix"):
+        asyncio.run(summarizer(messages))
+
+
+def test_candidates_exclude_user_sources_and_task_instructions():
+    messages = history() + [{"role": "assistant", "content": "I need more evidence."}]
+    candidates = claim_candidates(messages, "cuad-audited-v3")
+    assert candidates
+    assert all(messages[item["message_index"] - 1]["role"] == "assistant" for item in candidates)
+    assert not any("PROMOTION AGREEMENT" in item["text"] or "Find the contract title" in item["text"] for item in candidates)
+
+
+def test_parsed_action_candidates_keep_exact_unescaped_value_and_path():
+    answer = 'Clause "A" applies. Another clause is unresolved.'
+    message = json.dumps({"answer": [{"text": answer, "confidence": 1}]})
+    messages = history() + [{"role": "assistant", "content": message}]
+    candidates = claim_candidates(messages, "cuad-audited-v3")
+    candidate = next(item for item in candidates if item["text"] == 'Clause "A" applies.'
+                     and item["source_kind"] == "assistant_parsed_string")
+    assert candidate["json_path"] == ["answer", 0, "text"]
+    assert answer[candidate["source_start"]:candidate["source_end"]] == candidate["text"]
+    summarizer = GraphPOSummarizer(policy_with([selection_output([candidate["id"]])], []), TOKENIZER,
+                                   protocol="cuad-audited-v3")
+    result = json.loads(asyncio.run(summarizer(messages)))
+    assert result["agent_claims"] == ['Clause "A" applies.']
+    assert result["submitted_answer"][0]["text"] == answer
+
+
+def test_initial_state_has_no_claim_candidates_and_rejects_fake_id():
+    assert claim_candidates(history(), "cuad-audited-v3") == []
+    calls = []
+    summarizer = GraphPOSummarizer(policy_with([selection_output([1])], calls), TOKENIZER, max_attempts=1)
+    with pytest.raises(SummaryValidationError, match="assistant-only candidates"):
+        asyncio.run(summarizer(history()))
+    instructions = calls[0]["messages"][0]["content"]
+    assert '"claim_ids" is a list' not in instructions
+    assert json.loads(calls[0]["messages"][1]["content"])["claim_candidates"] == []
+
+
+def test_same_selected_claim_ids_do_not_erase_different_actual_answers():
+    states = []
+    for answer in ("PROMOTION AGREEMENT", "MAINTENANCE AGREEMENT"):
+        messages = history() + [{"role": "assistant", "content": json.dumps({
+            "answer": [{"text": answer, "confidence": 1}]})}]
+        result = asyncio.run(GraphPOSummarizer(policy_with([selection_output([])], []), TOKENIZER,
+                                               protocol="cuad-audited-v3")(messages))
+        states.append(json.loads(result))
+    assert states[0]["facts"] == states[1]["facts"]
+    assert states[0]["agent_claims"] == states[1]["agent_claims"] == []
+    assert states[0]["submitted_answer"] != states[1]["submitted_answer"]
