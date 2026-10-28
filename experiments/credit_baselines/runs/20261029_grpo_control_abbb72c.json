@@ -1,0 +1,185 @@
+{
+  "method": "grpo",
+  "method_variant": {
+    "label": "按步骤访问计数的 episode-only 对照",
+    "episode_weighting": "visits",
+    "is_standard_episode_weighted_grpo": false,
+    "invalid_action_penalty": 0.1,
+    "interpretation": "按每个步骤访问统计同题分数，可能对长轨迹赋更高权重；不称为标准的每条轨迹等权 GRPO。"
+  },
+  "verdict": "verified_record_consistency",
+  "check_counts": {
+    "passed": 3794,
+    "missing": 2
+  },
+  "training_statistics": {
+    "rollout_count": 96,
+    "distinct_tasks": 12,
+    "completed_count": 94,
+    "success_count": 33,
+    "success_rate": 0.34375,
+    "mean_reward": 0.3576388888888889,
+    "mean_f1": 0.3758865248226951,
+    "mean_observed_grounding": 0.9361702127659575,
+    "statuses": {
+      "completed": 94,
+      "max_steps": 2
+    },
+    "unique_decisions": 185,
+    "invalid_decisions": 73,
+    "repeated_return_decisions": 47,
+    "repeated_error_feedback_decisions": 46,
+    "repeated_source_return_decisions": 1,
+    "repeated_action_decisions": 1,
+    "generated_response_tokens": 9664,
+    "generated_prompt_tokens": 271808,
+    "credit_components": {
+      "local_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "graph_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "node_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "edge_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "correctness_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "efficiency_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      }
+    }
+  },
+  "evaluation_statistics": {
+    "rollout_count": 16,
+    "distinct_tasks": 4,
+    "completed_count": 16,
+    "success_count": 6,
+    "success_rate": 0.375,
+    "mean_reward": 0.375,
+    "mean_f1": 0.4375,
+    "mean_observed_grounding": 0.9375,
+    "statuses": {
+      "completed": 16
+    },
+    "unique_decisions": 25,
+    "invalid_decisions": 9,
+    "repeated_return_decisions": 6,
+    "repeated_error_feedback_decisions": 6,
+    "repeated_source_return_decisions": 0,
+    "repeated_action_decisions": 0,
+    "generated_response_tokens": 653,
+    "generated_prompt_tokens": 28486,
+    "credit_components": {
+      "local_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "graph_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "node_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "edge_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "correctness_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "efficiency_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      }
+    }
+  },
+  "group_statistics": {
+    "groups": 0,
+    "singleton_groups": 0,
+    "mixed_evidence_history_groups": 0,
+    "constant_input_nonzero_local_groups": 0
+  },
+  "costs": {
+    "train_elapsed_seconds": 212.53684570267797,
+    "train_peak_cuda_allocated_bytes": 8559264768,
+    "evaluation_seconds": 12.032427840866148,
+    "evaluation_peak_cuda_allocated_bytes": 6722810368,
+    "generated_response_tokens": 9664,
+    "generated_prompt_tokens": 271808,
+    "graph_auxiliary_costs": []
+  },
+  "source_commit": "abbb72c25a4666b48bf7fa07269b1a06398d8b7d",
+  "audit_commit": "9b241bb0ec1d68c153c0f75cab224dfddaa0e4b4",
+  "status": "completed",
+  "protocol": "cuad-audited-v3",
+  "optimizer_steps": 12,
+  "artifact_root": "outputs/credit-rebuild-20261029/abbb72c/grpo",
+  "files_sha256": {
+    "train\\rollouts_rank0.jsonl": "ac49b67c317ca02f816d0e912edb84ac852c877940242fdd5e4fc73843b6b77a",
+    "train\\train_rank0.jsonl": "5c707a41c7d2ea9c4b250e27a4386b397ca218ceaa94a383679114186d3dd8c9",
+    "evaluation\\rollouts.jsonl": "a1065398346bfd0b5ff185a4b164907b8703b9f880af55d4ed157f57ae26d433",
+    "audit.json": "f38522a4c68f376f1fc5f868a463635342665ecf929db53bdf740de86e75b333"
+  }
+}
