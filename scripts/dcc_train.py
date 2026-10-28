@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import random
 import sys
@@ -117,6 +118,7 @@ def supervised_example(task, runner, tokenizer, max_prompt: int, max_response: i
 
 
 async def train(args):
+    estimator = getattr(args, "adv_estimator", "grpo")
     rank = int(os.environ.get("RANK", "0"))
     local = int(os.environ.get("LOCAL_RANK", "0"))
     world = int(os.environ.get("WORLD_SIZE", "1"))
@@ -150,7 +152,8 @@ async def train(args):
         event="start",
         world_size=world,
         tasks=len(tasks),
-        algorithm="LoRA SFT warmup + on-policy GRPO",
+        algorithm=f"LoRA {estimator.upper()}",
+        old_logprob_source="pre-update-replay",
         **{
             k: v
             for k, v in vars(args).items()
@@ -214,11 +217,11 @@ async def train(args):
             )
             (destination / "training_config.json").write_text(
                 json.dumps(
-                    {
+                    {"optimizer_steps": optimizer_steps, **{
                         key: value
                         for key, value in vars(args).items()
                         if key not in {"model", "train_data", "output_dir", "adapter"}
-                    },
+                    }},
                     indent=2,
                 )
                 + "\n"
@@ -275,13 +278,24 @@ async def train(args):
                 if valid
                 else 0.0
             )
+            advantages = [[] for _ in results]
+            credit_diagnostics = {}
+            if estimator == "gigpo":
+                from slime_plugins.dcc.gigpo import step_advantages
+                advantages, credit_diagnostics = step_advantages(
+                    results, tokenizer=tokenizer, gamma=args.gigpo_gamma,
+                    weight=args.gigpo_step_weight, similarity_threshold=args.gigpo_similarity_threshold,
+                )
+            else:
+                for index in valid:
+                    value = (rewards[index] - average) / (variance**0.5 + 1e-4)
+                    advantages[index] = [value] * len(results[index].trainable_steps)
             loss_total, segments = 0.0, 0
             # Fixed old policy scores before ANY optimizer mutation.
             scored = []
             model.eval()
             for index in valid:
-                advantage = (rewards[index] - average) / (variance**0.5 + 1e-4)
-                for segment in results[index].trainable_steps:
+                for segment, advantage in zip(results[index].trainable_steps, advantages[index], strict=True):
                     with torch.no_grad():
                         old = completion_logprobs(
                             model, segment.prompt_ids, segment.completion_ids
@@ -313,7 +327,7 @@ async def train(args):
                 loss.backward()
                 auxiliary_loss = loss.item()
             report = {
-                "stage": "grpo",
+                "stage": estimator,
                 "loss": loss_total,
                 "sft_auxiliary": auxiliary_loss,
                 "rewards": rewards,
@@ -321,6 +335,8 @@ async def train(args):
                 "policy_segments": segments,
                 "task": task.id,
                 "statuses": [result.status for result in results],
+                "advantages": advantages,
+                **({"gigpo": credit_diagnostics} if estimator == "gigpo" else {}),
             }
             with (out / f"rollouts_rank{rank}.jsonl").open("a") as rollout_log:
                 for result in results:
@@ -334,22 +350,27 @@ async def train(args):
         norm = torch.nn.utils.clip_grad_norm_(parameters, 1.0)
         if not torch.isfinite(norm):
             raise FloatingPointError("Non-finite adapter gradient; refusing checkpoint")
-        optimizer.step()
-        optimizer_steps += 1
+        applied = norm.item() > 0
+        if applied:
+            optimizer.step()
+            optimizer_steps += 1
         record(
             step=optimizer_steps,
+            iteration=step + 1,
+            optimizer_step_applied=applied,
             seconds=time.monotonic() - begin,
             gradient_norm=norm.item(),
             elapsed=time.monotonic() - started,
             **report,
         )
-        if args.save_every and optimizer_steps % args.save_every == 0:
+        if args.save_every and applied and optimizer_steps % args.save_every == 0:
             save(f"step_{optimizer_steps:04d}")
     await policy.close()
     save("final")
     record(
         event="finished",
         optimizer_steps=optimizer_steps,
+        peak_cuda_allocated_bytes=torch.cuda.max_memory_allocated(),
         elapsed=time.monotonic() - started,
     )
     log.close()
@@ -366,6 +387,11 @@ def main():
     parser.add_argument("--sft-steps", type=int, default=32)
     parser.add_argument("--rl-steps", type=int, default=24)
     parser.add_argument("--group-size", type=int, default=2)
+    parser.add_argument("--adv-estimator", choices=("grpo", "gigpo"), default="grpo")
+    parser.add_argument("--gigpo-gamma", type=float, default=0.95)
+    parser.add_argument("--gigpo-step-weight", type=float, default=1.0)
+    parser.add_argument("--gigpo-similarity-threshold", type=float, default=0.9,
+                        help="GiGPO observation similarity threshold; 1 selects exact matching")
     parser.add_argument("--lora-rank", type=int, default=8)
     parser.add_argument("--quantization", choices=("none", "nf4"), default="none")
     parser.add_argument("--retrieval-profile")
@@ -381,6 +407,9 @@ def main():
     parser.add_argument("--save-every", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    if (not 0 < args.gigpo_gamma <= 1 or not math.isfinite(args.gigpo_step_weight)
+            or args.gigpo_step_weight < 0 or not 0 < args.gigpo_similarity_threshold <= 1):
+        parser.error("GiGPO requires gamma/threshold in (0, 1] and a finite nonnegative step weight")
     if (
         args.group_size < 2
         or min(args.sft_steps, args.rl_steps) < 0
