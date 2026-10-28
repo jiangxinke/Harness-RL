@@ -1,0 +1,179 @@
+{
+  "method": "gigpo",
+  "source_commit": "abbb72c25a4666b48bf7fa07269b1a06398d8b7d",
+  "audit_commit": "9b241bb0ec1d68c153c0f75cab224dfddaa0e4b4",
+  "status": "completed",
+  "protocol": "cuad-audited-v3",
+  "audit_verdict": "verified_record_consistency",
+  "check_counts": {
+    "passed": 4425,
+    "missing": 2
+  },
+  "training_statistics": {
+    "rollout_count": 96,
+    "distinct_tasks": 12,
+    "completed_count": 94,
+    "success_count": 38,
+    "success_rate": 0.3958333333333333,
+    "mean_reward": 0.3958333333333333,
+    "mean_f1": 0.4148936170212766,
+    "mean_observed_grounding": 0.9361702127659575,
+    "statuses": {
+      "completed": 94,
+      "max_steps": 2
+    },
+    "unique_decisions": 200,
+    "invalid_decisions": 91,
+    "repeated_return_decisions": 64,
+    "repeated_error_feedback_decisions": 64,
+    "repeated_source_return_decisions": 0,
+    "repeated_action_decisions": 0,
+    "generated_response_tokens": 11419,
+    "generated_prompt_tokens": 322859,
+    "credit_components": {
+      "local_advantage": {
+        "recorded": 200,
+        "zero": 61,
+        "invalid_action_positive": 26,
+        "unsuccessful_terminal_positive": 8,
+        "repeated_return_positive": 19,
+        "repeated_source_return_positive": 0
+      },
+      "graph_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "node_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "edge_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "correctness_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "efficiency_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      }
+    }
+  },
+  "evaluation_statistics": {
+    "rollout_count": 16,
+    "distinct_tasks": 4,
+    "completed_count": 16,
+    "success_count": 6,
+    "success_rate": 0.375,
+    "mean_reward": 0.375,
+    "mean_f1": 0.4375,
+    "mean_observed_grounding": 0.9375,
+    "statuses": {
+      "completed": 16
+    },
+    "unique_decisions": 25,
+    "invalid_decisions": 9,
+    "repeated_return_decisions": 6,
+    "repeated_error_feedback_decisions": 6,
+    "repeated_source_return_decisions": 0,
+    "repeated_action_decisions": 0,
+    "generated_response_tokens": 653,
+    "generated_prompt_tokens": 28486,
+    "credit_components": {
+      "local_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "graph_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "node_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "edge_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "correctness_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      },
+      "efficiency_advantage": {
+        "recorded": 0,
+        "zero": 0,
+        "invalid_action_positive": 0,
+        "unsuccessful_terminal_positive": 0,
+        "repeated_return_positive": 0,
+        "repeated_source_return_positive": 0
+      }
+    }
+  },
+  "group_statistics": {
+    "groups": 36,
+    "singleton_groups": 11,
+    "mixed_evidence_history_groups": 9,
+    "constant_input_nonzero_local_groups": 0
+  },
+  "costs": {
+    "train_elapsed_seconds": 269.95546776708215,
+    "train_peak_cuda_allocated_bytes": 9495689216,
+    "evaluation_seconds": 11.865701482631266,
+    "evaluation_peak_cuda_allocated_bytes": 6722810368,
+    "generated_response_tokens": 11419,
+    "generated_prompt_tokens": 322859,
+    "graph_auxiliary_costs": []
+  },
+  "optimizer_steps": 12,
+  "artifact_root": "outputs/credit-rebuild-20261029/abbb72c/gigpo",
+  "files_sha256": {
+    "train\\rollouts_rank0.jsonl": "6c889b0ec7f4d7f85a544a5312894f925f4f729ede379bd208cd80258ddab406",
+    "train\\train_rank0.jsonl": "9e36234ef8c04ca8d38b5a183007bd14e64828001a18040fd3622f3c850039b3",
+    "evaluation\\rollouts.jsonl": "a1065398346bfd0b5ff185a4b164907b8703b9f880af55d4ed157f57ae26d433",
+    "audit.json": "68eb65d130f7c3f000da8104446d962d465be62f4709bf0dfcd3ea0f2a3a819e"
+  },
+  "interpretation": "Single seed, 12 train tasks and 4 held-out contracts; records support trajectory/credit diagnostics, not algorithm ranking. Local positive credit and total applied credit must be inspected separately."
+}
