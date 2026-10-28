@@ -1,0 +1,54 @@
+{
+  "method": "graphpo",
+  "source_code_commit": "ac236fb66f0994429d26d0df9b41fd7b3d12bb7c",
+  "status": "preflight_completed",
+  "training": false,
+  "terminal_rollouts": 2,
+  "generated_edges": 2,
+  "summary_calls": 3,
+  "all_summaries_valid": true,
+  "actual_summary_embedding_tokens": [
+    107,
+    109,
+    131
+  ],
+  "costs": {
+    "generated_edges": 2,
+    "generated_response_tokens": 323,
+    "generated_prompt_tokens": 1926,
+    "replayed_decisions": 0,
+    "terminal_rollouts": 2,
+    "summary_calls": 3,
+    "summary_source_tokens": 3220,
+    "summary_text_tokens": 295,
+    "summary_token_count_note": "source/text counts; actual summarizer request usage is reported separately by callback",
+    "summary_call_seconds_sum": 5.089661614969373,
+    "embedding_calls": 3,
+    "embedding_call_seconds_sum": 0.10108693223446608,
+    "summarizer_usage": {
+      "input_tokens": 4146.0,
+      "output_tokens": 298.0,
+      "calls": 3.0,
+      "seconds": 5.0610083201900125,
+      "validation_failures": 0.0,
+      "failed_states": 0.0
+    },
+    "embedder_usage": {
+      "input_tokens": 347.0,
+      "calls": 3.0,
+      "texts": 3.0,
+      "seconds": 0.09998341649770737,
+      "overlength_rejections": 0.0,
+      "truncated_inputs": 0.0
+    },
+    "wall_seconds": 10.131257820874453
+  },
+  "interpretation": "This smoke only covered an initial node and two immediate terminal branches. It does not validate nontrivial adaptive graph sampling or establish training effectiveness.",
+  "artifact_root": "outputs/credit-rebuild-20261029/graphpo-smoke-summary-v2",
+  "files_sha256": {
+    "auxiliary.json": "ac7a2b2464e3f87041cb5db8caaf4c783da47471de26f8b190fe933501a2a933",
+    "diagnostics.json": "82ab068fcdc16da713f261452f5ed72df81dfc2262601b426c2ee3edc4bc6fb9",
+    "rollouts.jsonl": "41b7cb4d64697b34fe9af1c2020924e11f62d308e4fde460a1412760e0495c1c",
+    "status.json": "61dca2bbe1c6943cf8ad30f2a32befa17749739a3ca69f68a87c14eacd9967dd"
+  }
+}
