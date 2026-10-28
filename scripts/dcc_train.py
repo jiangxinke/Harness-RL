@@ -333,6 +333,16 @@ async def train(args):
                         reference = None
                 segment.logprobs = old.float().cpu().tolist()
                 scored.append((segment, old, advantage, reference))
+            if estimator == "graphpo":
+                with (out / f"training_decisions_rank{rank}.jsonl").open("a", encoding="utf-8") as decision_log:
+                    decision_log.write(json.dumps({"iteration": step + 1, "items": [dict(
+                        edge_id=edge_id, prompt_ids=segment.prompt_ids,
+                        completion_ids=segment.completion_ids, logprobs=segment.logprobs,
+                        reference_logprobs=None if reference is None else reference.float().cpu().tolist(),
+                        advantage=float(advantage))
+                        for edge_id, (segment, old, advantage, reference) in zip(
+                            credit_diagnostics["training_edge_ids"], scored, strict=True)
+                    ]}, ensure_ascii=False, allow_nan=False) + "\n")
             model.train()
             kl_total = 0.0
             for segment, old, advantage, reference in scored:
@@ -435,7 +445,7 @@ def main():
     parser.add_argument("--group-size", type=int, default=2)
     parser.add_argument("--target-rollouts", type=int, default=0)
     parser.add_argument("--adv-estimator", choices=("grpo", "gigpo", "graphgpo", "g2po", "graphpo"), default="grpo")
-    parser.add_argument("--cuad-protocol", choices=("legacy", "cuad-audited-v1", "cuad-audited-v2"), default="legacy")
+    parser.add_argument("--cuad-protocol", choices=("legacy", "cuad-audited-v1", "cuad-audited-v2", "cuad-audited-v3"), default="legacy")
     parser.add_argument("--task-order", choices=("random", "sequential"), default="random")
     parser.add_argument("--credit-norm", choices=("mean_norm", "mean_std_norm"), default="mean_std_norm")
     parser.add_argument("--invalid-action-penalty", type=float, default=.1)

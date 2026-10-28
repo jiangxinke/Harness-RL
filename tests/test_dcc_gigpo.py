@@ -122,3 +122,33 @@ def test_all_legal_zero_outcomes_have_zero_credit():
               visit(1,0,"act\nA","terminal",terminal=True)]
     scores, _ = compute_advantages(visits)
     assert scores == [0,0]
+
+
+def test_identical_real_discounted_scores_have_zero_local_advantage():
+    visits = []
+    for episode in range(8):
+        for step in range(8):
+            visits.append(visit(episode, step, f"act\nstate-{step}",
+                f"act\nstate-{step+1}" if step < 7 else "terminal",
+                terminal=step == 7, success=True))
+    scores, diagnostic = compute_advantages(visits, similarity_threshold=1)
+    assert scores == [0.0] * 64
+    assert all(r["episode_advantage"] == r["local_advantage"] == 0 for r in diagnostic["rows"])
+    assert diagnostic["numeric_guard"] == "exact_constant_groups_zero_v1"
+    assert diagnostic["rows"][0]["local_score"] == pytest.approx(6.9833717, abs=1e-6)
+
+
+def test_observed_float32_constant_group_anomaly_is_explicitly_corrected():
+    from slime_plugins.dcc.credit_numerics import zero_constant_groups
+    raw = torch.tensor([6.883371829986572] * 8)
+    upstream = core_gigpo.step_norm_reward(raw, torch.ones(8, 1), np.array(["same"]*8),
+                                         remove_std=False).flatten()
+    guarded, corrections = zero_constant_groups(raw, ["same"]*8, upstream)
+    assert guarded.tolist() == [0.0]*8
+    if torch.any(upstream != 0):
+        assert len(corrections) == 1
+        assert corrections[0]["upstream_advantages"] == upstream.tolist()
+    varied = torch.tensor([1.,2.,3.])
+    expected = torch.tensor([-.7, .1, .6])
+    actual, corrections = zero_constant_groups(varied, ["same"]*3, expected)
+    assert torch.equal(actual, expected) and corrections == []

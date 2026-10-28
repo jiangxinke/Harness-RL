@@ -465,7 +465,7 @@ class EpisodeRunner:
             raise ValueError("retrieval_context_chars must be a nonnegative integer")
         if type(retrieval_max_context_chars) is not int or retrieval_max_context_chars < 1:
             raise ValueError("retrieval_max_context_chars must be a positive integer")
-        if cuad_protocol not in {"legacy", "cuad-audited-v1", "cuad-audited-v2"}:
+        if cuad_protocol not in {"legacy", "cuad-audited-v1", "cuad-audited-v2", "cuad-audited-v3"}:
             raise ValueError("Unknown CUAD protocol version")
         self.cuad_protocol = cuad_protocol
         self.max_steps = max_steps
@@ -576,9 +576,9 @@ class EpisodeRunner:
         if task.benchmark == "cuad" and self.cuad_protocol == "cuad-audited-v1":
             from .cuad_audit_protocol import INSTRUCTIONS
             messages[0]["content"] += INSTRUCTIONS
-        if task.benchmark == "cuad" and self.cuad_protocol == "cuad-audited-v2":
+        if task.benchmark == "cuad" and self.cuad_protocol in {"cuad-audited-v2", "cuad-audited-v3"}:
             from .cuad_audit_protocol import system_prompt, task_prompt
-            messages[0]["content"] = system_prompt(self.max_steps)
+            messages[0]["content"] = system_prompt(self.max_steps, version=self.cuad_protocol)
             messages[1]["content"] = task_prompt(task)
         if task.benchmark == "cuad" and self.initial_chunks:
             observation = self._search_document(_document_tools(task.document), task.prompt, top_k=self.initial_chunks, task=task)
@@ -635,10 +635,10 @@ class EpisodeRunner:
                 for index in range(self.max_steps):
                     if index == self.max_steps - 1:
                         final_control = final_turn_message(task, evidence)
-                        if task.benchmark == "cuad" and self.cuad_protocol in {"cuad-audited-v1", "cuad-audited-v2"}:
+                        if task.benchmark == "cuad" and self.cuad_protocol in {"cuad-audited-v1", "cuad-audited-v2", "cuad-audited-v3"}:
                             from .cuad_audit_protocol import FINAL_CONTROL, FINAL_CONTROL_V2
                             final_control = {"role": "user", "content": (
-                                FINAL_CONTROL_V2 if self.cuad_protocol == "cuad-audited-v2" else FINAL_CONTROL)}
+                                FINAL_CONTROL_V2 if self.cuad_protocol in {"cuad-audited-v2", "cuad-audited-v3"} else FINAL_CONTROL)}
                         if review_enabled:
                             from .web_review import web_review_final_control
 
@@ -698,9 +698,11 @@ class EpisodeRunner:
                         raise TypeError("policy must return PolicyCompletion")
                     steps.append(completion)
                     messages.append({"role": "assistant", "content": completion.text})
-                    if task.benchmark == "cuad" and self.cuad_protocol in {"cuad-audited-v1", "cuad-audited-v2"}:
+                    if task.benchmark == "cuad" and self.cuad_protocol in {"cuad-audited-v1", "cuad-audited-v2", "cuad-audited-v3"}:
                         from .cuad_audit_protocol import parse_action as parse_cuad_action
-                        action = parse_cuad_action(completion.text, allow_answer_array=self.cuad_protocol == "cuad-audited-v2")
+                        action = parse_cuad_action(completion.text,
+                            allow_answer_array=self.cuad_protocol in {"cuad-audited-v2", "cuad-audited-v3"},
+                            allow_wrappers=self.cuad_protocol == "cuad-audited-v3")
                     else:
                         action = parse_action(completion.text, widesearch_rows=task.benchmark == "widesearch")
                     if action is not None and "answer" in action:
@@ -719,9 +721,9 @@ class EpisodeRunner:
                         break
                     if action is None:
                         observation = {"error": 'Invalid action. Return a JSON object with "tool" and "arguments", or with "answer" as a list.'}
-                        if task.benchmark == "cuad" and self.cuad_protocol == "cuad-audited-v2":
+                        if task.benchmark == "cuad" and self.cuad_protocol in {"cuad-audited-v2", "cuad-audited-v3"}:
                             from .cuad_audit_protocol import action_error
-                            observation = {"error": action_error(completion.text)}
+                            observation = {"error": action_error(completion.text, allow_wrappers=self.cuad_protocol == "cuad-audited-v3")}
                     else:
                         tool, arguments = action.get("tool"), action.get("arguments", {})
                         if not isinstance(arguments, dict):
@@ -833,6 +835,15 @@ class EpisodeRunner:
         if research_enabled:
             metrics["web_research_checkpoints"] = research_snapshots
         reward = 0.0
+        if task.benchmark == "cuad" and self.cuad_protocol == "cuad-audited-v3":
+            from .cuad_audit_protocol import action_aliases, parse_action as parse_cuad_action
+            metrics["cuad_protocol"] = self.cuad_protocol
+            metrics["protocol_aliases"] = [
+                {"step": i, "aliases": action_aliases(step.text)}
+                for i, step in enumerate(steps)
+                if parse_cuad_action(step.text, allow_answer_array=True, allow_wrappers=True) is not None
+                and action_aliases(step.text)
+            ]
         if status == "completed" and task.benchmark == "cuad" and (task.split != "train" or score_train):
             metrics.update(cuad_task_metrics(task.id, list(task.gold or []), answer))
             spans = cuad_predictions(answer)
@@ -841,7 +852,7 @@ class EpisodeRunner:
             grounding = sum(grounded) / len(grounded) if grounded else 1.0
             metrics["verbatim_span_fraction"] = grounding
             reward = float(metrics["f1"]) * grounding
-            if self.cuad_protocol in {"cuad-audited-v1", "cuad-audited-v2"}:
+            if self.cuad_protocol in {"cuad-audited-v1", "cuad-audited-v2", "cuad-audited-v3"}:
                 from .cuad_audit_protocol import source_grounded, observed_contract_texts
                 token_grounded = [source_grounded(item["text"], task.document) for item in spans]
                 token_fraction = sum(token_grounded) / len(token_grounded) if token_grounded else 1.0

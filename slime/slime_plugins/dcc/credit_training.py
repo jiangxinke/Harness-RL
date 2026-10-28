@@ -5,6 +5,7 @@ import numpy as np
 import torch
 
 from .credit_adapter import build_credit_visits, unpack_scores
+from .credit_numerics import zero_constant_groups
 from .credit_upstream import core_gigpo
 
 
@@ -24,11 +25,15 @@ def prepare_credit(results, *, tokenizer, method, mode="mean_std_norm",
         task = np.array([v.task_id for v in visits], dtype=object)
         trajectory = np.array([f"{v.task_id}:{v.episode}" for v in visits], dtype=object)
         scores = core_gigpo.episode_norm_reward(raw[:, None], masks, task, trajectory,
-            remove_std=mode == "mean_norm").flatten().tolist()
+            remove_std=mode == "mean_norm").flatten()
+        scores, corrections = zero_constant_groups(raw, task, scores)
+        scores = scores.tolist()
         diagnostics = {"rows": [dict(episode=v.episode, step=v.step,
             is_action_valid=v.is_action_valid, task_reward=v.task_reward,
             episode_score=float(raw[i]), episode_advantage=scores[i], advantage=scores[i])
-            for i, v in enumerate(visits)], "episode_weighting": "visits"}
+            for i, v in enumerate(visits)], "episode_weighting": "visits",
+            "numeric_guard": "exact_constant_groups_zero_v1",
+            "normalization_corrections": {"episode": corrections}}
     elif method == "gigpo":
         from .gigpo import compute_advantages
         scores, diagnostics = compute_advantages(visits, gamma=gamma, weight=weight,

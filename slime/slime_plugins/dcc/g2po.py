@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from .credit_adapter import CreditVisit
+from .credit_numerics import zero_constant_groups
 from .credit_upstream import core_g2po
 
 
@@ -85,8 +86,9 @@ def compute_advantages(
     values, groups, next_groups = core_g2po.compute_group_aggregation_values(batch)
     raw_episode = rewards - invalid_penalty * (1 - valid)
     mask = torch.ones((count, 1), dtype=torch.float32)
+    episode_normalization_scores = torch.tensor(raw_episode, dtype=torch.float32)
     episode = core_g2po.episode_norm_reward(
-        torch.tensor(raw_episode[:, None], dtype=torch.float32), mask, uid, traj_uid,
+        episode_normalization_scores[:, None], mask, uid, traj_uid,
         remove_std=mode == "mean_norm",
     )[:, 0]
     step = core_g2po.compute_step_level_advantage(
@@ -139,8 +141,19 @@ def compute_advantages(
             success_terminals=sum(int(next_groups[i] == -1) for i in indices),
             failure_terminals=sum(int(next_groups[i] == -2) for i in indices),
         ))
-    # The returned signal remains the unmodified upstream computation.
+    # Verify the decomposition before the explicit constant-group correction.
     torch.testing.assert_close(step, node + edge, rtol=1e-6, atol=1e-6)
+    original_episode, original_node, original_edge = episode.clone(), node.clone(), edge.clone()
+    original_step, original_combined = step.clone(), combined.clone()
+    episode, episode_fixes = zero_constant_groups(episode_normalization_scores, uid, episode)
+    node, node_fixes = zero_constant_groups(
+        raw_node, [(str(task), int(group)) for task, group in zip(uid, groups)], node,
+    )
+    # The author's edge normalization constructs a float32 tensor from gains.
+    edge_normalization_scores = torch.tensor(raw_edge, dtype=torch.float32)
+    edge, edge_fixes = zero_constant_groups(edge_normalization_scores, uid, edge)
+    step = node + edge
+    combined = episode + weight * step
     if not torch.isfinite(combined).all():
         raise ValueError("G2PO produced nonfinite advantages")
     lengths = defaultdict(int)
@@ -158,8 +171,22 @@ def compute_advantages(
             discounted_return=0.95 ** (lengths[(v.task_id, v.episode)] - v.step) * v.task_reward,
             node_value=float(values[i]), next_value=float(next_values[i]),
             episode_raw_score=float(raw_episode[i]), node_raw_score=float(raw_node[i]),
+            episode_normalization_score=float(episode_normalization_scores[i]),
+            edge_normalization_score=float(edge_normalization_scores[i]),
             edge_raw_gain=float(raw_edge[i]), episode_advantage=float(episode[i]),
             node_advantage=float(node[i]), edge_advantage=float(edge[i]),
             local_advantage=float(step[i]), advantage=scores[original_index],
+            upstream_episode_advantage=float(original_episode[i]),
+            upstream_node_advantage=float(original_node[i]),
+            upstream_edge_advantage=float(original_edge[i]),
+            upstream_local_advantage=float(original_step[i]),
+            upstream_advantage=float(original_combined[i]),
         )
-    return scores, {**metadata, "rows": rows, "nodes": node_diagnostics, "tasks": task_diagnostics}
+    corrections = {
+        name: [{**fix, "indices": [order[i] for i in fix["indices"]]} for fix in fixes]
+        for name, fixes in (("episode", episode_fixes), ("node", node_fixes), ("edge", edge_fixes))
+    }
+    return scores, {**metadata, "rows": rows, "nodes": node_diagnostics, "tasks": task_diagnostics,
+                    "numeric_guard": "exact_constant_groups_zero_v1",
+                    "normalization_corrections": corrections,
+                    "normalization_correction_index_basis": "returned rows / original input visits"}

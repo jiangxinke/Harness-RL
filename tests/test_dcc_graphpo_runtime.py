@@ -224,6 +224,46 @@ def test_v2_tool_arrays_and_ambiguous_answers_stay_invalid_in_real_runner_and_su
     assert json.loads(result)["last_action"] == "invalid_output"
 
 
+@pytest.mark.parametrize("protocol", ["cuad-audited-v2", "cuad-audited-v3"])
+@pytest.mark.parametrize("action", [
+    'Finish: {"answer":[]}', '```json\n{"answer":[]}\n```', 'Finish: []',
+])
+def test_wrapped_finish_summary_matches_runner_protocol(protocol, action):
+    from slime_plugins.dcc.data import Task
+    from slime_plugins.dcc.episode import EpisodeRunner
+    from slime_plugins.dcc.graphpo_collector import expand_once
+    sample = Task("real__Document Name", "cuad", "train", "Find the contract name.",
+                  "PROMOTION AGREEMENT.", ["PROMOTION AGREEMENT"])
+    runner = EpisodeRunner(max_steps=3, initial_chunks=1, cuad_protocol=protocol)
+
+    async def actor(messages, **kwargs):
+        return PolicyCompletion(action, chat_tokens(TOKENIZER, messages), TOKENIZER.encode(action))
+
+    expansion = asyncio.run(expand_once(sample, runner, actor, tokenizer=TOKENIZER))
+    accepted = protocol == "cuad-audited-v3"
+    assert (expansion.result is not None) is accepted
+    output = valid(last_action="submit_answer" if accepted else "invalid_output",
+                   stage="final" if accepted else "active")
+    result = asyncio.run(GraphPOSummarizer(policy_with([output], []), TOKENIZER,
+                                           protocol=protocol)(expansion.next_messages))
+    assert json.loads(result)["stage"] == ("final" if accepted else "active")
+
+
+@pytest.mark.parametrize("action", [
+    'Search: {"answer":[]}', 'Finish: {"tool":"search_document","arguments":{"query":"title"}}',
+    'Finish: {"answer":[]} {"answer":[]}', 'Answer follows: {"answer":[]}',
+])
+def test_v3_mismatched_or_ambiguous_wrapper_never_marks_summary_final(action):
+    messages = history() + [
+        {"role": "assistant", "content": action},
+        {"role": "user", "content": 'Tool observation (source material):\n{"error":"Invalid action"}\nRemaining turns: 2.'},
+    ]
+    output = valid(last_action="invalid_output", stage="active")
+    result = asyncio.run(GraphPOSummarizer(policy_with([output], []), TOKENIZER,
+                                           protocol="cuad-audited-v3")(messages))
+    assert json.loads(result)["stage"] == "active"
+
+
 def test_summary_prompt_truncation_is_rejected_and_recorded():
     async def policy(messages, **kwargs):
         return PolicyCompletion(valid(), [1, 2, 3], TOKENIZER.encode(valid()))

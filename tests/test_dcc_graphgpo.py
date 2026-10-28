@@ -126,10 +126,27 @@ def trajectory(episode, states, success, *, invalid=()):
 def assert_matches_author(visits, **kwargs):
     scores, diagnostic = compute_advantages(visits, **kwargs)
     expected = reference(visits, **kwargs)
-    assert scores == pytest.approx(expected["scores"], abs=2e-6)
-    for key, field in [("episode", "episode_advantage"), ("local", "local_advantage"),
+    assert [r["upstream_advantage"] for r in diagnostic["rows"]] == pytest.approx(expected["scores"], abs=2e-6)
+    for key, field in [("episode", "upstream_episode_advantage"), ("local", "upstream_local_advantage"),
                        ("graph_returns", "graph_return"), ("adjusted", "adjusted_graph_return")]:
         assert [r[field] for r in diagnostic["rows"]] == pytest.approx(expected[key], abs=2e-6)
+    for component, raw_field, field in [
+        ("episode", "adjusted_episode_score", "episode_advantage"),
+        ("local", "adjusted_graph_return", "local_advantage"),
+    ]:
+        corrected = set()
+        for fix in diagnostic["normalization_corrections"][component]:
+            indices = fix["indices"]
+            assert len(indices) > 1
+            assert all(diagnostic["rows"][i][raw_field] == fix["constant_score"] for i in indices)
+            assert fix["upstream_advantages"] == pytest.approx([expected[component][i] for i in indices], abs=2e-6)
+            corrected.update(indices)
+        for i, row in enumerate(diagnostic["rows"]):
+            assert row[field] == pytest.approx(0. if i in corrected else expected[component][i], abs=2e-6)
+    assert scores == pytest.approx([
+        r["episode_advantage"] + kwargs.get("weight", 1.) * r["local_advantage"]
+        for r in diagnostic["rows"]
+    ], abs=2e-6)
     return scores, diagnostic
 
 
@@ -260,3 +277,15 @@ def test_empty_visits_return_empty_diagnostics():
     assert scores == []
     assert diagnostic["rows"] == []
     assert diagnostic["graphs"] == []
+
+
+def test_real_float32_constant_score_has_exactly_zero_relative_graph_credit():
+    # This is the equal score that produced -0.31583634 in the archived GiGPO
+    # run; construct it through GraphGPO's real graph-return and penalty path.
+    visits = [v for episode in range(8)
+              for v in trajectory(episode, ["A", "B"], True, invalid=(0,))]
+    scores, diagnostic = assert_matches_author(visits, omega=.6983371734619141)
+    root_rows = [row for row in diagnostic["rows"] if row["step"] == 0]
+    assert all(row["adjusted_graph_return"] == 6.883371829986572 for row in root_rows)
+    assert all(row["local_advantage"] == 0. for row in diagnostic["rows"])
+    assert scores == [row["episode_advantage"] for row in diagnostic["rows"]]

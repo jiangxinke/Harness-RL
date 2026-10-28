@@ -112,6 +112,47 @@ def test_v2_task_wording_uses_public_question_not_gold():
     assert "SECRET AGREEMENT" not in prompt
 
 
+@pytest.mark.parametrize("raw, expected", [
+    ('Search: {"tool":"search_document","arguments":{"query":"agreement"}}', "search_document"),
+    ('Read: {"tool":"read_document","arguments":{"start":0,"end":40}}', "read_document"),
+    ('Finish: {"answer":[{"text":"PROMOTION AGREEMENT","confidence":1}]}', "answer"),
+    ('```json\n{"answer":[]}\n```', "answer"),
+    ('Finish: []', "answer"),
+    ('Search {"tool":"search_document","arguments":{"query":"agreement"}}', "search_document"),
+])
+def test_v3_accepts_unambiguous_wrappers_without_rewriting_sample(raw, expected):
+    assert parse_action(raw, allow_answer_array=True) is None
+    action = parse_action(raw, allow_answer_array=True, allow_wrappers=True)
+    assert ("answer" if "answer" in action else action["tool"]) == expected
+    if expected == "answer":
+        result = run_script([raw], protocol="cuad-audited-v3")
+        assert result.status == "completed"
+        assert result.steps[0].text == raw
+        assert result.messages[-1]["content"] == raw
+        assert result.metrics["protocol_aliases"][0]["step"] == 0
+
+
+@pytest.mark.parametrize("raw", [
+    'Search: {"answer":[]}',
+    'Finish: {"tool":"search_document","arguments":{"query":"agreement"}}',
+    'Read: {"tool":"search_document","arguments":{"query":"agreement"}}',
+    'Here is my answer: {"answer":[]}',
+    'Finish: {"answer":[]} {"answer":[]}',
+    'Finish: {"answer":[],"answer":[]}',
+    '```json\n{"answer":[]}\n``` trailing',
+    'Search: [{"tool":"search_document","arguments":{"query":"agreement"}}]',
+])
+def test_v3_does_not_guess_mixed_or_conflicting_actions(raw):
+    assert parse_action(raw, allow_answer_array=True, allow_wrappers=True) is None
+
+
+def test_v3_examples_do_not_demonstrate_rejected_prefixes():
+    from slime_plugins.dcc.cuad_audit_protocol import system_prompt
+    old = system_prompt(8)
+    new = system_prompt(8, version="cuad-audited-v3")
+    assert all(label in old and label not in new for label in ("Search: ", "Read: ", "Finish: "))
+
+
 @pytest.mark.parametrize("text", [
     '["initial retrieval", "tool request"]',
     '{"answer":[],"answer":[{"text":"A","confidence":1}]}',

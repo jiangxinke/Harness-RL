@@ -63,7 +63,7 @@ def main():
     parser.add_argument("--data", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--adapter")
-    parser.add_argument("--cuad-protocol", choices=("cuad-audited-v1", "cuad-audited-v2"), default="cuad-audited-v2")
+    parser.add_argument("--cuad-protocol", choices=("cuad-audited-v1", "cuad-audited-v2", "cuad-audited-v3"), default="cuad-audited-v3")
     parser.add_argument("--repeats", type=int, default=4)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--seed", type=int, default=147)

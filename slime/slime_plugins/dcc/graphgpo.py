@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from .credit_adapter import CreditVisit
+from .credit_numerics import zero_constant_groups
 from .credit_upstream import core_graphgpo as upstream
 
 
@@ -114,6 +115,16 @@ def compute_advantages(
     scores = combined[:, 0]
     if not torch.allclose(scores, episode_advantages + weight * graph_advantages, atol=1e-6, rtol=1e-6):
         raise RuntimeError("GraphGPO diagnostics do not reproduce the applied advantage")
+    original_episode = episode_advantages.clone()
+    original_graph = graph_advantages.clone()
+    original_scores = scores.clone()
+    episode_advantages, episode_fixes = zero_constant_groups(
+        episode_scores[:, 0], tasks, episode_advantages,
+    )
+    graph_advantages, graph_fixes = zero_constant_groups(
+        adjusted_returns, step_groups, graph_advantages,
+    )
+    scores = episode_advantages + weight * graph_advantages
     if not torch.isfinite(scores).all():
         raise ValueError("GraphGPO produced a non-finite advantage")
 
@@ -141,6 +152,9 @@ def compute_advantages(
             episode_advantage=float(episode_advantages[index]),
             local_advantage=float(graph_advantages[index]),
             graph_advantage=float(graph_advantages[index]), advantage=float(scores[index]),
+            upstream_episode_advantage=float(original_episode[index]),
+            upstream_local_advantage=float(original_graph[index]),
+            upstream_advantage=float(original_scores[index]),
         ))
     nodes = [dict(
         id=node_ids[state], observation=state[len("observation:"):] if state.startswith("observation:") else None,
@@ -154,6 +168,8 @@ def compute_advantages(
              for i, v in enumerate(visits)]
     return scores.tolist(), dict(
         metadata, rows=rows, graphs=[dict(task_id=visits[0].task_id, nodes=nodes, edges=edges)],
+        numeric_guard="exact_constant_groups_zero_v1",
+        normalization_corrections={"episode": episode_fixes, "local": graph_fixes},
         group_sizes=[len(indices) for indices in members.values()],
         nonzero_local_steps=int(torch.count_nonzero(graph_advantages).item()),
         groups_with_multiple_rollouts=sum(len({visits[i].episode for i in indices}) > 1 for indices in members.values()),

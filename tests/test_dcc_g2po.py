@@ -78,6 +78,31 @@ def original_oracle(official, visits, *, mode="mean_std_norm", weight=1.0, penal
     return expected
 
 
+def assert_author_and_constant_guard(official, visits, actual, diagnostic, **kwargs):
+    expected = original_oracle(official, visits, **kwargs)
+    rows = diagnostic["rows"]
+    assert [r["upstream_advantage"] for r in rows] == pytest.approx(expected, abs=1e-6)
+    fields = {"episode": "episode_normalization_score", "node": "node_raw_score",
+              "edge": "edge_normalization_score"}
+    for component, raw_field in fields.items():
+        corrected = set()
+        for fix in diagnostic["normalization_corrections"][component]:
+            indices = fix["indices"]
+            assert len(indices) > 1
+            assert all(rows[i][raw_field] == fix["constant_score"] for i in indices)
+            assert fix["upstream_advantages"] == [rows[i][f"upstream_{component}_advantage"] for i in indices]
+            assert len({rows[i]["task_id"] for i in indices}) == 1
+            if component == "node":
+                assert len({rows[i]["node"] for i in indices}) == 1
+            corrected.update(indices)
+        for i, row in enumerate(rows):
+            assert row[f"{component}_advantage"] == (0. if i in corrected else row[f"upstream_{component}_advantage"])
+    assert actual == pytest.approx([
+        r["episode_advantage"] + kwargs.get("weight", 1.) * (r["node_advantage"] + r["edge_advantage"])
+        for r in rows
+    ], abs=2e-6)
+
+
 def independent_terms(visits, *, mode="mean_std_norm", weight=1.0, penalty=0.1):
     """A scalar reference derived from the three definitions, without Torch."""
     def norm(numbers):
@@ -130,7 +155,7 @@ def test_shared_root_and_both_terminal_values_match_hand_calculation(official, m
     assert [row["node_value"] for row in diagnostic["rows"]] == pytest.approx([4.5125, 9.5, 4.5125, 0])
     assert [row["edge_raw_gain"] for row in diagnostic["rows"]] == pytest.approx([4.9875, .5, -4.5125, 0])
     assert [row["next_node"] for row in diagnostic["rows"]][1::2] == [-1, -2]
-    assert actual == pytest.approx(original_oracle(official, visits, mode=mode), abs=1e-6)
+    assert_author_and_constant_guard(official, visits, actual, diagnostic, mode=mode)
     independent = independent_terms(visits, mode=mode)
     for component in ("episode", "node", "edge"):
         assert [row[f"{component}_advantage"] for row in diagnostic["rows"]] == pytest.approx(independent[component], abs=2e-6)
@@ -144,7 +169,7 @@ def test_repeated_visits_and_self_loop_are_not_deduplicated(official):
     assert diagnostic["rows"][1]["edge_advantage"] < 0
     assert diagnostic["tasks"][0]["self_loop_visits"] == 1
     assert sorted(n["visits"] for n in diagnostic["nodes"]) == [2, 3]
-    assert actual == pytest.approx(original_oracle(official, visits), abs=1e-6)
+    assert_author_and_constant_guard(official, visits, actual, diagnostic)
     expected_macro = [4 / (math.sqrt(30) + 1e-6)] * 3 + [-6 / (math.sqrt(30) + 1e-6)] * 2
     assert [row["episode_advantage"] for row in diagnostic["rows"]] == pytest.approx(expected_macro, abs=1e-6)
 
@@ -156,7 +181,7 @@ def test_all_zero_returns_only_produce_credit_if_invalid_action_penalty_supplies
     assert all(row["local_advantage"] == 0 for row in diagnostic["rows"])
     invalid = [replace(legal[0], is_action_valid=False), *legal[1:]]
     actual, diagnostic = compute_advantages(invalid)
-    assert actual == pytest.approx(original_oracle(official, invalid), abs=1e-6)
+    assert_author_and_constant_guard(official, invalid, actual, diagnostic)
     assert diagnostic["rows"][0]["episode_advantage"] < 0
     assert diagnostic["rows"][0]["node_advantage"] < 0
     assert actual[0] < 0 < actual[2]
@@ -177,7 +202,7 @@ def test_phase_markers_and_tasks_remain_separate_even_with_reused_episode_ids(of
               + trajectory(0, ["active:A", "active:B", "final:B"], 0, task="q2")
               + trajectory(1, ["active:A", "final:B"], 10, task="q2"))
     actual, diagnostic = compute_advantages(visits)
-    assert actual == pytest.approx(original_oracle(official, visits), abs=1e-6)
+    assert_author_and_constant_guard(official, visits, actual, diagnostic)
     assert [task["node_count"] for task in diagnostic["tasks"]] == [3, 3]
     assert diagnostic["rows"][1]["node"] != diagnostic["rows"][2]["node"]
     assert diagnostic["rows"][0]["node_value"] != diagnostic["rows"][5]["node_value"]
@@ -198,8 +223,8 @@ def test_random_graphs_match_author_code_and_independent_scalar_reference(offici
         rng.shuffle(visits)
         weight = rng.choice([0.0, 0.8, 1.0, 1.2])
         actual, diagnostic = compute_advantages(visits, mode=mode, weight=weight, invalid_penalty=penalty)
-        expected = original_oracle(official, visits, mode=mode, weight=weight, penalty=penalty)
-        assert actual == pytest.approx(expected, abs=1e-6)
+        assert_author_and_constant_guard(official, visits, actual, diagnostic,
+                                         mode=mode, weight=weight, penalty=penalty)
         independent = independent_terms(visits, mode=mode, weight=weight, penalty=penalty)
         assert actual == pytest.approx(independent["combined"], abs=3e-5, rel=3e-6)
         for component in ("episode", "node", "edge"):
@@ -244,3 +269,20 @@ def test_empty_input_and_zero_weight():
     visits = trajectory(0, ["A", "B"], 10) + trajectory(1, ["A", "C"], 0)
     actual, diagnostic = compute_advantages(visits, weight=0)
     assert actual == [row["episode_advantage"] for row in diagnostic["rows"]]
+
+
+def test_equal_invalid_scores_zero_all_components_and_keep_original_input_indices(official):
+    visits = ([v for episode in range(8)
+               for v in trajectory(episode, ["same"], 10, task="equal", invalid=(0,))]
+              + trajectory(0, ["A", "B"], 10, task="mixed")
+              + trajectory(1, ["A", "C"], 0, task="mixed"))
+    random.Random(2910).shuffle(visits)
+    actual, diagnostic = compute_advantages(visits)
+    assert_author_and_constant_guard(official, visits, actual, diagnostic)
+    equal_rows = [row for row in diagnostic["rows"] if row["task_id"] == "equal"]
+    assert len(equal_rows) == 8
+    assert all(row["episode_raw_score"] == 9.9 and row["node_raw_score"] == 9.9
+               and row["edge_raw_gain"] == .5 for row in equal_rows)
+    assert all(row["episode_advantage"] == row["node_advantage"] == row["edge_advantage"] == 0.
+               for row in equal_rows)
+    assert [row["episode"] for row in diagnostic["rows"]] == [visit.episode for visit in visits]

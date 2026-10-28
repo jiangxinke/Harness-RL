@@ -254,3 +254,25 @@ def test_collector_action_diagnostics_match_runner_array_protocol(protocol):
     else:
         assert first["current_action_error"]
         assert len(collected.results[0].steps) == 2
+
+
+@pytest.mark.parametrize("wrapper", ["label", "fence"])
+@pytest.mark.parametrize("protocol", ["cuad-audited-v2", "cuad-audited-v3"])
+def test_collector_wrapped_action_diagnostics_follow_real_runner(protocol, wrapper):
+    runner = EpisodeRunner(max_steps=2, initial_chunks=1, cuad_protocol=protocol)
+
+    async def policy(messages, **kwargs):
+        count = sum(message["role"] == "assistant" for message in messages)
+        payload = ('{"tool":"search_document","arguments":{"query":"promotion"}}' if count == 0
+                   else '{"answer":[{"text":"PROMOTION AGREEMENT","confidence":1}]}')
+        text = (("Search: " if count == 0 else "Finish: ") + payload if wrapper == "label"
+                else "```json\n" + payload + "\n```")
+        return completion(messages, text)
+
+    collected = asyncio.run(collect_graphpo(task(), runner, policy, tokenizer=TOKENIZER,
+                                            summarize=summarize, embed=embed, branching=(2, 1)))
+    accepted = protocol == "cuad-audited-v3"
+    assert all(row["action_parsed"] is accepted for row in collected.diagnostics["expansions"])
+    assert all((row["current_action_error"] is None) is accepted
+               for row in collected.diagnostics["expansions"])
+    assert all(result.status == ("completed" if accepted else "max_steps") for result in collected.results)

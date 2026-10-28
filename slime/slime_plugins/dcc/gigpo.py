@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from .credit_adapter import build_credit_visits, unpack_scores
+from .credit_numerics import zero_constant_groups
 from .credit_upstream import core_gigpo as upstream
 
 
@@ -60,6 +61,8 @@ def compute_advantages(visits, *, gamma=.95, weight=1.0,
             similarity_thresh=similarity_threshold)
     local = upstream.step_norm_reward(local_scores, mask, groups,
                                      remove_std=remove_std).flatten()
+    episode, episode_fixes = zero_constant_groups(episode_scores, task_keys, episode)
+    local, local_fixes = zero_constant_groups(local_scores, groups, local)
     combined = episode + weight * local
     group_ids = {key: i for i, key in enumerate(dict.fromkeys(groups))}
     rows = [dict(episode=v.episode, step=v.step, group=group_ids[groups[i]],
@@ -74,6 +77,8 @@ def compute_advantages(visits, *, gamma=.95, weight=1.0,
         groups=[[i for i, key in enumerate(groups) if key == group]
                 for group in group_ids],
         upstream_commit="20bd331bdbc9026a5668e11362178e10ab7400c8",
+        numeric_guard="exact_constant_groups_zero_v1",
+        normalization_corrections={"episode": episode_fixes, "local": local_fixes},
         mode=mode, invalid_penalty=invalid_penalty,
         similarity_threshold=similarity_threshold, gamma=gamma, weight=weight)
 
