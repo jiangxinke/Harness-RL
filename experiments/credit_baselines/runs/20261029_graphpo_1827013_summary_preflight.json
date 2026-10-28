@@ -1,0 +1,2648 @@
+{
+  "receipt_version": "graphpo-summary-preflight-receipt-v1",
+  "method": "graphpo",
+  "run_kind": "summary_only_real_model_preflight",
+  "status": "completed",
+  "source_commit": "1827013a75bfdd9067bddf78cc41f1d15fcddd1b",
+  "execution_source_directory": "/data2/pkuiti/geyugong/dcc-credit-baselines/source-v3-candidate",
+  "manifest_source_commit": null,
+  "source_commit_evidence": "candidate目录执行；manifest记录的runtime/hf_policy/credit_adapter与提交逐字节匹配；episode.py仅CRLF/LF差异，规范化后逐字匹配。",
+  "source_file_verification": [
+    {
+      "path": "slime/slime_plugins/dcc/graphpo_runtime.py",
+      "executed_bytes_sha256": "faaacc329fe46daba638a83d9e501318d3db2829faf56992e838b8fd19d30d9c",
+      "committed_blob_sha256": "faaacc329fe46daba638a83d9e501318d3db2829faf56992e838b8fd19d30d9c",
+      "match": "byte_exact"
+    },
+    {
+      "path": "slime/slime_plugins/dcc/hf_policy.py",
+      "executed_bytes_sha256": "0742cff92f7e3c47c57e4432068c24b9c6aea3330cfc1cddde4d02655159ec38",
+      "committed_blob_sha256": "0742cff92f7e3c47c57e4432068c24b9c6aea3330cfc1cddde4d02655159ec38",
+      "match": "byte_exact"
+    },
+    {
+      "path": "slime/slime_plugins/dcc/episode.py",
+      "executed_bytes_sha256": "52c24706c890632ad665a2b9bd67e7d8e19b5b1a8afd0172254c65ef1fd80cfd",
+      "committed_blob_sha256": "800d35f264751aceafa7bad9ce6723605908981893faa47a99f731b82b84989c",
+      "match": "CRLF_to_LF_only"
+    },
+    {
+      "path": "slime/slime_plugins/dcc/credit_adapter.py",
+      "executed_bytes_sha256": "422cabc85db01ccd93d2c571f007e955f3a4009d087a466a77b5e6a176abc1ee",
+      "committed_blob_sha256": "422cabc85db01ccd93d2c571f007e955f3a4009d087a466a77b5e6a176abc1ee",
+      "match": "byte_exact"
+    }
+  ],
+  "runtime_version": "graphpo-constrained-extractive-state-v7",
+  "training": false,
+  "actor_generation_calls": 0,
+  "optimizer_updates": 0,
+  "parameters_updated": false,
+  "artifact_root": "outputs/credit-rebuild-20261029/graphpo-summary-constrained-preflight",
+  "files_sha256": {
+    "auxiliary.json": "ada7bbf8129e3d647e647616bf305371087aa069bf0ccc1eac46c979c6194ad8",
+    "manifest.json": "5ea430ae9ba507054520203f14afd6391ecf2df94be26e56cbae80af752ab30f",
+    "requests.jsonl": "35b000ee01710a9956bda9faa2aef25596659d0749fe9d2220cac22d40bfe447",
+    "results.jsonl": "e24122f8f9b9e5e40c32732e94f8c5d52a1dcc0bda7ee068e65aa0ec39599c2e",
+    "status.json": "73d14d7cfd3b45da07080f0cc488a0bd43e5ba4a860e704711d2b70d76d50efa"
+  },
+  "coverage": {
+    "unique_requests": 21,
+    "passed_requests": 21,
+    "failed_requests": 0,
+    "summary_attempts": 21,
+    "origin_counts": {
+      "fresh_root": 12,
+      "failed_run_recorded_history": 23,
+      "deep_recorded_state": 2
+    },
+    "history_origins_before_deduplication": 37,
+    "duplicate_histories_removed": 16,
+    "deep_states": "GiGPO训练#16第8步前；G2PO训练#93第6步前，均只用真实公开前缀。"
+  },
+  "id_normalization": {
+    "duplicate_id_occurrences": 0,
+    "duplicates_by_domain": {
+      "fact_ids": 0,
+      "unresolved_ids": 0,
+      "claim_ids": 0
+    },
+    "selected_unique_excerpts_by_domain": {
+      "fact_ids": 143,
+      "unresolved_ids": 108,
+      "claim_ids": 33
+    },
+    "interpretation": "这21次实际输出没有重复编号，未依靠去重纠正输出；稳定去重逻辑仅由单独测试覆盖。"
+  },
+  "source_grounding": {
+    "requests_checked": 21,
+    "candidate_origins_reconstructed_by_domain": {
+      "facts": 746,
+      "unresolved": 128,
+      "claims": 35
+    },
+    "selected_outputs_in_correct_domain": true,
+    "facts_match_original_document_offsets": true,
+    "questions_from_public_task_message": true,
+    "claims_from_actual_public_assistant": true,
+    "complete_submitted_answer_and_budget_preserved": true,
+    "gold_or_reward_in_summary_request": false,
+    "scope": "这里核验公开来源和原文恢复，不核验摘要是否保留全部关键条件或真实未完成子目标。"
+  },
+  "capacity": {
+    "encoder_max_input_tokens": 8192,
+    "actual_min_embedding_tokens": 116,
+    "actual_max_embedding_tokens": 766,
+    "actual_total_embedding_tokens": 7231,
+    "summary_model_max_prompt_tokens": 32768,
+    "actual_max_summary_prompt_tokens": 8071,
+    "actual_max_summary_output_tokens": 53,
+    "truncated_inputs": 0,
+    "summary_capacity_failures": 0
+  },
+  "costs": {
+    "wall_seconds": 37.57114194892347,
+    "summary_usage": {
+      "input_tokens": 96882,
+      "output_tokens": 864,
+      "calls": 21,
+      "seconds": 25.800845826976,
+      "validation_failures": 0,
+      "failed_states": 0,
+      "capacity_failures": 0
+    },
+    "embedding_usage": {
+      "input_tokens": 7231,
+      "calls": 21,
+      "texts": 21,
+      "seconds": 4.852945557795465,
+      "overlength_rejections": 0,
+      "truncated_inputs": 0
+    },
+    "constraint_setup": {
+      "calls": 21,
+      "setup_seconds": 5.357227900065482
+    },
+    "constraint_setup_already_included_in_summary_seconds": true
+  },
+  "frozen_model_checks": {
+    "parameter_version_counters_unchanged": true,
+    "before_sha256": "60822bc4fa13a00a646e9e22be8b883a290534eb140e22aed1152fe5ddcdef61",
+    "after_sha256": "60822bc4fa13a00a646e9e22be8b883a290534eb140e22aed1152fe5ddcdef61",
+    "scope": "所有参数被冻结、无梯度、无优化器；核对所有参数版本计数，不声称逐字节复验权重。"
+  },
+  "encoder": {
+    "repository": "Alibaba-NLP/gte-modernbert-base",
+    "revision": "e7f32e3c00f91d699e8c43b53106206bcc72bb22",
+    "model_card": "https://huggingface.co/Alibaba-NLP/gte-modernbert-base",
+    "model_type": "modernbert",
+    "embedding_dimension": 768,
+    "max_input_tokens": 8192,
+    "verified_files": [
+      {
+        "file": "model.safetensors",
+        "sha256": "3e85899d5728cb7de79781c0c3acfb91ccef9f875f1f7e0b3c9f3dd4b6a724ba",
+        "bytes": 298041568
+      },
+      {
+        "file": "config.json",
+        "sha256": "8ba54dc3d35d7194f5178a4194b649f146753e02dabd22bdca5c5cbac15069ed",
+        "bytes": 1184
+      },
+      {
+        "file": "tokenizer.json",
+        "sha256": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30",
+        "bytes": 3583228
+      },
+      {
+        "file": "tokenizer_config.json",
+        "sha256": "9654072f7c873161814043cf08cb5ed72f71d0b935abcd4e267935cb34352c21",
+        "bytes": 20867
+      },
+      {
+        "file": "special_tokens_map.json",
+        "sha256": "ea97ecdbcc73713039d8d64dbb05e3689495c96657fbd9a18f5bed381be81049",
+        "bytes": 694
+      },
+      {
+        "file": "1_Pooling/config.json",
+        "sha256": "4bf279dd9204db673304cab6e7db8448f427412a0d87f04c3e19f1de55dd98cd",
+        "bytes": 297
+      },
+      {
+        "file": "config_sentence_transformers.json",
+        "sha256": "f6bbc7812d09c4ae1cba610fbdad3aea0ca9b3b8affe5a130d31709bdbc94e99",
+        "bytes": 205
+      },
+      {
+        "file": "modules.json",
+        "sha256": "8f4b264b80206c830bebbdcae377e137925650a433b689343a63bdc9b3145460",
+        "bytes": 229
+      },
+      {
+        "file": "README.md",
+        "sha256": "97d40aa325f0e6eaddf77edc7187b7bba6fd3e31a555be3b5766f015c6c27550",
+        "bytes": 13983
+      }
+    ],
+    "pooling": "CLS",
+    "l2_normalized": true,
+    "load_options": {
+      "device": "cpu",
+      "dtype": "float32",
+      "attention": "sdpa",
+      "trust_remote_code": false,
+      "reference_compile": false
+    },
+    "paper_encoder": "SFR-Embedding-2_R",
+    "material_adaptation": true
+  },
+  "validation": {
+    "server_cpu_tests_passed": 325,
+    "test_log": "outputs/credit-rebuild-20261029/checks/graphpo-constrained-full-tests-retry.log",
+    "test_log_sha256": "fa4cf1a839274dc37c73ddc6fb8abe805f13befd46e4ad38bc0b83044b5a1e38"
+  },
+  "semantic_observations": {
+    "first_eight_fact_candidates_selected_count": 13,
+    "request_ids": [
+      "state-001-f0ca15defa59",
+      "state-003-acc83fb63120",
+      "state-006-334d9c08d625",
+      "state-007-50f02a46624b",
+      "state-008-db457a7915a3",
+      "state-013-f7616817a403",
+      "state-014-34cc8cb21ed3",
+      "state-015-3cfbfa4a2c95",
+      "state-016-2f994d38ff01",
+      "state-017-e8867974a3fa",
+      "state-018-ace3b3aa66c8",
+      "state-020-f172c9974499",
+      "state-021-5ed5ef689123"
+    ],
+    "example": "NEXSTAR检索后的state014–018仍只选择初始材料的前8项，包含单独字母和页码，未将后来的检索返回文本选入facts。",
+    "question_field_note": "unresolved候选来自完整原始user任务消息，其中含抽取指令；来源正确不等于这些文本都是准确识别出的未完成目标。",
+    "boundary": "预检通过说明解码、来源校验和容量链路可运行；不证明语义摘要完整或状态等价判断正确。正式运行的合并与信用需另行检查。"
+  },
+  "requests": [
+    {
+      "request_id": "state-001-f0ca15defa59",
+      "task_id": "VAXCYTE,INC_05_22_2020-EX-10.19-SUPPLY AGREEMENT__Document Name",
+      "history_sha256": "f0ca15defa59063a679120ca8528ec999e5c9418b2f27e7a17e0260701aed1cc",
+      "origins": [
+        {
+          "kind": "fresh_root",
+          "train_index_1based": 1
+        },
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/68390e1/graphpo/train/graphpo_auxiliary_rank0.jsonl",
+          "file_sha256": "f48a68a31b60539e87033d4edd0d31c2759b0edfcfb5662c5b6c79771f20d23c",
+          "record_1based": 1,
+          "iteration": 1,
+          "summary_1based": 1,
+          "original_valid": true,
+          "original_error": null
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[1,2,3,4,5,6,7,8],\"unresolved_ids\":[1,2,3,4,5,6],\"claim_ids\":[]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [],
+          "retained_ids": [],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "Exhibit 10.19",
+          "CERTAIN CONFIDENTIAL INFORMATION CONTAINED IN THIS DOCUMENT, MARKED BY [***], HAS BEEN OMITTED BECAUSE IT IS BOTH (I) NOT MATERIAL AND (II) WOULD LIKELY CAUSE COMPETITIVE HARM IF PUBLICLY DISCLOSED.",
+          "SUPPLY AGREEMENT",
+          "This SUPPLY AGREEMENT (\"Supply Agreement\") is made as of May 29, 2018 (the \"Effective Date\") by and between SutroVax, Inc., a Delaware corporation having principal offices at 353 Hatch Dr., Foster City, CA 94404 (\"SutroVax\") and Sutro Biopharma, Inc., a Delaware corporation, having principal offices at 310 Utah Ave, Suite 150, South San Francisco, CA, 94080 (\"Sutro\").",
+          "SutroVax and Sutro may be referred to herein by name or individually, as a \"Party\" and collectively, as the \"Parties.\"",
+          "BACKGROUND",
+          "A.",
+          "Sutro controls certain proprietary technology which permits cell-free expression of proteins, and Sutro licensed such technology to SutroVax under that certain Amended and Restated SutroVax Agreement dated as of October 12, 2015 (the \"License Agreement\")."
+        ],
+        "unresolved": [
+          "Requested field: Document Name",
+          "Question: The name of the contract",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no.",
+          "For a document name, return the actual title.",
+          "The field label is not a phrase that must appear in the contract."
+        ],
+        "agent_claims": [],
+        "last_action": "none",
+        "stage": "initial",
+        "submitted_answer": null,
+        "remaining_decisions": 8
+      },
+      "summary_sha256": "213a8f837640c386b24b161b984fcaa82d0c225e2748d1e9538d0ddbb09922a6",
+      "embedding_tokens": 389,
+      "input_tokens": 3395,
+      "output_tokens": 42,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 24,
+          "unresolved": 6,
+          "claims": 0
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-002-9a8914389e9f",
+      "task_id": "NEXSTARFINANCEHOLDINGSINC_03_27_2002-EX-10.26-OUTSOURCING AGREEMENT__Competitive Restriction Exception",
+      "history_sha256": "9a8914389e9f81b68840407e8309574c73d80b3f3f4c3a7f374d9bd663855082",
+      "origins": [
+        {
+          "kind": "fresh_root",
+          "train_index_1based": 2
+        },
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/68390e1/graphpo/train/graphpo_auxiliary_rank0.jsonl",
+          "file_sha256": "f48a68a31b60539e87033d4edd0d31c2759b0edfcfb5662c5b6c79771f20d23c",
+          "record_1based": 2,
+          "iteration": 2,
+          "summary_1based": 1,
+          "original_valid": true,
+          "original_error": null
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[7,12,16,21,24],\"unresolved_ids\":[1,2,3,4,5],\"claim_ids\":[]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            7,
+            12,
+            16,
+            21,
+            24
+          ],
+          "retained_ids": [
+            7,
+            12,
+            16,
+            21,
+            24
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [],
+          "retained_ids": [],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "Nexstar shall provide monthly financial projections and copies of quarterly market revenue reports to WYZZ and shall cause the management of WMBD-TV to meet with WYZZ's management on at least a monthly basis (or such longer intervals as WYZZ may elect) to review the performance of the Stations and to",
+          "Except as provided otherwise in this Agreement, Nexstar shall pay, discharge, and be responsible for (i) all salary and wages arising out of or relating to the employment of the employees of&sbsp;WMBD-TV prior to and after the Effective Date, and (ii) any employee benefits arising under the benefit plans of Nexstar during the period prior to and after the Effective Date.",
+          "Prior Contract Commitments.",
+          "WYZZ's Right to Hire Certain Employees.",
+          "For a period of one year from the termination of this Agreement, neither Party hereto (or any of its affiliates) will directly or indirectly solicit to employ or employ any of the employees of the other Party hereto if such employees were employed by either of the Stations at any time during the six month period immediately preceding the termination of this Agreement."
+        ],
+        "unresolved": [
+          "Requested field: Competitive Restriction Exception",
+          "Question: This category includes the exceptions or carveouts to Non-Compete, Exclusivity and No-Solicit of Customers above.",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no.",
+          "For a document name, return the actual title."
+        ],
+        "agent_claims": [],
+        "last_action": "none",
+        "stage": "initial",
+        "submitted_answer": null,
+        "remaining_decisions": 8
+      },
+      "summary_sha256": "8e10ba04c1f67884c3591f6c1566c7854b765d3bc6572444717e61650e81696e",
+      "embedding_tokens": 342,
+      "input_tokens": 3136,
+      "output_tokens": 38,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 28,
+          "unresolved": 6,
+          "claims": 0
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-003-acc83fb63120",
+      "task_id": "SLOVAKWIRELESSFINANCECOBV_03_28_2001-EX-4.(B)(II).3-Maintenance and support contract for SICAP(R) modules__Post-Termination Services",
+      "history_sha256": "acc83fb631201405176ac64cdba4fb8c4bcd0902bdec7faa6ac8aee882234496",
+      "origins": [
+        {
+          "kind": "fresh_root",
+          "train_index_1based": 3
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[1,2,3,4,5,6,7,8],\"unresolved_ids\":[1,2,3,4,5,6],\"claim_ids\":[]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [],
+          "retained_ids": [],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "as well       as for support cases not included under standard service, as per clause       1.1, then EuroTel shall pay all costs and expenses (e.g.",
+          "hours, travel and       accommodation expenses).",
+          "All payments due under this Maintenance and Support contract shall be due       and payable 30 days after the invoice date, with the first invoice to be       issued on the date this Maintenance and Support contract comes into full       force and effect.",
+          "[LOGO] sicap",
+          "M&S contract --------------------------------------------------------------------------------",
+          "If any payment is not received by Sicap Ltd on the date or dates, as laid       down in this clause, or as may be further agreed upon by the parties, then       Sicap Ltd has the right to suspend the services to EuroTel until payment       has been received.",
+          "Before suspending the services to EuroTel, a       notification from Sicap Ltd will be given.",
+          "In the event of a suspension of services by Sicap Ltd, as a result of a       delay or lack of payment by EuroTel, Sicap Ltd will not be responsible for       any damages resulting from this suspension."
+        ],
+        "unresolved": [
+          "Requested field: Post-Termination Services",
+          "Question: Is a party subject to obligations after the termination or expiration of a contract, including any post-termination transition, payment, transfer of IP, wind-down, last-buy, or similar commitments?",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no.",
+          "For a document name, return the actual title.",
+          "The field label is not a phrase that must appear in the contract."
+        ],
+        "agent_claims": [],
+        "last_action": "none",
+        "stage": "initial",
+        "submitted_answer": null,
+        "remaining_decisions": 8
+      },
+      "summary_sha256": "4a86701825023d1dd9b0dec517792673caaae3f9020c0db6e981aee8cef27b4a",
+      "embedding_tokens": 369,
+      "input_tokens": 2884,
+      "output_tokens": 42,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 17,
+          "unresolved": 6,
+          "claims": 0
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-004-fb1bc803e48c",
+      "task_id": "IMMUNOMEDICSINC_08_07_2019-EX-10.1-PROMOTION AGREEMENT__Document Name",
+      "history_sha256": "fb1bc803e48c84390182f5ba40be2733ec513417159fefa1edce5b83f350a510",
+      "origins": [
+        {
+          "kind": "fresh_root",
+          "train_index_1based": 4
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[2,3,4,5,6,7,8,9],\"unresolved_ids\":[1,2,3,4,5,6],\"claim_ids\":[]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9
+          ],
+          "retained_ids": [
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [],
+          "retained_ids": [],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "14.4 Performance by Affiliates.",
+          "To the extent that this Agreement purports to impose obligations on the Affiliates of a Party, such Party agrees to cause its Affiliates to perform such obligations.",
+          "Company shall not use an Affiliate to exercise any of its rights or perform any of its obligations or duties hereunder without Janssen's prior written consent.",
+          "Janssen may use an Affiliate to exercise its rights or perform its obligations and duties hereunder with prior written notice to Company.",
+          "If either Janssen or Company uses an Affiliate to exercise any of its rights or perform any of its obligations or duties hereunder, as the case may be, such Party shall remain liable hereunder for the prompt payment and performance of all of its obligations hereunder.",
+          "14.5 Notices.",
+          "14.5.1 All notices, statements, requests or other documents that either Party shall be required or shall desire to give to the other hereunder shall be in writing and shall be given by the Parties only as follows: (a) by personal delivery; (b) by facsimile, receipt confirmed; (c) by addressing it as indicated below, and by depositing it certified mail, postage prepaid, in the mail, first class (airmail if the address is outside of the country in which such notice is deposited); or (d) by addressing it as indicated below, and by delivering it toll prepaid to a recognized courier service (e.g., Federal Express or DHL).",
+          "14.5.2 If so delivered, transmitted by facsimile, mailed, or couriered, each such notice, statement, request or other document shall, except as herein expressly provided, be"
+        ],
+        "unresolved": [
+          "Requested field: Document Name",
+          "Question: The name of the contract",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no.",
+          "For a document name, return the actual title.",
+          "The field label is not a phrase that must appear in the contract."
+        ],
+        "agent_claims": [],
+        "last_action": "none",
+        "stage": "initial",
+        "submitted_answer": null,
+        "remaining_decisions": 8
+      },
+      "summary_sha256": "4b0a87ad4c13c4b195dee21d15d3766f3c00ced4f4d23a3ad323b2443d876c1b",
+      "embedding_tokens": 454,
+      "input_tokens": 3330,
+      "output_tokens": 42,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 24,
+          "unresolved": 6,
+          "claims": 0
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-005-73cca93217c2",
+      "task_id": "PhasebioPharmaceuticalsInc_20200330_10-K_EX-10.21_12086810_EX-10.21_Development Agreement__Governing Law",
+      "history_sha256": "73cca93217c207dc173d6d708a584e9c5ae90113e72783cd708382a0f704355b",
+      "origins": [
+        {
+          "kind": "fresh_root",
+          "train_index_1based": 5
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[22,23],\"unresolved_ids\":[1,2,3,4,5],\"claim_ids\":[]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            22,
+            23
+          ],
+          "retained_ids": [
+            22,
+            23
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [],
+          "retained_ids": [],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "15.9 Governing Law.",
+          "The construction and validity of this Agreement and the provisions hereof, and the rights and obligations of the Parties hereunder, will be governed by the internal laws of the State of Delaware, USA, and, to the extent applicable to Patents and Trademarks, the applicable federal laws of the USA, in each instance without regard to conflict of laws principles."
+        ],
+        "unresolved": [
+          "Requested field: Governing Law",
+          "Question: Which state/country's law governs the interpretation of the contract?",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no.",
+          "For a document name, return the actual title."
+        ],
+        "agent_claims": [],
+        "last_action": "none",
+        "stage": "initial",
+        "submitted_answer": null,
+        "remaining_decisions": 8
+      },
+      "summary_sha256": "f19866fb84e2fe141cdc1dee821b069186f8be8e7bb41ff82c3842a951657e1b",
+      "embedding_tokens": 177,
+      "input_tokens": 3547,
+      "output_tokens": 30,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 29,
+          "unresolved": 6,
+          "claims": 0
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-006-334d9c08d625",
+      "task_id": "TodosMedicalLtd_20190328_20-F_EX-4.10_11587157_EX-4.10_Marketing Agreement_ Reseller Agreement__Post-Termination Services",
+      "history_sha256": "334d9c08d625039f613fd2904907b9dc0af6493d077b27c5e768131173265916",
+      "origins": [
+        {
+          "kind": "fresh_root",
+          "train_index_1based": 6
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[1,2,3,4,5,6,7,8],\"unresolved_ids\":[1,2,3,4,5,6],\"claim_ids\":[]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [],
+          "retained_ids": [],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "ind the other or incur any obligation on the other's behalf.",
+          "Any agreement for the sale of Products negotiated or executed between the Reseller and a Customer shall be binding upon the Reseller alone.",
+          "The Reseller is not authorized to, and shall not, enter into any contracts nor make any other commitments on behalf of or in the name of Todos, unless expressly authorized in writing to do so by Todos.",
+          "Reseller shall not incur any liabilities, obligations, or commitments on behalf of Todos.",
+          "15.",
+          "Miscellaneous 15.1 Entire Agreement.",
+          "This Agreement, including its exhibits, constitutes the entire agreement between the parties concerning the subject matter hereof, and supersedes all prior or contemporaneous statements, representations, discussions, negotiations, and agreements, both oral and written.",
+          "15.2 Amendments or Waiver."
+        ],
+        "unresolved": [
+          "Requested field: Post-Termination Services",
+          "Question: Is a party subject to obligations after the termination or expiration of a contract, including any post-termination transition, payment, transfer of IP, wind-down, last-buy, or similar commitments?",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no.",
+          "For a document name, return the actual title.",
+          "The field label is not a phrase that must appear in the contract."
+        ],
+        "agent_claims": [],
+        "last_action": "none",
+        "stage": "initial",
+        "submitted_answer": null,
+        "remaining_decisions": 8
+      },
+      "summary_sha256": "c79e0120263ef4a7e93cae5b1e50d218a7d4543aed850642b13d9307b1638182",
+      "embedding_tokens": 306,
+      "input_tokens": 2969,
+      "output_tokens": 42,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 18,
+          "unresolved": 6,
+          "claims": 0
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-007-50f02a46624b",
+      "task_id": "PHREESIA,INC_05_28_2019-EX-10.18-STRATEGIC ALLIANCE AGREEMENT__No-Solicit Of Employees",
+      "history_sha256": "50f02a46624b846f766b3f10856b8de1fdf78946f96d911b0888cc5310bf6ac3",
+      "origins": [
+        {
+          "kind": "fresh_root",
+          "train_index_1based": 7
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[1,2,3,4,5,6,7,8],\"unresolved_ids\":[1,2,3,4,5,6],\"claim_ids\":[]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [],
+          "retained_ids": [],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "nder a customer's license or service agreement and any healthcare professional not contracted under a customer's license or service agreement for which such customer subsequently pays a clinician fee.",
+          "Healthcare professionals are only Clinicians (1) during the periods in which they are contracted under a license or service agreement or (2) for healthcare professionals not contracted under a customer's license or service agreement, solely during the periods for which a Customer pays a clinician fee for such healthcare professional.",
+          "For avoidance of doubt, authorized end users of the Subscription Software Services are both Clinicians and their administrative and other front and back office personnel.",
+          "For the further avoidance of doubt, there will be no further license fees applicable to the administrative or other front and back office personnel.",
+          "\"Company Acquiror\" means any Person that acquires the Company in connection with a Change of Control (including, without limitation, a Competing Provider) and includes each Affiliate of such Person that is not controlled by the Company.",
+          "For purposes of this definition, the term \"controlled by\" means the Company has the direct or indirect power to direct or cause the direction of the management and policies of such Person, whether through the ownership of voting securities, by contract, or otherwise.",
+          "ustomer in accordance with the warranties, terms, and conditions of this Agreement and in accordance with any performance standards specified in this Agreement or in the Documentation.",
+          "[***]."
+        ],
+        "unresolved": [
+          "Requested field: No-Solicit Of Employees",
+          "Question: Is there a restriction on a party’s soliciting or hiring employees and/or contractors from the  counterparty, whether during the contract or after the contract ends (or both)?",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no.",
+          "For a document name, return the actual title.",
+          "The field label is not a phrase that must appear in the contract."
+        ],
+        "agent_claims": [],
+        "last_action": "none",
+        "stage": "initial",
+        "submitted_answer": null,
+        "remaining_decisions": 8
+      },
+      "summary_sha256": "db9d35c0a37028b7f02a1dbe04d3607aa6c2d2248db01de507ed13bb6cb46d8c",
+      "embedding_tokens": 422,
+      "input_tokens": 2885,
+      "output_tokens": 42,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 17,
+          "unresolved": 6,
+          "claims": 0
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-008-db457a7915a3",
+      "task_id": "NETGEAR,INC_04_21_2003-EX-10.16-AMENDMENT TO THE DISTRIBUTOR AGREEMENT BETWEEN INGRAM MICRO AND NETGEAR__Uncapped Liability",
+      "history_sha256": "db457a7915a380189f791c29303ae9dc3d5b24278b7352af9ef62b2a787e6434",
+      "origins": [
+        {
+          "kind": "fresh_root",
+          "train_index_1based": 8
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[1,2,3,4,5,6,7,8],\"unresolved_ids\":[1,2,3,4,5,6],\"claim_ids\":[]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [],
+          "retained_ids": [],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "term under the Agreement will not be effective unless mutually agreed to in writing and signed by authorized representatives of both parties.",
+          "Neither party shall be bound by typographical or clerical errors.",
+          "G.",
+          "Neither party is liable for its failure or delay to perform its obligations under the Agreement due to strikes, wars, revolutions, acts of terrorism, fires, floods, explosions, earthquakes, shortages in labor, components or materials, government regulations, or other causes beyond its control.",
+          "H.",
+          "This Agreement may not be assigned by either party without prior written permission from the other party, which permission shall not be unreasonably withheld or delayed.",
+          "Any attempt by either party to assign any right, or delegate any duty or obligation which arises under the Agreement without such permission will be voidable.",
+          "19."
+        ],
+        "unresolved": [
+          "Requested field: Uncapped Liability",
+          "Question: Is a party’s liability uncapped upon the breach of its obligation in the contract?",
+          "This also includes uncap liability for a particular type of breach such as IP infringement or breach of confidentiality obligation.",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no.",
+          "For a document name, return the actual title."
+        ],
+        "agent_claims": [],
+        "last_action": "none",
+        "stage": "initial",
+        "submitted_answer": null,
+        "remaining_decisions": 8
+      },
+      "summary_sha256": "756d92e61537277bd468bf1a967db027522ff9029d486dc38f74efcdedc1616c",
+      "embedding_tokens": 280,
+      "input_tokens": 3519,
+      "output_tokens": 42,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 34,
+          "unresolved": 7,
+          "claims": 0
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-009-9e5377e28614",
+      "task_id": "BANUESTRAFINANCIALCORP_09_08_2006-EX-10.16-AGENCY AGREEMENT__Document Name",
+      "history_sha256": "9e5377e28614732a06c73d9af1c6d218673aa5160c2c15c44e0e42610d70761f",
+      "origins": [
+        {
+          "kind": "fresh_root",
+          "train_index_1based": 9
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[2,11],\"unresolved_ids\":[1,2,3,4,5],\"claim_ids\":[]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            2,
+            11
+          ],
+          "retained_ids": [
+            2,
+            11
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [],
+          "retained_ids": [],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "EL BANCO FINANCIAL CORPORATION",
+          "EL BANCO FINANCIAL CORPORATION AGENCY AGREEMENT Appendix A"
+        ],
+        "unresolved": [
+          "Requested field: Document Name",
+          "Question: The name of the contract",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no.",
+          "For a document name, return the actual title."
+        ],
+        "agent_claims": [],
+        "last_action": "none",
+        "stage": "initial",
+        "submitted_answer": null,
+        "remaining_decisions": 8
+      },
+      "summary_sha256": "c543341c47c81d69cdb88c6141caca6f251fdd8ae4f914b64b3f1133c9cc79f4",
+      "embedding_tokens": 116,
+      "input_tokens": 3233,
+      "output_tokens": 28,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 35,
+          "unresolved": 6,
+          "claims": 0
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-010-8424db163d4d",
+      "task_id": "VgrabCommunicationsInc_20200129_10-K_EX-10.33_11958828_EX-10.33_Development Agreement__Renewal Term",
+      "history_sha256": "8424db163d4d77c249d860a56065f64ce3118c1a5b0dae67566c2a6c28c7111c",
+      "origins": [
+        {
+          "kind": "fresh_root",
+          "train_index_1based": 10
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[7,8,9,10,11,12,13],\"unresolved_ids\":[1,2,3,4,5,6],\"claim_ids\":[]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13
+          ],
+          "retained_ids": [
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [],
+          "retained_ids": [],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "TERM OF AGREEMENT This Agreement commences on the date it is executed and shall continue until full performance by both parties, or until earlier terminated by one party under the terms of this Agreement.",
+          "ENTIRE AGREEMENT AND GOVERNING LAW AND JURISDICTION This agreement supersedes all oral and written representations and agreements between the parties including, but not limited to any earlier agreement relating to the subject matter thereof.",
+          "This agreement shall be construed, interpreted and governed by and in accordance with the laws of Hong Kong.",
+          "including, but not limited to any earlier agreement relating to the subject matter thereof.",
+          "In case the arbitration proceedings fail, an unresolved dispute between Developer and VAL is subject to the binding laws of Hong Kong as a first attempt at formal resolution.",
+          "Should arbitration fail to reach a resolution and either party wish to pursue the dispute further, this shall be conducted within the binding laws of Hong Kong.",
+          "LANGUAGE The English language shall be the medium used in all correspondence and legally binding tender."
+        ],
+        "unresolved": [
+          "Requested field: Renewal Term",
+          "Question: What is the renewal term after the initial term expires?",
+          "This includes automatic extensions and unilateral extensions with prior notice.",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no.",
+          "For a document name, return the actual title."
+        ],
+        "agent_claims": [],
+        "last_action": "none",
+        "stage": "initial",
+        "submitted_answer": null,
+        "remaining_decisions": 8
+      },
+      "summary_sha256": "1506077d86c676e5b4c8f368c53e833056f4e9a5a093506822fac05927a5e821",
+      "embedding_tokens": 307,
+      "input_tokens": 3193,
+      "output_tokens": 44,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 26,
+          "unresolved": 7,
+          "claims": 0
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-011-0a7038906f1c",
+      "task_id": "MACY_S,INC_05_11_2020-EX-99.4-JOINT FILING AGREEMENT__Document Name",
+      "history_sha256": "0a7038906f1ce96344e85e3fe128189b92ee0f763f565fe29080ba7e62afc63d",
+      "origins": [
+        {
+          "kind": "fresh_root",
+          "train_index_1based": 11
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[1,4,5,6],\"unresolved_ids\":[1],\"claim_ids\":[]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            1,
+            4,
+            5,
+            6
+          ],
+          "retained_ids": [
+            1,
+            4,
+            5,
+            6
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1
+          ],
+          "retained_ids": [
+            1
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [],
+          "retained_ids": [],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "Exhibit 99.4 JOINT FILING AGREEMENT In accordance with Rule 13d-1(k)(1) promulgated under the Securities Exchange Act of 1934, as amended, the undersigned hereby agree to the joint filing with each of the Reporting Persons (as such term is defined in the Schedule 13D referred to below) on behalf of each of them of a statement on Schedule 13D (including amendments thereto and statements on Schedule 13G) with respect to the Common Stock, par value $0.01 per share of Macy's, Inc., a corporation organized under the laws of the State of Delaware, and that this agreement may be included as an exhibit to such joint filing.",
+          "VESA EQUITY INVESTMENT S.À R.L.",
+          "/s/ Marek Spurny By: Marek Spurny Title:Authorized Signatory /s/ Pascal Leclerc By: Pascal Leclerc Title:Authorized Signatory EP INVESTMENT S.À R.L.",
+          "/s/ Marek Spurny By: Marek Spurny Title:Authorized Signatory /s/ Pascal Leclerc By: Pascal Leclerc Title:Authorized Signatory DANIEL KŘETÍNSKÝ /s/ Daniel Kretinsky By: Daniel Kretinsky"
+        ],
+        "unresolved": [
+          "Requested field: Document Name"
+        ],
+        "agent_claims": [],
+        "last_action": "none",
+        "stage": "initial",
+        "submitted_answer": null,
+        "remaining_decisions": 8
+      },
+      "summary_sha256": "461e8dc3af5d13af6084f99549cef67ef29529ec33043642c030b1cfbb8ad48d",
+      "embedding_tokens": 332,
+      "input_tokens": 2074,
+      "output_tokens": 23,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 6,
+          "unresolved": 6,
+          "claims": 0
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-012-ca17f0f86dd2",
+      "task_id": "MEDALISTDIVERSIFIEDREIT,INC_05_18_2020-EX-10.1-CONSULTING AGREEMENT__Change Of Control",
+      "history_sha256": "ca17f0f86dd2949e03a4c5ec936f95837929ac52dc95c79b4aba760529130ce1",
+      "origins": [
+        {
+          "kind": "fresh_root",
+          "train_index_1based": 12
+        },
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/graphpo-smoke-claim-ids/auxiliary.json",
+          "file_sha256": "eac7040feda046f86ed2eeff4e8df41f24bb74aec27461208782ccb1a53cfcfa",
+          "record_1based": 1,
+          "iteration": null,
+          "summary_1based": 1,
+          "original_valid": true,
+          "original_error": null
+        },
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/graphpo-smoke-claims-v3/auxiliary.json",
+          "file_sha256": "12a83b9f05c8a5fc33d3eb560a05fb439515ef585010a1e8cb9f919179cab2c3",
+          "record_1based": 1,
+          "iteration": null,
+          "summary_1based": 1,
+          "original_valid": false,
+          "original_error": "Summary agent_claims must quote actual public assistant text or parsed action output"
+        },
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/graphpo-smoke-claims-v3/auxiliary.json",
+          "file_sha256": "12a83b9f05c8a5fc33d3eb560a05fb439515ef585010a1e8cb9f919179cab2c3",
+          "record_1based": 1,
+          "iteration": null,
+          "summary_1based": 2,
+          "original_valid": false,
+          "original_error": "Summary agent_claims must quote actual public assistant text or parsed action output"
+        },
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/graphpo-smoke-initial-fix/auxiliary.json",
+          "file_sha256": "98d194fdc56c26890dafb1846d05a66bd387bae8f1cab8fd39a805b03a237291",
+          "record_1based": 1,
+          "iteration": null,
+          "summary_1based": 1,
+          "original_valid": false,
+          "original_error": "Summary must be one complete JSON object: Expecting ',' delimiter: line 5 column 19 (char 395)"
+        },
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/graphpo-smoke-initial-fix/auxiliary.json",
+          "file_sha256": "98d194fdc56c26890dafb1846d05a66bd387bae8f1cab8fd39a805b03a237291",
+          "record_1based": 1,
+          "iteration": null,
+          "summary_1based": 2,
+          "original_valid": true,
+          "original_error": null
+        },
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/graphpo-smoke-long/auxiliary.json",
+          "file_sha256": "14c10ae0f0087ab26bb25c3f69a9b9133a4b06cf63f6e2076ad6b222a8f20c24",
+          "record_1based": 1,
+          "iteration": null,
+          "summary_1based": 1,
+          "original_valid": false,
+          "original_error": "Summary unresolved items must quote the original task question"
+        },
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/graphpo-smoke-long/auxiliary.json",
+          "file_sha256": "14c10ae0f0087ab26bb25c3f69a9b9133a4b06cf63f6e2076ad6b222a8f20c24",
+          "record_1based": 1,
+          "iteration": null,
+          "summary_1based": 2,
+          "original_valid": false,
+          "original_error": "Summary facts must quote observed contract source text"
+        },
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/graphpo-smoke-v3/auxiliary.json",
+          "file_sha256": "b8431258d5d004263d23963e5bb835bd0a3b48a47d9900d7d256d2c01808e5de",
+          "record_1based": 1,
+          "iteration": null,
+          "summary_1based": 1,
+          "original_valid": false,
+          "original_error": "Summary facts must contain at most 4 nonempty strings, each <= 200 characters"
+        },
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/graphpo-smoke-v3/auxiliary.json",
+          "file_sha256": "b8431258d5d004263d23963e5bb835bd0a3b48a47d9900d7d256d2c01808e5de",
+          "record_1based": 1,
+          "iteration": null,
+          "summary_1based": 2,
+          "original_valid": false,
+          "original_error": "Summary facts must contain at most 4 nonempty strings, each <= 200 characters"
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[4,5,6,7,8,9,10,11],\"unresolved_ids\":[1,2,3,4,5,6],\"claim_ids\":[]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11
+          ],
+          "retained_ids": [
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [],
+          "retained_ids": [],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "8.3 Change of Control.",
+          "In the event of a 'Change of Control' of Company, then if CONSULTANT's services are terminated without cause at any time within a twelve (12) month period following such Change of Control, CONSULTANT shall receive a termination fee equal to twelve (12) months compensation hereunder at the then current monthly rate, including any stock compensation.",
+          "A Change of Control shall be any purchase of equity in the Company by a party that results in the party acquiring (i) voting control of the Company or (ii) the authority to replace or appoint, a majority of the Board, or the CEO or COO or CFO of the Company.",
+          "9.",
+          "General Provisions.",
+          "9.1 Entire Agreement.",
+          "This Agreement constitutes the entire and exclusive agreement between the Parties with respect to the subject matter hereof and supersedes any prior or contemporaneous agreements, representations, and understandings of the Parties regarding their consulting relationship.",
+          "9.2 Severability."
+        ],
+        "unresolved": [
+          "Requested field: Change Of Control",
+          "Question: Does one party have the right to terminate or is consent or notice required of the counterparty if such party undergoes a change of control, such as a merger, stock sale, transfer of all or substantially all of its assets or business, or assignment by operation of law?",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no.",
+          "For a document name, return the actual title.",
+          "The field label is not a phrase that must appear in the contract."
+        ],
+        "agent_claims": [],
+        "last_action": "none",
+        "stage": "initial",
+        "submitted_answer": null,
+        "remaining_decisions": 8
+      },
+      "summary_sha256": "3d89bc97dd79bf54aa706ba266763166316507900337cc453662ab5710996fa4",
+      "embedding_tokens": 352,
+      "input_tokens": 3053,
+      "output_tokens": 44,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 21,
+          "unresolved": 6,
+          "claims": 0
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-013-f7616817a403",
+      "task_id": "VAXCYTE,INC_05_22_2020-EX-10.19-SUPPLY AGREEMENT__Document Name",
+      "history_sha256": "f7616817a4032780026e68374049e5f86362f17196a240362e2763f352d73fbb",
+      "origins": [
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/68390e1/graphpo/train/graphpo_auxiliary_rank0.jsonl",
+          "file_sha256": "f48a68a31b60539e87033d4edd0d31c2759b0edfcfb5662c5b6c79771f20d23c",
+          "record_1based": 1,
+          "iteration": 1,
+          "summary_1based": 2,
+          "original_valid": true,
+          "original_error": null
+        },
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/68390e1/graphpo/train/graphpo_auxiliary_rank0.jsonl",
+          "file_sha256": "f48a68a31b60539e87033d4edd0d31c2759b0edfcfb5662c5b6c79771f20d23c",
+          "record_1based": 1,
+          "iteration": 1,
+          "summary_1based": 3,
+          "original_valid": true,
+          "original_error": null
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[1,2,3,4,5,6,7,8],\"unresolved_ids\":[1,2,3,4,5,6],\"claim_ids\":[1]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [
+            1
+          ],
+          "retained_ids": [
+            1
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "Exhibit 10.19",
+          "CERTAIN CONFIDENTIAL INFORMATION CONTAINED IN THIS DOCUMENT, MARKED BY [***], HAS BEEN OMITTED BECAUSE IT IS BOTH (I) NOT MATERIAL AND (II) WOULD LIKELY CAUSE COMPETITIVE HARM IF PUBLICLY DISCLOSED.",
+          "SUPPLY AGREEMENT",
+          "This SUPPLY AGREEMENT (\"Supply Agreement\") is made as of May 29, 2018 (the \"Effective Date\") by and between SutroVax, Inc., a Delaware corporation having principal offices at 353 Hatch Dr., Foster City, CA 94404 (\"SutroVax\") and Sutro Biopharma, Inc., a Delaware corporation, having principal offices at 310 Utah Ave, Suite 150, South San Francisco, CA, 94080 (\"Sutro\").",
+          "SutroVax and Sutro may be referred to herein by name or individually, as a \"Party\" and collectively, as the \"Parties.\"",
+          "BACKGROUND",
+          "A.",
+          "Sutro controls certain proprietary technology which permits cell-free expression of proteins, and Sutro licensed such technology to SutroVax under that certain Amended and Restated SutroVax Agreement dated as of October 12, 2015 (the \"License Agreement\")."
+        ],
+        "unresolved": [
+          "Requested field: Document Name",
+          "Question: The name of the contract",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no.",
+          "For a document name, return the actual title.",
+          "The field label is not a phrase that must appear in the contract."
+        ],
+        "agent_claims": [
+          "[]"
+        ],
+        "last_action": "submit_answer",
+        "stage": "final",
+        "submitted_answer": [],
+        "remaining_decisions": 0
+      },
+      "summary_sha256": "26f01bf31c554ae4226fb328654ec8acf34350cd7cf22d657f8ffd3371fe7352",
+      "embedding_tokens": 392,
+      "input_tokens": 3423,
+      "output_tokens": 43,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 24,
+          "unresolved": 6,
+          "claims": 1
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-014-34cc8cb21ed3",
+      "task_id": "NEXSTARFINANCEHOLDINGSINC_03_27_2002-EX-10.26-OUTSOURCING AGREEMENT__Competitive Restriction Exception",
+      "history_sha256": "34cc8cb21ed3697e0565fb2d0a8c8aaa26f0905dd180a9cdca6ad16e1e705453",
+      "origins": [
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/68390e1/graphpo/train/graphpo_auxiliary_rank0.jsonl",
+          "file_sha256": "f48a68a31b60539e87033d4edd0d31c2759b0edfcfb5662c5b6c79771f20d23c",
+          "record_1based": 2,
+          "iteration": 2,
+          "summary_1based": 2,
+          "original_valid": true,
+          "original_error": null
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[1,2,3,4,5,6,7,8],\"unresolved_ids\":[1,2,3],\"claim_ids\":[1,2,3]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "ht above ground and above average terrain.",
+          "i.",
+          "Proprietary Information.",
+          "Nexstar shall not disclose any sales or other proprietary information of WYZZ to any third party.",
+          "j.",
+          "Annual Budget.",
+          "Nexstar shall provide monthly financial projections and copies of quarterly market revenue reports to WYZZ and shall cause the management of WMBD-TV to meet with WYZZ's management on at least a monthly basis (or such longer intervals as WYZZ may elect) to review the performance of the Stations and to",
+          "12"
+        ],
+        "unresolved": [
+          "Requested field: Competitive Restriction Exception",
+          "Question: This category includes the exceptions or carveouts to Non-Compete, Exclusivity and No-Solicit of Customers above.",
+          "Extract the contract text that answers this question."
+        ],
+        "agent_claims": [
+          "{\"tool\":\"search_document\",\"arguments\":{\"query\":\"competitive restriction exception\",\"top_k\":4}}",
+          "search_document",
+          "competitive restriction exception"
+        ],
+        "last_action": "search_document",
+        "stage": "active",
+        "submitted_answer": null,
+        "remaining_decisions": 7
+      },
+      "summary_sha256": "638dc600db6ecba7ebbc69406dd0c43bc649e9f33d2bc607bd6e062d77ebe96c",
+      "embedding_tokens": 242,
+      "input_tokens": 7266,
+      "output_tokens": 41,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 67,
+          "unresolved": 6,
+          "claims": 3
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-015-3cfbfa4a2c95",
+      "task_id": "NEXSTARFINANCEHOLDINGSINC_03_27_2002-EX-10.26-OUTSOURCING AGREEMENT__Competitive Restriction Exception",
+      "history_sha256": "3cfbfa4a2c950e531cc634ac3e7101da5b5dd71b96696a3a9fb945e3dc755c95",
+      "origins": [
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/68390e1/graphpo/train/graphpo_auxiliary_rank0.jsonl",
+          "file_sha256": "f48a68a31b60539e87033d4edd0d31c2759b0edfcfb5662c5b6c79771f20d23c",
+          "record_1based": 2,
+          "iteration": 2,
+          "summary_1based": 3,
+          "original_valid": true,
+          "original_error": null
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[1,2,3,4,5,6,7,8],\"unresolved_ids\":[1,2,3],\"claim_ids\":[1,2,3]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "ht above ground and above average terrain.",
+          "i.",
+          "Proprietary Information.",
+          "Nexstar shall not disclose any sales or other proprietary information of WYZZ to any third party.",
+          "j.",
+          "Annual Budget.",
+          "Nexstar shall provide monthly financial projections and copies of quarterly market revenue reports to WYZZ and shall cause the management of WMBD-TV to meet with WYZZ's management on at least a monthly basis (or such longer intervals as WYZZ may elect) to review the performance of the Stations and to",
+          "12"
+        ],
+        "unresolved": [
+          "Requested field: Competitive Restriction Exception",
+          "Question: This category includes the exceptions or carveouts to Non-Compete, Exclusivity and No-Solicit of Customers above.",
+          "Extract the contract text that answers this question."
+        ],
+        "agent_claims": [
+          "{\"tool\":\"search_document\",\"arguments\":{\"query\":\"Competitive Restriction Exception\", \"top_k\":4}}",
+          "search_document",
+          "Competitive Restriction Exception"
+        ],
+        "last_action": "search_document",
+        "stage": "active",
+        "submitted_answer": null,
+        "remaining_decisions": 7
+      },
+      "summary_sha256": "3da724c90269fb96c747e9c56bc1e12c5af8c81dbc7d2fc663349abfba0b3f1a",
+      "embedding_tokens": 244,
+      "input_tokens": 7277,
+      "output_tokens": 41,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 67,
+          "unresolved": 6,
+          "claims": 3
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-016-2f994d38ff01",
+      "task_id": "NEXSTARFINANCEHOLDINGSINC_03_27_2002-EX-10.26-OUTSOURCING AGREEMENT__Competitive Restriction Exception",
+      "history_sha256": "2f994d38ff0109c21f7756fa223e1b7dd47358ec501c69c1f94bfad033ce81a2",
+      "origins": [
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/68390e1/graphpo/train/graphpo_auxiliary_rank0.jsonl",
+          "file_sha256": "f48a68a31b60539e87033d4edd0d31c2759b0edfcfb5662c5b6c79771f20d23c",
+          "record_1based": 2,
+          "iteration": 2,
+          "summary_1based": 4,
+          "original_valid": true,
+          "original_error": null
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[1,2,3,4,5,6,7,8],\"unresolved_ids\":[1,2,3,4,5,6],\"claim_ids\":[1,2,3,4,5,6]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "ht above ground and above average terrain.",
+          "i.",
+          "Proprietary Information.",
+          "Nexstar shall not disclose any sales or other proprietary information of WYZZ to any third party.",
+          "j.",
+          "Annual Budget.",
+          "Nexstar shall provide monthly financial projections and copies of quarterly market revenue reports to WYZZ and shall cause the management of WMBD-TV to meet with WYZZ's management on at least a monthly basis (or such longer intervals as WYZZ may elect) to review the performance of the Stations and to",
+          "12"
+        ],
+        "unresolved": [
+          "Requested field: Competitive Restriction Exception",
+          "Question: This category includes the exceptions or carveouts to Non-Compete, Exclusivity and No-Solicit of Customers above.",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no.",
+          "For a document name, return the actual title.",
+          "The field label is not a phrase that must appear in the contract."
+        ],
+        "agent_claims": [
+          "{\"tool\":\"search_document\",\"arguments\":{\"query\":\"competitive restriction exception\",\"top_k\":4}}",
+          "search_document",
+          "competitive restriction exception",
+          "[]",
+          "No contract text was found within the provided document that directly answers the question about the Competitive Restriction Exception, specifically as it relates to Non-Compete, Exclusivity, and No-Solicit of Customers carveouts.",
+          "The provided excerpts do cover certain provisions within the contract but do not explicitly mention or define the Competitive Restriction Exception in the context sought."
+        ],
+        "last_action": "invalid_output",
+        "stage": "active",
+        "submitted_answer": null,
+        "remaining_decisions": 6
+      },
+      "summary_sha256": "ec390f9e1933e9d719fab316b4cccf26beba45969dfed2961fde975f4f58241e",
+      "embedding_tokens": 355,
+      "input_tokens": 7654,
+      "output_tokens": 53,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 67,
+          "unresolved": 6,
+          "claims": 6
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-017-e8867974a3fa",
+      "task_id": "NEXSTARFINANCEHOLDINGSINC_03_27_2002-EX-10.26-OUTSOURCING AGREEMENT__Competitive Restriction Exception",
+      "history_sha256": "e8867974a3fa26d4643e08e2f5ba397e89dd768f627d1667b64ff42c199da60a",
+      "origins": [
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/68390e1/graphpo/train/graphpo_auxiliary_rank0.jsonl",
+          "file_sha256": "f48a68a31b60539e87033d4edd0d31c2759b0edfcfb5662c5b6c79771f20d23c",
+          "record_1based": 2,
+          "iteration": 2,
+          "summary_1based": 5,
+          "original_valid": true,
+          "original_error": null
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[1,2,3,4,5,6,7,8],\"unresolved_ids\":[1,2,3,4,5],\"claim_ids\":[1,2,3,4]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "ht above ground and above average terrain.",
+          "i.",
+          "Proprietary Information.",
+          "Nexstar shall not disclose any sales or other proprietary information of WYZZ to any third party.",
+          "j.",
+          "Annual Budget.",
+          "Nexstar shall provide monthly financial projections and copies of quarterly market revenue reports to WYZZ and shall cause the management of WMBD-TV to meet with WYZZ's management on at least a monthly basis (or such longer intervals as WYZZ may elect) to review the performance of the Stations and to",
+          "12"
+        ],
+        "unresolved": [
+          "Requested field: Competitive Restriction Exception",
+          "Question: This category includes the exceptions or carveouts to Non-Compete, Exclusivity and No-Solicit of Customers above.",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no.",
+          "For a document name, return the actual title."
+        ],
+        "agent_claims": [
+          "{\"tool\":\"search_document\",\"arguments\":{\"query\":\"competitive restriction exception\",\"top_k\":4}}",
+          "search_document",
+          "competitive restriction exception",
+          "[]"
+        ],
+        "last_action": "submit_answer",
+        "stage": "final",
+        "submitted_answer": [],
+        "remaining_decisions": 0
+      },
+      "summary_sha256": "863da6618a2c42389076f44ca9e02554f616e25e49ee6645be830239fce87fcb",
+      "embedding_tokens": 263,
+      "input_tokens": 7289,
+      "output_tokens": 47,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 67,
+          "unresolved": 6,
+          "claims": 4
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-018-ace3b3aa66c8",
+      "task_id": "NEXSTARFINANCEHOLDINGSINC_03_27_2002-EX-10.26-OUTSOURCING AGREEMENT__Competitive Restriction Exception",
+      "history_sha256": "ace3b3aa66c8d190386f12d0de69e078a432d3059b53ccbd6fa268238d659153",
+      "origins": [
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/68390e1/graphpo/train/graphpo_auxiliary_rank0.jsonl",
+          "file_sha256": "f48a68a31b60539e87033d4edd0d31c2759b0edfcfb5662c5b6c79771f20d23c",
+          "record_1based": 2,
+          "iteration": 2,
+          "summary_1based": 6,
+          "original_valid": false,
+          "original_error": "unresolved_ids must be distinct integer IDs from the supplied task-question candidates"
+        },
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/68390e1/graphpo/train/graphpo_auxiliary_rank0.jsonl",
+          "file_sha256": "f48a68a31b60539e87033d4edd0d31c2759b0edfcfb5662c5b6c79771f20d23c",
+          "record_1based": 2,
+          "iteration": 2,
+          "summary_1based": 7,
+          "original_valid": false,
+          "original_error": "unresolved_ids must be distinct integer IDs from the supplied task-question candidates"
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[1,2,3,4,5,6,7,8],\"unresolved_ids\":[1,2,3,4,5],\"claim_ids\":[1,2,3,4]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "ht above ground and above average terrain.",
+          "i.",
+          "Proprietary Information.",
+          "Nexstar shall not disclose any sales or other proprietary information of WYZZ to any third party.",
+          "j.",
+          "Annual Budget.",
+          "Nexstar shall provide monthly financial projections and copies of quarterly market revenue reports to WYZZ and shall cause the management of WMBD-TV to meet with WYZZ's management on at least a monthly basis (or such longer intervals as WYZZ may elect) to review the performance of the Stations and to",
+          "12"
+        ],
+        "unresolved": [
+          "Requested field: Competitive Restriction Exception",
+          "Question: This category includes the exceptions or carveouts to Non-Compete, Exclusivity and No-Solicit of Customers above.",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no.",
+          "For a document name, return the actual title."
+        ],
+        "agent_claims": [
+          "{\"tool\":\"search_document\",\"arguments\":{\"query\":\"competitive restriction exception\",\"top_k\":4}}",
+          "search_document",
+          "competitive restriction exception",
+          "No relevant quotations were found in the provided excerpt."
+        ],
+        "last_action": "invalid_output",
+        "stage": "active",
+        "submitted_answer": null,
+        "remaining_decisions": 6
+      },
+      "summary_sha256": "31ba6b26c2a231fea8177e41d151afb4b8f8573e2b4e610804028824333d96e7",
+      "embedding_tokens": 272,
+      "input_tokens": 7412,
+      "output_tokens": 47,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 67,
+          "unresolved": 6,
+          "claims": 4
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-019-a86de8b37f28",
+      "task_id": "MEDALISTDIVERSIFIEDREIT,INC_05_18_2020-EX-10.1-CONSULTING AGREEMENT__Change Of Control",
+      "history_sha256": "a86de8b37f28646fe6541dc138fec662fdf884538c0122b18a5ddc53150661ec",
+      "origins": [
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/graphpo-smoke-claim-ids/auxiliary.json",
+          "file_sha256": "eac7040feda046f86ed2eeff4e8df41f24bb74aec27461208782ccb1a53cfcfa",
+          "record_1based": 1,
+          "iteration": null,
+          "summary_1based": 2,
+          "original_valid": false,
+          "original_error": "Complete state summary uses 689 embedding tokens, exceeding 512. Select shorter exact source quotations and task-question excerpts while preserving necessary conditions. Do not paraphrase, invent text, or cut a JSON object."
+        },
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/graphpo-smoke-claim-ids/auxiliary.json",
+          "file_sha256": "eac7040feda046f86ed2eeff4e8df41f24bb74aec27461208782ccb1a53cfcfa",
+          "record_1based": 1,
+          "iteration": null,
+          "summary_1based": 3,
+          "original_valid": false,
+          "original_error": "Complete state summary uses 523 embedding tokens, exceeding 512. Select shorter exact source quotations and task-question excerpts while preserving necessary conditions. Do not paraphrase, invent text, or cut a JSON object."
+        },
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/graphpo-smoke-initial-fix/auxiliary.json",
+          "file_sha256": "98d194fdc56c26890dafb1846d05a66bd387bae8f1cab8fd39a805b03a237291",
+          "record_1based": 1,
+          "iteration": null,
+          "summary_1based": 3,
+          "original_valid": false,
+          "original_error": "Summary agent_claims must quote actual public assistant text or parsed action output"
+        },
+        {
+          "kind": "failed_run_recorded_history",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/graphpo-smoke-initial-fix/auxiliary.json",
+          "file_sha256": "98d194fdc56c26890dafb1846d05a66bd387bae8f1cab8fd39a805b03a237291",
+          "record_1based": 1,
+          "iteration": null,
+          "summary_1based": 4,
+          "original_valid": false,
+          "original_error": "Summary agent_claims must quote actual public assistant text or parsed action output"
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[5,6,20],\"unresolved_ids\":[1,2,3,4,5,6],\"claim_ids\":[1,2,3]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            5,
+            6,
+            20
+          ],
+          "retained_ids": [
+            5,
+            6,
+            20
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "In the event of a 'Change of Control' of Company, then if CONSULTANT's services are terminated without cause at any time within a twelve (12) month period following such Change of Control, CONSULTANT shall receive a termination fee equal to twelve (12) months compensation hereunder at the then current monthly rate, including any stock compensation.",
+          "A Change of Control shall be any purchase of equity in the Company by a party that results in the party acquiring (i) voting control of the Company or (ii) the authority to replace or appoint, a majority of the Board, or the CEO or COO or CFO of the Company.",
+          "This Agreement shall terminate immediately upon the occurrence of any of the following events: (a) upon the death or bankruptcy of CONSULTANT; or (b) upon the close of business on the date the Company gives CONSULTANT written notice of Termination for Cause (as defined below); (c) ninety (90) days following the date the Company gives CONSULTANT written notice of termination for any or no reason; or (d) CONSULTANT may terminate this Agreement by giving ninety (90) days' written notice to REIT."
+        ],
+        "unresolved": [
+          "Requested field: Change Of Control",
+          "Question: Does one party have the right to terminate or is consent or notice required of the counterparty if such party undergoes a change of control, such as a merger, stock sale, transfer of all or substantially all of its assets or business, or assignment by operation of law?",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no.",
+          "For a document name, return the actual title.",
+          "The field label is not a phrase that must appear in the contract."
+        ],
+        "agent_claims": [
+          "{\"answer\":[{\"text\":\"In the event of a 'Change of Control' of Company, then if CONSULTANT's services are terminated without cause at any time within a twelve (12) month period following such Change of Control, CONSULTANT shall receive a termination fee equal to twelve (12) months compensation hereunder at the then current monthly rate, including any stock compensation.",
+          "A Change of Control shall be any purchase of equity in the Company by a party that results in the party acquiring (i) voting control of the Company or (ii) the authority to replace or appoint, a majority of the Board, or the CEO or COO or CFO of the Company.\",\"confidence\":0.9}] }",
+          "In the event of a 'Change of Control' of Company, then if CONSULTANT's services are terminated without cause at any time within a twelve (12) month period following such Change of Control, CONSULTANT shall receive a termination fee equal to twelve (12) months compensation hereunder at the then current monthly rate, including any stock compensation."
+        ],
+        "last_action": "submit_answer",
+        "stage": "final",
+        "submitted_answer": [
+          {
+            "text": "In the event of a 'Change of Control' of Company, then if CONSULTANT's services are terminated without cause at any time within a twelve (12) month period following such Change of Control, CONSULTANT shall receive a termination fee equal to twelve (12) months compensation hereunder at the then current monthly rate, including any stock compensation. A Change of Control shall be any purchase of equity in the Company by a party that results in the party acquiring (i) voting control of the Company or (ii) the authority to replace or appoint, a majority of the Board, or the CEO or COO or CFO of the Company.",
+            "confidence": 0.9
+          }
+        ],
+        "remaining_decisions": 0
+      },
+      "summary_sha256": "aec1042cf93fa26849c9decdb701a27550833873577299d96a6dafb14a9a3be0",
+      "embedding_tokens": 766,
+      "input_tokens": 3872,
+      "output_tokens": 37,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 21,
+          "unresolved": 6,
+          "claims": 4
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-020-f172c9974499",
+      "task_id": "NEXSTARFINANCEHOLDINGSINC_03_27_2002-EX-10.26-OUTSOURCING AGREEMENT__Competitive Restriction Exception",
+      "history_sha256": "f172c997449946b8b560e72f779710312076e16bef6d7990036572634b0fb69c",
+      "origins": [
+        {
+          "kind": "deep_recorded_state",
+          "method": "gigpo",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/abbb72c/gigpo/train/rollouts_rank0.jsonl",
+          "file_sha256": "6c889b0ec7f4d7f85a544a5312894f925f4f729ede379bd208cd80258ddab406",
+          "rollout_1based": 16,
+          "before_step_1based": 8,
+          "recorded_actor_decisions": 7
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[1,2,3,4,5,6,7,8],\"unresolved_ids\":[1,2,3,4],\"claim_ids\":[1,2,3,4]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "ht above ground and above average terrain.",
+          "i.",
+          "Proprietary Information.",
+          "Nexstar shall not disclose any sales or other proprietary information of WYZZ to any third party.",
+          "j.",
+          "Annual Budget.",
+          "Nexstar shall provide monthly financial projections and copies of quarterly market revenue reports to WYZZ and shall cause the management of WMBD-TV to meet with WYZZ's management on at least a monthly basis (or such longer intervals as WYZZ may elect) to review the performance of the Stations and to",
+          "12"
+        ],
+        "unresolved": [
+          "Requested field: Competitive Restriction Exception",
+          "Question: This category includes the exceptions or carveouts to Non-Compete, Exclusivity and No-Solicit of Customers above.",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no."
+        ],
+        "agent_claims": [
+          "{\"tool\":\"search_document\",\"arguments\":{\"query\":\"Joint Capital Equipment\", \"top_k\":4}}",
+          "search_document",
+          "Joint Capital Equipment",
+          "None of the provided excerpts directly address the \"Joint Capital Equipment\" or the exceptions to non-compete, exclusivity, and no-solicit of customers, as all relevant information was focused on obligations, services, and termination provisions without explicit reference to carveouts or exceptions."
+        ],
+        "last_action": "invalid_output",
+        "stage": "final",
+        "submitted_answer": null,
+        "remaining_decisions": 1
+      },
+      "summary_sha256": "8976c143faf5b976b05b9e04d401da6917cad58c6812c9ef4b3a9710829e4a25",
+      "embedding_tokens": 309,
+      "input_tokens": 7400,
+      "output_tokens": 45,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 49,
+          "unresolved": 6,
+          "claims": 4
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    },
+    {
+      "request_id": "state-021-5ed5ef689123",
+      "task_id": "MEDALISTDIVERSIFIEDREIT,INC_05_18_2020-EX-10.1-CONSULTING AGREEMENT__Change Of Control",
+      "history_sha256": "5ed5ef689123c251b3960cdb184bf7f7b29a53fc61aef7a340fd0029b57b0976",
+      "origins": [
+        {
+          "kind": "deep_recorded_state",
+          "method": "g2po",
+          "file": "/data2/pkuiti/geyugong/dcc-credit-baselines/runs/credit-rebuild-20261029/abbb72c/g2po/train/rollouts_rank0.jsonl",
+          "file_sha256": "138c5b2af6e555627ec4df3951e960c730457455e289c30dbbe697477bcf2af0",
+          "rollout_1based": 93,
+          "before_step_1based": 6,
+          "recorded_actor_decisions": 5
+        }
+      ],
+      "selection_output": "{\"fact_ids\":[1,2,3,4,5,6,7,8],\"unresolved_ids\":[1,2,3,4,5,6],\"claim_ids\":[2,3,4,5,6]}",
+      "selection_normalization": {
+        "fact_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "unresolved_ids": {
+          "requested_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "retained_ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        },
+        "claim_ids": {
+          "requested_ids": [
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "retained_ids": [
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "duplicate_ids": [],
+          "normalization": "stable set of selected excerpts; no invalid IDs removed"
+        }
+      },
+      "actual_summary": {
+        "facts": [
+          "T or pertaining to any Proprietary Information.",
+          "8.2 Obligations Surviving Termination.",
+          "The obligations of Sections 3, 5, 6 and 7 shall survive any termination of this Agreement.",
+          "8.3 Change of Control.",
+          "In the event of a 'Change of Control' of Company, then if CONSULTANT's services are terminated without cause at any time within a twelve (12) month period following such Change of Control, CONSULTANT shall receive a termination fee equal to twelve (12) months compensation hereunder at the then current monthly rate, including any stock compensation.",
+          "A Change of Control shall be any purchase of equity in the Company by a party that results in the party acquiring (i) voting control of the Company or (ii) the authority to replace or appoint, a majority of the Board, or the CEO or COO or CFO of the Company.",
+          "9.",
+          "General Provisions."
+        ],
+        "unresolved": [
+          "Requested field: Change Of Control",
+          "Question: Does one party have the right to terminate or is consent or notice required of the counterparty if such party undergoes a change of control, such as a merger, stock sale, transfer of all or substantially all of its assets or business, or assignment by operation of law?",
+          "Extract the contract text that answers this question.",
+          "Return source quotations, not yes/no.",
+          "For a document name, return the actual title.",
+          "The field label is not a phrase that must appear in the contract."
+        ],
+        "agent_claims": [
+          "In the event of a 'Change of Control' of Company, then if CONSULTANT's services are terminated without cause at any time within a twelve (12) month period following such Change of Control, CONSULTANT shall receive a termination fee equal to twelve (12) months compensation hereunder at the then current monthly rate, including any stock compensation.\", \"score\": 8.8395}",
+          "{\"tool\":\"search_document\",\"arguments\":{\"query\":\"Change of Control\", \"top_k\":4}}",
+          "search_document",
+          "Change of Control",
+          "In the event of a 'Change of Control' of Company, then if CONSULTANT's services are terminated without cause at any time within a twelve (12) month period following such Change of Control, CONSULTANT shall receive a termination fee equal to twelve (12) months compensation hereunder at the then current monthly rate, including any stock compensation.\", \"score\": 6.5312}"
+        ],
+        "last_action": "invalid_output",
+        "stage": "active",
+        "submitted_answer": null,
+        "remaining_decisions": 3
+      },
+      "summary_sha256": "a0ca5e566e68dc8be6c84d75aa3aae1d9953b30e520c641ea8f2b8f24f072e57",
+      "embedding_tokens": 542,
+      "input_tokens": 8071,
+      "output_tokens": 51,
+      "source_checks": {
+        "candidate_counts": {
+          "facts": 38,
+          "unresolved": 6,
+          "claims": 6
+        },
+        "domain_and_contiguous_origin_checks": true,
+        "submitted_answer_preserved": true,
+        "public_controls_preserved": true
+      },
+      "summary_equals_embedding_input": true,
+      "truncated": false
+    }
+  ],
+  "usable_for_algorithm_effectiveness": false
+}
