@@ -323,3 +323,59 @@ def test_v3_wrappers_are_parse_only_and_other_protocols_remain_strict(text):
     assert rows[0]["token_signature"] == audit.digest([result.steps[0].prompt_ids, result.steps[0].completion_ids, text])
     assert rows[0]["action_aliases"]
     assert all(r["is_action_valid"] for r in rows)
+
+
+@pytest.mark.parametrize("status, accepted", [
+    ({"state": "running", "stage": "audit", "pid": 123}, True),
+    ({"state": "running", "stage": "train", "pid": 123}, False),
+    ({"state": "running", "stage": "evaluate", "pid": 123}, False),
+    ({"state": "failed", "stage": "audit", "returncode": 1}, False),
+    ({"state": "finished", "returncode": 1}, False),
+])
+def test_execution_state_accepts_audit_phase_only_after_artifacts_are_checked(tmp_path, status, accepted):
+    write_run(tmp_path)
+    (tmp_path / "status.json").write_text(json.dumps(status), encoding="utf-8")
+    report = audit.audit_run(tmp_path)
+    state_check = next(c for c in report["checks"] if c["name"] == "run_execution_state")
+    assert state_check["status"] == ("passed" if accepted else "failed")
+    assert report["audit_in_progress"] is accepted
+    if not accepted:
+        assert report["verdict"] == "failed"
+
+
+@pytest.mark.parametrize("missing_artifact", ["train_finish", "evaluation"])
+def test_audit_phase_does_not_bypass_training_finish_or_evaluation(tmp_path, missing_artifact):
+    write_run(tmp_path)
+    (tmp_path / "status.json").write_text(json.dumps({"state": "running", "stage": "audit"}), encoding="utf-8")
+    if missing_artifact == "train_finish":
+        path = tmp_path / "train/train_rank0.jsonl"
+        records = [json.loads(line) for line in path.open(encoding="utf-8")]
+        path.write_text("\n".join(json.dumps(r) for r in records if r.get("event") != "finished") + "\n", encoding="utf-8")
+    else:
+        (tmp_path / "evaluation/summary.json").unlink()
+    report = audit.audit_run(tmp_path)
+    assert next(c for c in report["checks"] if c["name"] == "run_execution_state")["status"] == "passed"
+    assert report["verdict"] != "verified_record_consistency"
+    assert any(c["required"] and c["status"] != "passed" for c in report["checks"])
+
+
+def test_grpo_report_names_the_visit_weighted_episode_only_variant(tmp_path):
+    write_run(tmp_path)
+    _, _, _, record, _ = hand_fixture("grpo")
+    record["credit"]["episode_weighting"] = "visits"
+    path = tmp_path / "train/train_rank0.jsonl"
+    start = dict(event="start", algorithm="LoRA GRPO", adv_estimator="grpo", cuad_protocol="cuad-audited-v2", invalid_action_penalty=.1)
+    path.write_text("\n".join(json.dumps(r) for r in [start, record, {"event": "finished", "optimizer_steps": 1}]) + "\n", encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["method"] = "grpo"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    config_path = tmp_path / "train/final/training_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["adv_estimator"] = "grpo"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    report = audit.audit_run(tmp_path)
+    assert report["method"] == "grpo"
+    assert report["method_variant"]["episode_weighting"] == "visits"
+    assert report["method_variant"]["is_standard_episode_weighted_grpo"] is False
+    assert report["method_variant"]["invalid_action_penalty"] == .1

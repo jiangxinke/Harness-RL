@@ -700,8 +700,12 @@ def audit_run(run_dir):
     evidence = Evidence()
     manifest = evidence.load(run_dir / "manifest.json") or {}
     status = evidence.load(run_dir / "status.json") or {}
-    evidence.check("run_terminal_state", None if not status else status.get("state") == "finished" and status.get("returncode") == 0,
-                   status or "status.json 缺失", required=True)
+    audit_in_progress = status.get("state") == "running" and status.get("stage") == "audit"
+    execution_ready = ((status.get("state") == "finished" and status.get("returncode") == 0)
+                       or audit_in_progress)
+    evidence.check("run_execution_state", None if not status else execution_ready,
+                   dict(recorded_status=status, audit_in_progress=audit_in_progress,
+                        requirement="允许已结束或正在审计；训练 finished 与评估日志仍须独立核验。"), required=True)
     train_log = evidence.load(run_dir / "train/train_rank0.jsonl", lines=True)
     raw_train = evidence.load(run_dir / "train/rollouts_rank0.jsonl", lines=True)
     starts = [r for r in train_log if r.get("event") == "start"]
@@ -840,10 +844,22 @@ def audit_run(run_dir):
                  generated_prompt_tokens=sum(s["prompt_tokens"] for s in generation_rows) if method != "graphpo" else
                     sum((r.get("costs") or {}).get("generated_prompt_tokens", 0) for r in round_reports),
                  graph_auxiliary_costs=[dict(iteration=r["iteration"], costs=r["costs"]) for r in round_reports if r["costs"]])
-    return dict(version="dcc-credit-audit-v1", verdict=verdict, method=method, run_dir=str(run_dir),
+    method_variant = None
+    if method == "grpo":
+        weighting = {r.get("credit", {}).get("episode_weighting") for r in rounds
+                     if r.get("credit", {}).get("rows")}
+        visit_weighted = weighting == {"visits"}
+        method_variant = dict(
+            label="按步骤访问计数的 episode-only 对照" if visit_weighted else "episode-only 对照；归一化单位证据不足",
+            episode_weighting="visits" if visit_weighted else "unverified",
+            is_standard_episode_weighted_grpo=False if visit_weighted else None,
+            invalid_action_penalty=config.get("invalid_action_penalty"),
+            interpretation="按每个步骤访问统计同题分数，可能对长轨迹赋更高权重；不称为标准的每条轨迹等权 GRPO。",
+        )
+    return dict(version="dcc-credit-audit-v1", verdict=verdict, method=method, method_variant=method_variant, run_dir=str(run_dir),
                 interpretation="所有异常描述均为本次记录中的现象，不是动作因果价值、训练收益或算法普遍缺陷的证明。",
                 numeric_tolerance=dict(absolute=TOL, relative=1e-5),
-                manifest=manifest, status=status, checkpoint=checkpoint,
+                manifest=manifest, status=status, audit_in_progress=audit_in_progress, checkpoint=checkpoint,
                 training_statistics=statistics(training, unique_decisions),
                 evaluation_statistics=statistics(evaluation, [s for r in evaluation for s in r["steps"]]),
                 group_statistics=group_statistics, costs=costs,
