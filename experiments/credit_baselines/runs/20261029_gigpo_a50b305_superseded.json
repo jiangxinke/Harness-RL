@@ -1,0 +1,46 @@
+{
+  "method": "gigpo",
+  "source_commit": "a50b30528629a69bddb80c74b9701d57887ffa1a",
+  "status": "completed_but_superseded",
+  "usable_for_method_comparison": false,
+  "protocol": "cuad-audited-v2",
+  "train_rollouts": 96,
+  "actual_optimizer_steps": 12,
+  "train_decisions": 456,
+  "invalid_decisions": 329,
+  "terminal_successes": 48,
+  "held_out": {
+    "base": {
+      "successes": 6,
+      "rollouts": 16
+    },
+    "adapter": {
+      "successes": 7,
+      "rollouts": 16
+    }
+  },
+  "confounds": [
+    {
+      "issue": "The model copies Search/Read/Finish labels demonstrated by the system prompt; the strict parser rejects them.",
+      "impact": "Most decisions are protocol errors; unsuitable as a clean algorithm comparison."
+    },
+    {
+      "issue": "Eight identical float32 local scores produce local advantage -0.3158363401889801 instead of zero.",
+      "iteration": 10,
+      "constant_score": 6.883371829986572,
+      "impact": "Invalid local credit for eight initial decisions; exact-constant normalization guard and rerun required."
+    }
+  ],
+  "artifact_root": "outputs/credit-rebuild-20261029/a50b305/gigpo",
+  "files_sha256": {
+    "train\\train_rank0.jsonl": "c0a42307736ca313d236d8cfa8c0b1fa663d5a8925f352c6075841114435a81e",
+    "train\\rollouts_rank0.jsonl": "60caf53d8f892dbefc2214528550cfbbdca430cb611a9b2aaea78bd73baea051",
+    "evaluation\\rollouts.jsonl": "d9efe36ec69acabd1697afcd2629a7676fbd4627f7f8159306706aee9160b67d",
+    "checkpoint_audit.json": "35ab46205650d8dc2fa9d0171fc1bef99ba320b39fbb6748d209125140bf9ffd",
+    "manifest.json": "67775365ebc5aeab34f828e91c9eb492685b9d4e4e9dcaec3692f8306416b092"
+  },
+  "data": {
+    "pilot_train.jsonl": "ddc28d8b04b0feef5dc1694a73ff3add309a74519ce588bec5fb9b77010d9cbd",
+    "pilot_validation.jsonl": "9a258c700a9eda5d902c4b2b130de0610dd61ace837890f1c838fc68a1b9be93"
+  }
+}
