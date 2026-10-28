@@ -65,7 +65,10 @@ def _state_controls(history, protocol):
     actions = [history[index]["content"] for index in action_positions]
     last_action = "none"
     if actions:
-        parsed = (parse_audited_action if protocol == "cuad-audited-v1" else parse_legacy_action)(actions[-1])
+        if protocol in {"cuad-audited-v1", "cuad-audited-v2"}:
+            parsed = parse_audited_action(actions[-1], allow_answer_array=protocol == "cuad-audited-v2")
+        else:
+            parsed = parse_legacy_action(actions[-1])
         if parsed is None:
             last_action = "invalid_output"
         elif "answer" in parsed:
@@ -175,7 +178,7 @@ class GraphPOSummarizer:
             raise ValueError("GraphPO summary token limit must be positive")
         if type(max_attempts) is not int or not 1 <= max_attempts <= 3:
             raise ValueError("GraphPO summary attempts must be between one and three")
-        if protocol not in {"legacy", "cuad-audited-v1"}:
+        if protocol not in {"legacy", "cuad-audited-v1", "cuad-audited-v2"}:
             raise ValueError("GraphPO summarizer needs the actual CUAD runner protocol")
         self.policy, self.tokenizer = policy, tokenizer
         self.max_new_tokens, self.max_attempts = max_new_tokens, max_attempts

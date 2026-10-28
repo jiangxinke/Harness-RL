@@ -34,7 +34,7 @@ async def evaluate(args):
                       raw_sampling=args.temperature == 1.0)
     runner = EpisodeRunner(max_steps=args.max_steps, initial_chunks=args.initial_chunks,
         max_new_tokens=args.max_new_tokens, evaluation_temperature=args.temperature,
-        cuad_protocol="cuad-audited-v1", retrieval_context_chars=0)
+        cuad_protocol=args.cuad_protocol, retrieval_context_chars=0)
     summary = []
     started = time.monotonic()
     with (out / "rollouts.jsonl").open("x", encoding="utf-8") as stream:
@@ -63,6 +63,7 @@ def main():
     parser.add_argument("--data", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--adapter")
+    parser.add_argument("--cuad-protocol", choices=("cuad-audited-v1", "cuad-audited-v2"), default="cuad-audited-v2")
     parser.add_argument("--repeats", type=int, default=4)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--seed", type=int, default=147)

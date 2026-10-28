@@ -286,19 +286,21 @@ async def train(args):
                 from slime_plugins.dcc.graphpo_collector import collect_graphpo
                 branching = tuple(int(v) for v in args.graphpo_branching.split(","))
                 summary_start, embedding_start = (len(callback.records) for callback in graph_callbacks)
-                collection = await collect_graphpo(task, runner, policy, tokenizer=tokenizer,
-                    summarize=graph_callbacks[0], embed=graph_callbacks[1], branching=branching,
-                    threshold=args.graphpo_similarity, pooling_weight=.7, efficiency_weight=1.0)
+                try:
+                    collection = await collect_graphpo(task, runner, policy, tokenizer=tokenizer,
+                        summarize=graph_callbacks[0], embed=graph_callbacks[1], branching=branching,
+                        threshold=args.graphpo_similarity, pooling_weight=.7, efficiency_weight=1.0)
+                finally:
+                    await summary_policy.close()
+                    with (out / f"graphpo_auxiliary_rank{rank}.jsonl").open("a", encoding="utf-8") as auxiliary_log:
+                        auxiliary_log.write(json.dumps({"iteration": step + 1,
+                            "summaries": graph_callbacks[0].records[summary_start:],
+                            "embeddings": graph_callbacks[1].records[embedding_start:],
+                            "embedding_provenance": graph_callbacks[1].provenance}, ensure_ascii=False) + "\n")
                 results = collection.results
                 training_items = collection.training_items
                 credit_diagnostics = collection.diagnostics
                 advantages = None
-                await summary_policy.close()
-                with (out / f"graphpo_auxiliary_rank{rank}.jsonl").open("a", encoding="utf-8") as auxiliary_log:
-                    auxiliary_log.write(json.dumps({"iteration": step + 1,
-                        "summaries": graph_callbacks[0].records[summary_start:],
-                        "embeddings": graph_callbacks[1].records[embedding_start:],
-                        "embedding_provenance": graph_callbacks[1].provenance}, ensure_ascii=False) + "\n")
             else:
                 results = await asyncio.gather(*(runner.run(task, policy) for _ in range(args.group_size)))
                 from slime_plugins.dcc.credit_training import prepare_credit
@@ -433,7 +435,7 @@ def main():
     parser.add_argument("--group-size", type=int, default=2)
     parser.add_argument("--target-rollouts", type=int, default=0)
     parser.add_argument("--adv-estimator", choices=("grpo", "gigpo", "graphgpo", "g2po", "graphpo"), default="grpo")
-    parser.add_argument("--cuad-protocol", choices=("legacy", "cuad-audited-v1"), default="legacy")
+    parser.add_argument("--cuad-protocol", choices=("legacy", "cuad-audited-v1", "cuad-audited-v2"), default="legacy")
     parser.add_argument("--task-order", choices=("random", "sequential"), default="random")
     parser.add_argument("--credit-norm", choices=("mean_norm", "mean_std_norm"), default="mean_std_norm")
     parser.add_argument("--invalid-action-penalty", type=float, default=.1)

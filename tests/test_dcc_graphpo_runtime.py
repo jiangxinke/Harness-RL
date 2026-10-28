@@ -175,6 +175,55 @@ def test_real_runner_tool_failure_is_distinct_from_successful_action():
     assert json.loads(result)["last_action"] == "tool_error:read_document"
 
 
+@pytest.mark.parametrize("protocol", ["cuad-audited-v1", "cuad-audited-v2"])
+@pytest.mark.parametrize("action", ["[]", '[{"text":"PROMOTION AGREEMENT","confidence":1}]'])
+def test_answer_array_summary_stage_matches_real_runner_protocol(protocol, action):
+    from slime_plugins.dcc.data import Task
+    from slime_plugins.dcc.episode import EpisodeRunner
+    from slime_plugins.dcc.graphpo_collector import expand_once
+    sample = Task("real__Document Name", "cuad", "train", "Find the contract name.",
+                  "PROMOTION AGREEMENT.", ["PROMOTION AGREEMENT"])
+    runner = EpisodeRunner(max_steps=3, initial_chunks=1, cuad_protocol=protocol)
+
+    async def actor(messages, **kwargs):
+        return PolicyCompletion(action, chat_tokens(TOKENIZER, messages), TOKENIZER.encode(action))
+
+    expansion = asyncio.run(expand_once(sample, runner, actor, tokenizer=TOKENIZER))
+    accepted = protocol == "cuad-audited-v2"
+    if accepted:
+        assert expansion.result.status == "completed"
+    else:
+        assert expansion.result is None
+    output = valid(last_action="submit_answer" if accepted else "invalid_output",
+                   stage="final" if accepted else "active")
+    summarizer = GraphPOSummarizer(policy_with([output], []), TOKENIZER, protocol=protocol)
+    result = asyncio.run(summarizer(expansion.next_messages))
+    assert json.loads(result)["stage"] == ("final" if accepted else "active")
+
+
+@pytest.mark.parametrize("action", [
+    '[{"tool":"search_document","arguments":{"query":"title"}}]',
+    '["PROMOTION AGREEMENT"]', '[{"answer":[]}]', '{"answer":[],"answer":[]}',
+])
+def test_v2_tool_arrays_and_ambiguous_answers_stay_invalid_in_real_runner_and_summary(action):
+    from slime_plugins.dcc.data import Task
+    from slime_plugins.dcc.episode import EpisodeRunner
+    from slime_plugins.dcc.graphpo_collector import expand_once
+    sample = Task("real__Document Name", "cuad", "train", "Find the contract name.",
+                  "PROMOTION AGREEMENT.", ["PROMOTION AGREEMENT"])
+    runner = EpisodeRunner(max_steps=3, initial_chunks=1, cuad_protocol="cuad-audited-v2")
+
+    async def actor(messages, **kwargs):
+        return PolicyCompletion(action, chat_tokens(TOKENIZER, messages), TOKENIZER.encode(action))
+
+    expansion = asyncio.run(expand_once(sample, runner, actor, tokenizer=TOKENIZER))
+    assert expansion.result is None
+    summarizer = GraphPOSummarizer(policy_with([valid(last_action="invalid_output", stage="active")], []),
+                                  TOKENIZER, protocol="cuad-audited-v2")
+    result = asyncio.run(summarizer(expansion.next_messages))
+    assert json.loads(result)["last_action"] == "invalid_output"
+
+
 def test_summary_prompt_truncation_is_rejected_and_recorded():
     async def policy(messages, **kwargs):
         return PolicyCompletion(valid(), [1, 2, 3], TOKENIZER.encode(valid()))

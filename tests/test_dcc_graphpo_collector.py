@@ -233,3 +233,24 @@ def test_unobserved_correct_answer_is_failure_under_audited_protocol():
     assert result.metrics["observed_token_span_fraction"] == 0
     assert result.reward == 0
     assert all(path["binary_success"] == 0 for path in collected.diagnostics["terminal_paths"])
+
+
+@pytest.mark.parametrize("protocol", ["cuad-audited-v1", "cuad-audited-v2"])
+def test_collector_action_diagnostics_match_runner_array_protocol(protocol):
+    runner = EpisodeRunner(max_steps=2, initial_chunks=1, cuad_protocol=protocol)
+
+    async def policy(messages, **kwargs):
+        count = sum(message["role"] == "assistant" for message in messages)
+        text = '[{"text":"PROMOTION AGREEMENT","confidence":1}]' if count == 0 else '{"answer":[]}'
+        return completion(messages, text)
+
+    collected = asyncio.run(collect_graphpo(task(), runner, policy, tokenizer=TOKENIZER,
+                                            summarize=summarize, embed=embed, branching=(2, 1)))
+    first = collected.diagnostics["expansions"][0]
+    assert first["action_parsed"] is (protocol == "cuad-audited-v2")
+    if protocol == "cuad-audited-v2":
+        assert first["current_action_error"] is None
+        assert len(collected.results[0].steps) == 1
+    else:
+        assert first["current_action_error"]
+        assert len(collected.results[0].steps) == 2

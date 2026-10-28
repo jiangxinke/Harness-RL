@@ -465,7 +465,7 @@ class EpisodeRunner:
             raise ValueError("retrieval_context_chars must be a nonnegative integer")
         if type(retrieval_max_context_chars) is not int or retrieval_max_context_chars < 1:
             raise ValueError("retrieval_max_context_chars must be a positive integer")
-        if cuad_protocol not in {"legacy", "cuad-audited-v1"}:
+        if cuad_protocol not in {"legacy", "cuad-audited-v1", "cuad-audited-v2"}:
             raise ValueError("Unknown CUAD protocol version")
         self.cuad_protocol = cuad_protocol
         self.max_steps = max_steps
@@ -576,6 +576,10 @@ class EpisodeRunner:
         if task.benchmark == "cuad" and self.cuad_protocol == "cuad-audited-v1":
             from .cuad_audit_protocol import INSTRUCTIONS
             messages[0]["content"] += INSTRUCTIONS
+        if task.benchmark == "cuad" and self.cuad_protocol == "cuad-audited-v2":
+            from .cuad_audit_protocol import system_prompt, task_prompt
+            messages[0]["content"] = system_prompt(self.max_steps)
+            messages[1]["content"] = task_prompt(task)
         if task.benchmark == "cuad" and self.initial_chunks:
             observation = self._search_document(_document_tools(task.document), task.prompt, top_k=self.initial_chunks, task=task)
             messages.append({"role": "user", "content": "Initial contract retrieval (source material):\n" + json.dumps(observation, ensure_ascii=False)})
@@ -631,9 +635,10 @@ class EpisodeRunner:
                 for index in range(self.max_steps):
                     if index == self.max_steps - 1:
                         final_control = final_turn_message(task, evidence)
-                        if task.benchmark == "cuad" and self.cuad_protocol == "cuad-audited-v1":
-                            from .cuad_audit_protocol import FINAL_CONTROL
-                            final_control = {"role": "user", "content": FINAL_CONTROL}
+                        if task.benchmark == "cuad" and self.cuad_protocol in {"cuad-audited-v1", "cuad-audited-v2"}:
+                            from .cuad_audit_protocol import FINAL_CONTROL, FINAL_CONTROL_V2
+                            final_control = {"role": "user", "content": (
+                                FINAL_CONTROL_V2 if self.cuad_protocol == "cuad-audited-v2" else FINAL_CONTROL)}
                         if review_enabled:
                             from .web_review import web_review_final_control
 
@@ -693,9 +698,9 @@ class EpisodeRunner:
                         raise TypeError("policy must return PolicyCompletion")
                     steps.append(completion)
                     messages.append({"role": "assistant", "content": completion.text})
-                    if task.benchmark == "cuad" and self.cuad_protocol == "cuad-audited-v1":
+                    if task.benchmark == "cuad" and self.cuad_protocol in {"cuad-audited-v1", "cuad-audited-v2"}:
                         from .cuad_audit_protocol import parse_action as parse_cuad_action
-                        action = parse_cuad_action(completion.text)
+                        action = parse_cuad_action(completion.text, allow_answer_array=self.cuad_protocol == "cuad-audited-v2")
                     else:
                         action = parse_action(completion.text, widesearch_rows=task.benchmark == "widesearch")
                     if action is not None and "answer" in action:
@@ -714,6 +719,9 @@ class EpisodeRunner:
                         break
                     if action is None:
                         observation = {"error": 'Invalid action. Return a JSON object with "tool" and "arguments", or with "answer" as a list.'}
+                        if task.benchmark == "cuad" and self.cuad_protocol == "cuad-audited-v2":
+                            from .cuad_audit_protocol import action_error
+                            observation = {"error": action_error(completion.text)}
                     else:
                         tool, arguments = action.get("tool"), action.get("arguments", {})
                         if not isinstance(arguments, dict):
@@ -833,7 +841,7 @@ class EpisodeRunner:
             grounding = sum(grounded) / len(grounded) if grounded else 1.0
             metrics["verbatim_span_fraction"] = grounding
             reward = float(metrics["f1"]) * grounding
-            if self.cuad_protocol == "cuad-audited-v1":
+            if self.cuad_protocol in {"cuad-audited-v1", "cuad-audited-v2"}:
                 from .cuad_audit_protocol import source_grounded, observed_contract_texts
                 token_grounded = [source_grounded(item["text"], task.document) for item in spans]
                 token_fraction = sum(token_grounded) / len(token_grounded) if token_grounded else 1.0

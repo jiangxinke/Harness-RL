@@ -90,6 +90,28 @@ def test_unobserved_correct_title_does_not_count_as_grounded_success():
     assert result.reward == 0
 
 
+def test_v2_accepts_only_unambiguous_final_answer_array():
+    value = '[{"text":"PROMOTION AGREEMENT","confidence":1}]'
+    assert parse_action(value) is None
+    assert parse_action(value, allow_answer_array=True)["answer"][0]["text"] == "PROMOTION AGREEMENT"
+    assert parse_action('[]', allow_answer_array=True) == {"answer": []}
+    assert parse_action('["initial source", "tool request"]', allow_answer_array=True) is None
+    assert parse_action('[{"tool":"search_document","arguments":{"query":"A"}}]', allow_answer_array=True) is None
+    result = run_script([value], protocol="cuad-audited-v2")
+    assert result.status == "completed" and result.reward == 1
+
+
+def test_v2_task_wording_uses_public_question_not_gold():
+    from slime_plugins.dcc.cuad_audit_protocol import task_prompt
+    task = Task("contract__Document Name", "cuad", "train",
+        'Highlight parts related to "Document Name" reviewed by a lawyer. Details: The name of the contract',
+        "SECRET AGREEMENT", ["SECRET AGREEMENT"])
+    prompt = task_prompt(task)
+    assert "The name of the contract" in prompt
+    assert "reviewed by a lawyer" not in prompt
+    assert "SECRET AGREEMENT" not in prompt
+
+
 @pytest.mark.parametrize("text", [
     '["initial retrieval", "tool request"]',
     '{"answer":[],"answer":[{"text":"A","confidence":1}]}',

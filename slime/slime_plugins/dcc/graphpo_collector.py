@@ -237,7 +237,11 @@ async def collect_graphpo(
                                        "common_success_reward": None if success is None else 10.0 * success,
                                        "runner_reward": expansion.result.reward,
                                        "runner_metrics": copy.deepcopy(expansion.result.metrics)})
-            action = parse_action(completion.text)
+            if runner.cuad_protocol in {"cuad-audited-v1", "cuad-audited-v2"}:
+                from .cuad_audit_protocol import parse_action as parse_cuad_action
+                action = parse_cuad_action(completion.text, allow_answer_array=runner.cuad_protocol == "cuad-audited-v2")
+            else:
+                action = parse_action(completion.text)
             observation_errors = []
             if expansion.result is not None:
                 events = expansion.result.tool_events
