@@ -25,11 +25,16 @@ from slime_plugins.dcc.episode import EpisodeResult, PolicyCompletion
 
 
 def _episode(status, reward, *, tokens=True, alternative=False):
+    completion = [9, 10, 11] if alternative else [6, 7, 8]
+    text = " ".join(map(str, completion))
+    messages = [{"role":"system","content":"fixture"},
+                {"role":"user","content":"Find the clause"},
+                {"role":"user","content":'Initial contract retrieval (source material):\n{"text":"contract"}'},
+                {"role":"assistant","content":text}]
     return EpisodeResult(
         task_id="fixture-train", benchmark="cuad", split="train", answer=[],
-        status=status, reward=reward, metrics={}, messages=[], tool_events=[],
-        steps=[PolicyCompletion("recorded", [3, 4, 5], [9, 10, 11] if alternative else [6, 7, 8])]
-        if tokens else [],
+        status=status, reward=reward, metrics={}, messages=messages if tokens else [], tool_events=[],
+        steps=[PolicyCompletion(text, [3, 4, 5], completion)] if tokens else [],
     )
 
 
@@ -63,7 +68,9 @@ def _run_one_step(tmp_path, monkeypatch, results):
     monkeypatch.setattr(torch.cuda, "get_rng_state", lambda: torch.get_rng_state())
     task = SimpleNamespace(id="fixture-train", split="train", benchmark="cuad", gold=["fixture"])
     monkeypatch.setattr(_TRAIN, "load_tasks", lambda _: [task])
-    tokenizer = SimpleNamespace(save_pretrained=lambda _: None)
+    tokenizer = SimpleNamespace(save_pretrained=lambda _: None,
+        apply_chat_template=lambda messages, **kwargs: [3, 4, 5],
+        decode=lambda tokens, **kwargs: " ".join(map(str, tokens)))
     monkeypatch.setattr(_TRAIN, "load_policy_model", lambda *args, **kwargs: (model, tokenizer))
     monkeypatch.setattr(_TRAIN, "load_retrieval_profile", lambda _: None)
     monkeypatch.setattr(_TRAIN, "supervised_example", lambda *args, **kwargs: None)
@@ -90,7 +97,7 @@ def _run_one_step(tmp_path, monkeypatch, results):
         sft_steps=0, rl_steps=1, learning_rate=1e-3, max_steps=1,
         max_new_tokens=8, initial_chunks=1, retrieval_profile=None,
         group_size=len(results), max_prompt_tokens=32, sft_coefficient=0.0,
-        save_every=0,
+        save_every=0, kl_coefficient=0.0,
     )
     asyncio.run(_TRAIN.train(args))
     report = next(json.loads(line) for line in (tmp_path / "output/train_rank0.jsonl").read_text().splitlines()

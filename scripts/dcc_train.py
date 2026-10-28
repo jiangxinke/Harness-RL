@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "slime"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import torch
 import torch.distributed as dist
@@ -89,6 +90,11 @@ def average_gradients(parameters, world: int):
         parameter.grad.div_(world)
 
 
+def prepare_output_directory(out, rank, world):
+    from dcc_training_io import prepare_training_output
+    prepare_training_output(out, rank=rank, world_size=world, distributed=dist)
+
+
 def supervised_example(task, runner, tokenizer, max_prompt: int, max_response: int):
     # Web curricula may have structured row labels; CUAD's verbatim span
     # auxiliary is inapplicable to them. They still participate in RL.
@@ -118,6 +124,14 @@ def supervised_example(task, runner, tokenizer, max_prompt: int, max_response: i
 
 
 async def train(args):
+    defaults = dict(adv_estimator="grpo", cuad_protocol="legacy", task_order="random",
+        credit_norm="mean_std_norm", invalid_action_penalty=.1, kl_coefficient=.001,
+        graphgpo_omega=.2, graphpo_embedding=None, graphpo_branching="2,2,2,1,1,1,1,1",
+        graphpo_similarity=.92, gigpo_gamma=.95, gigpo_step_weight=1.0,
+        gigpo_similarity_threshold=.9, target_rollouts=0)
+    for key, value in defaults.items():
+        if not hasattr(args, key):
+            setattr(args, key, value)
     estimator = getattr(args, "adv_estimator", "grpo")
     rank = int(os.environ.get("RANK", "0"))
     local = int(os.environ.get("LOCAL_RANK", "0"))
@@ -139,7 +153,7 @@ async def train(args):
     ):
         raise ValueError("Official WideSearch tasks must never enter training")
     out = Path(args.output_dir)
-    out.mkdir(parents=True, exist_ok=True)
+    prepare_output_directory(out, rank, world)
     log = (out / f"train_rank{rank}.jsonl").open("a", buffering=1)
 
     def record(**value):
@@ -177,6 +191,7 @@ async def train(args):
     optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, weight_decay=0.0)
     runner = EpisodeRunner(
         max_steps=args.max_steps,
+        cuad_protocol=getattr(args, "cuad_protocol", "legacy"),
         max_new_tokens=args.max_new_tokens,
         initial_chunks=args.initial_chunks,
         temperature=1.0,
@@ -191,12 +206,22 @@ async def train(args):
         batch_size=args.group_size,
         max_prompt_tokens=args.max_prompt_tokens,
         raw_sampling=True,
+        allow_truncation=False,
     )
+    graph_callbacks = None
+    summary_policy = None
+    if estimator == "graphpo":
+        if not getattr(args, "graphpo_embedding", None):
+            raise ValueError("GraphPO requires a fixed local sentence embedding model")
+        from slime_plugins.dcc.graphpo_runtime import GraphPOSummarizer, SentenceEmbedder
+        summary_policy = HFPolicy(model, tokenizer, batch_size=1,
+            max_prompt_tokens=32768, allow_truncation=False, raw_sampling=True)
+        graph_callbacks = (GraphPOSummarizer(summary_policy, tokenizer, protocol=runner.cuad_protocol), SentenceEmbedder(args.graphpo_embedding))
     positives = [task for task in tasks if task.gold]
     negatives = [task for task in tasks if not task.gold]
     if not positives:
         raise ValueError("Training data must contain positive answers")
-    started, optimizer_steps = time.monotonic(), 0
+    started, optimizer_steps, rollout_count = time.monotonic(), 0, 0
 
     def save(name):
         if world > 1:
@@ -254,62 +279,73 @@ async def train(args):
                 "response_tokens": len(example[1]),
             }
         else:
-            task = random.choice(
-                negatives if negatives and (step + rank) % 4 == 0 else positives
-            )
-            results = await asyncio.gather(
-                *(runner.run(task, policy) for _ in range(args.group_size))
-            )
-            # Episode timeouts cancel a future, not a CUDA generation thread.
-            # Wait for model access to finish before scoring or backpropagation.
-            await policy.close()
-            rewards = [result.reward for result in results]
-            # Center rewards over the same replayable episodes used below.
-            # Protocol/context failures and empty episodes have no policy loss;
-            # including them here would leave an unmatched positive advantage.
-            valid = [
-                index
-                for index, result in enumerate(results)
-                if result.trainable_steps
-            ]
-            average = sum(rewards[i] for i in valid) / len(valid) if valid else 0.0
-            variance = (
-                sum((rewards[i] - average) ** 2 for i in valid) / len(valid)
-                if valid
-                else 0.0
-            )
-            advantages = [[] for _ in results]
-            credit_diagnostics = {}
-            if estimator == "gigpo":
-                from slime_plugins.dcc.gigpo import step_advantages
-                advantages, credit_diagnostics = step_advantages(
-                    results, tokenizer=tokenizer, gamma=args.gigpo_gamma,
-                    weight=args.gigpo_step_weight, similarity_threshold=args.gigpo_similarity_threshold,
-                )
+            task = (tasks[(step - args.sft_steps) % len(tasks)]
+                    if getattr(args, "task_order", "random") == "sequential" else
+                    random.choice(negatives if negatives and (step + rank) % 4 == 0 else positives))
+            if estimator == "graphpo":
+                from slime_plugins.dcc.graphpo_collector import collect_graphpo
+                branching = tuple(int(v) for v in args.graphpo_branching.split(","))
+                summary_start, embedding_start = (len(callback.records) for callback in graph_callbacks)
+                collection = await collect_graphpo(task, runner, policy, tokenizer=tokenizer,
+                    summarize=graph_callbacks[0], embed=graph_callbacks[1], branching=branching,
+                    threshold=args.graphpo_similarity, pooling_weight=.7, efficiency_weight=1.0)
+                results = collection.results
+                training_items = collection.training_items
+                credit_diagnostics = collection.diagnostics
+                advantages = None
+                await summary_policy.close()
+                with (out / f"graphpo_auxiliary_rank{rank}.jsonl").open("a", encoding="utf-8") as auxiliary_log:
+                    auxiliary_log.write(json.dumps({"iteration": step + 1,
+                        "summaries": graph_callbacks[0].records[summary_start:],
+                        "embeddings": graph_callbacks[1].records[embedding_start:],
+                        "embedding_provenance": graph_callbacks[1].provenance}, ensure_ascii=False) + "\n")
             else:
-                for index in valid:
-                    value = (rewards[index] - average) / (variance**0.5 + 1e-4)
-                    advantages[index] = [value] * len(results[index].trainable_steps)
+                results = await asyncio.gather(*(runner.run(task, policy) for _ in range(args.group_size)))
+                from slime_plugins.dcc.credit_training import prepare_credit
+                training_items, advantages, credit_diagnostics = prepare_credit(results,
+                    tokenizer=tokenizer, method=estimator, mode=args.credit_norm,
+                    invalid_penalty=args.invalid_action_penalty, gamma=args.gigpo_gamma,
+                    weight=args.gigpo_step_weight, similarity_threshold=args.gigpo_similarity_threshold,
+                    graph_omega=args.graphgpo_omega)
+            await policy.close()
+            rollout_count += len(results)
+            rewards = [result.reward for result in results]
+            raw_average = sum(rewards) / len(rewards) if rewards else 0.0
+            raw_variance = sum((value - raw_average) ** 2 for value in rewards) / len(rewards) if rewards else 0.0
+            eligible_rewards = ([rewards[i] for i, values in enumerate(advantages) if values]
+                                if advantages is not None else rewards)
+            average = sum(eligible_rewards) / len(eligible_rewards) if eligible_rewards else 0.0
+            variance = (sum((value - average) ** 2 for value in eligible_rewards) / len(eligible_rewards)
+                        if eligible_rewards else 0.0)
             loss_total, segments = 0.0, 0
             # Fixed old policy scores before ANY optimizer mutation.
             scored = []
             model.eval()
-            for index in valid:
-                for segment, advantage in zip(results[index].trainable_steps, advantages[index], strict=True):
-                    with torch.no_grad():
-                        old = completion_logprobs(
-                            model, segment.prompt_ids, segment.completion_ids
-                        ).detach()
-                    segment.logprobs = old.float().cpu().tolist()
-                    scored.append((segment, old, advantage))
+            for segment, advantage in training_items:
+                with torch.no_grad():
+                    old = completion_logprobs(model, segment.prompt_ids, segment.completion_ids).detach()
+                    if args.kl_coefficient:
+                        with model.disable_adapter():
+                            reference = completion_logprobs(model, segment.prompt_ids, segment.completion_ids).detach()
+                    else:
+                        reference = None
+                segment.logprobs = old.float().cpu().tolist()
+                scored.append((segment, old, advantage, reference))
             model.train()
-            for segment, old, advantage in scored:
-                if advantage == 0:
+            kl_total = 0.0
+            for segment, old, advantage, reference in scored:
+                if advantage == 0 and not args.kl_coefficient:
                     continue
                 current = completion_logprobs(
                     model, segment.prompt_ids, segment.completion_ids
                 )
-                loss = grpo_loss(current, old, advantage) / max(len(scored), 1)
+                policy_loss = grpo_loss(current, old, advantage)
+                if reference is not None:
+                    log_ratio = reference - current
+                    kl = (log_ratio.exp() - log_ratio - 1).mean()
+                    kl_total += float(kl.detach()) / max(len(scored), 1)
+                    policy_loss = policy_loss + args.kl_coefficient * kl
+                loss = policy_loss / max(len(scored), 1)
                 loss.backward()
                 loss_total += loss.item()
                 segments += 1
@@ -332,11 +368,16 @@ async def train(args):
                 "sft_auxiliary": auxiliary_loss,
                 "rewards": rewards,
                 "reward_std": variance**0.5,
+                "all_rollout_reward_std": raw_variance**0.5,
                 "policy_segments": segments,
                 "task": task.id,
                 "statuses": [result.status for result in results],
                 "advantages": advantages,
-                **({"gigpo": credit_diagnostics} if estimator == "gigpo" else {}),
+                "kl_mean": kl_total,
+                "unique_training_decisions": len(training_items),
+                "nonzero_policy_advantages": sum(value != 0 for _, value in training_items),
+                "rollout_count": rollout_count,
+                "credit": credit_diagnostics,
             }
             with (out / f"rollouts_rank{rank}.jsonl").open("a") as rollout_log:
                 for result in results:
@@ -365,6 +406,9 @@ async def train(args):
         )
         if args.save_every and applied and optimizer_steps % args.save_every == 0:
             save(f"step_{optimizer_steps:04d}")
+        if (args.target_rollouts and rollout_count >= args.target_rollouts
+                and (args.task_order != "sequential" or (step + 1 - args.sft_steps) % len(tasks) == 0)):
+            break
     await policy.close()
     save("final")
     record(
@@ -387,7 +431,17 @@ def main():
     parser.add_argument("--sft-steps", type=int, default=32)
     parser.add_argument("--rl-steps", type=int, default=24)
     parser.add_argument("--group-size", type=int, default=2)
-    parser.add_argument("--adv-estimator", choices=("grpo", "gigpo"), default="grpo")
+    parser.add_argument("--target-rollouts", type=int, default=0)
+    parser.add_argument("--adv-estimator", choices=("grpo", "gigpo", "graphgpo", "g2po", "graphpo"), default="grpo")
+    parser.add_argument("--cuad-protocol", choices=("legacy", "cuad-audited-v1"), default="legacy")
+    parser.add_argument("--task-order", choices=("random", "sequential"), default="random")
+    parser.add_argument("--credit-norm", choices=("mean_norm", "mean_std_norm"), default="mean_std_norm")
+    parser.add_argument("--invalid-action-penalty", type=float, default=.1)
+    parser.add_argument("--kl-coefficient", type=float, default=.001)
+    parser.add_argument("--graphgpo-omega", type=float, default=.2)
+    parser.add_argument("--graphpo-embedding")
+    parser.add_argument("--graphpo-branching", default="2,2,2,1,1,1,1,1")
+    parser.add_argument("--graphpo-similarity", type=float, default=.92)
     parser.add_argument("--gigpo-gamma", type=float, default=0.95)
     parser.add_argument("--gigpo-step-weight", type=float, default=1.0)
     parser.add_argument("--gigpo-similarity-threshold", type=float, default=0.9,
@@ -416,6 +470,14 @@ def main():
         or args.sft_steps + args.rl_steps == 0
     ):
         parser.error("positive training steps and group-size >= 2 are required")
+    if args.initial_chunks < 1:
+        parser.error("Credit comparisons require an initial public source observation")
+    if args.invalid_action_penalty < 0 or not math.isfinite(args.invalid_action_penalty):
+        parser.error("Invalid-action penalty must be finite and nonnegative")
+    if args.kl_coefficient < 0 or not math.isfinite(args.kl_coefficient):
+        parser.error("KL coefficient must be finite and nonnegative")
+    if args.adapter and args.kl_coefficient:
+        parser.error("This reference KL uses the clean base; do not warm-start an adapter")
     asyncio.run(train(args))
 
 

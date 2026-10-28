@@ -411,7 +411,7 @@ def final_turn_message(task: Task, evidence: _WebEvidence | None = None) -> dict
 
 
 class EpisodeRunner:
-    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900, retrieval_profile: RetrievalProfile | None = None, auto_read_sources: int = 0, auto_read_follow_docs: bool = False, retrieval_context_chars: int = 0, retrieval_max_context_chars: int = 16000, evaluation_temperature: float = 0.0, web_structured_final: bool = False, web_structured_actions: bool = False, web_explicit_review: bool = False, web_navigation_ledger: bool = False, web_research_checkpoints: bool = False, web_data_discovery_guidance: bool = False, web_multi_citation: bool = False, web_cached_rows: bool = False, cuad_structured_actions: bool = False, retrieval_task_bound_expansion: bool = False, cuad_concise_reasoning: bool = False, web_concise_reasoning: bool = False, web_observation_token_budget: int | None = None) -> None:
+    def __init__(self, *, max_steps: int = 4, max_new_tokens: int = 1024, temperature: float = 0.8, initial_chunks: int = 4, web_tools_factory: Callable[[], WebTools] = WebTools, timeout_seconds: float = 900, retrieval_profile: RetrievalProfile | None = None, auto_read_sources: int = 0, auto_read_follow_docs: bool = False, retrieval_context_chars: int = 0, retrieval_max_context_chars: int = 16000, evaluation_temperature: float = 0.0, web_structured_final: bool = False, web_structured_actions: bool = False, web_explicit_review: bool = False, web_navigation_ledger: bool = False, web_research_checkpoints: bool = False, web_data_discovery_guidance: bool = False, web_multi_citation: bool = False, web_cached_rows: bool = False, cuad_structured_actions: bool = False, retrieval_task_bound_expansion: bool = False, cuad_concise_reasoning: bool = False, web_concise_reasoning: bool = False, web_observation_token_budget: int | None = None, cuad_protocol: str = "legacy") -> None:
         from .web_structured import (web_structured_actions_configuration, web_structured_configuration,
                                      web_multi_citation_configuration)
 
@@ -465,6 +465,9 @@ class EpisodeRunner:
             raise ValueError("retrieval_context_chars must be a nonnegative integer")
         if type(retrieval_max_context_chars) is not int or retrieval_max_context_chars < 1:
             raise ValueError("retrieval_max_context_chars must be a positive integer")
+        if cuad_protocol not in {"legacy", "cuad-audited-v1"}:
+            raise ValueError("Unknown CUAD protocol version")
+        self.cuad_protocol = cuad_protocol
         self.max_steps = max_steps
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
@@ -570,6 +573,9 @@ class EpisodeRunner:
         messages = [{"role": "system", "content": _system_prompt(task, self.max_steps,
             cuad_concise_reasoning=self.cuad_concise_reasoning,
             web_concise_reasoning=self.web_concise_reasoning)}, {"role": "user", "content": task.prompt}]
+        if task.benchmark == "cuad" and self.cuad_protocol == "cuad-audited-v1":
+            from .cuad_audit_protocol import INSTRUCTIONS
+            messages[0]["content"] += INSTRUCTIONS
         if task.benchmark == "cuad" and self.initial_chunks:
             observation = self._search_document(_document_tools(task.document), task.prompt, top_k=self.initial_chunks, task=task)
             messages.append({"role": "user", "content": "Initial contract retrieval (source material):\n" + json.dumps(observation, ensure_ascii=False)})
@@ -625,6 +631,9 @@ class EpisodeRunner:
                 for index in range(self.max_steps):
                     if index == self.max_steps - 1:
                         final_control = final_turn_message(task, evidence)
+                        if task.benchmark == "cuad" and self.cuad_protocol == "cuad-audited-v1":
+                            from .cuad_audit_protocol import FINAL_CONTROL
+                            final_control = {"role": "user", "content": FINAL_CONTROL}
                         if review_enabled:
                             from .web_review import web_review_final_control
 
@@ -684,7 +693,11 @@ class EpisodeRunner:
                         raise TypeError("policy must return PolicyCompletion")
                     steps.append(completion)
                     messages.append({"role": "assistant", "content": completion.text})
-                    action = parse_action(completion.text, widesearch_rows=task.benchmark == "widesearch")
+                    if task.benchmark == "cuad" and self.cuad_protocol == "cuad-audited-v1":
+                        from .cuad_audit_protocol import parse_action as parse_cuad_action
+                        action = parse_cuad_action(completion.text)
+                    else:
+                        action = parse_action(completion.text, widesearch_rows=task.benchmark == "widesearch")
                     if action is not None and "answer" in action:
                         if evidence is not None:
                             reasons = evidence.reject_reasons(task, action["answer"])
@@ -820,6 +833,17 @@ class EpisodeRunner:
             grounding = sum(grounded) / len(grounded) if grounded else 1.0
             metrics["verbatim_span_fraction"] = grounding
             reward = float(metrics["f1"]) * grounding
+            if self.cuad_protocol == "cuad-audited-v1":
+                from .cuad_audit_protocol import source_grounded, observed_contract_texts
+                token_grounded = [source_grounded(item["text"], task.document) for item in spans]
+                token_fraction = sum(token_grounded) / len(token_grounded) if token_grounded else 1.0
+                metrics["source_token_span_fraction"] = token_fraction
+                visible = observed_contract_texts(messages, task.document)
+                visible_grounded = [any(source_grounded(item["text"], text) for text in visible) for item in spans]
+                visible_fraction = sum(visible_grounded) / len(visible_grounded) if visible_grounded else 1.0
+                metrics["observed_token_span_fraction"] = visible_fraction
+                metrics["cuad_protocol"] = self.cuad_protocol
+                reward = float(metrics["f1"]) * visible_fraction
         elif status == "completed" and task.benchmark == "widesearch":
             metrics["citation_validity"] = web_tools.citation_validity(answer) if web_tools else 0.0
             # Never consult held-out WideSearch answers during rollout. Final
