@@ -1,0 +1,271 @@
+{
+  "date": "2026-10-29",
+  "status": "completed_pilot_and_trace_review",
+  "branch": "exp/dcc-credit-baselines",
+  "upstream_dcc_base": "3d91dc656ecf8ee14ab913bb74b317a962fa81e0",
+  "scope": {
+    "actor": "Qwen2.5-3B-Instruct",
+    "harness": "DCC EpisodeRunner contract tool loop; not native SP central/subagent execution",
+    "benchmark": "CUAD adapted per-question matching and observed-source reward; not official full leaderboard evaluation",
+    "training_questions": 12,
+    "heldout_questions": 4,
+    "heldout_repeats_per_question": 4,
+    "training_rollouts": 508,
+    "evaluation_rollouts": 80,
+    "shared_prefix_training_edges_counted_once": true
+  },
+  "runs": [
+    {
+      "method": "grpo",
+      "label": "Episode-only 对照",
+      "source_commit": "abbb72c25a4666b48bf7fa07269b1a06398d8b7d",
+      "training_rollouts": 96,
+      "evaluation_rollouts": 16,
+      "training_unique_decisions": 185,
+      "training_successes": 33,
+      "evaluation_successes": 6,
+      "optimizer_steps": 12,
+      "audit_verdict": "verified_record_consistency",
+      "check_counts": {
+        "passed": 3794,
+        "missing": 2
+      },
+      "run_directory": "outputs/credit-rebuild-20261029/abbb72c/grpo"
+    },
+    {
+      "method": "gigpo",
+      "label": "GiGPO",
+      "source_commit": "abbb72c25a4666b48bf7fa07269b1a06398d8b7d",
+      "training_rollouts": 96,
+      "evaluation_rollouts": 16,
+      "training_unique_decisions": 200,
+      "training_successes": 38,
+      "evaluation_successes": 6,
+      "optimizer_steps": 12,
+      "audit_verdict": "verified_record_consistency",
+      "check_counts": {
+        "passed": 4425,
+        "missing": 2
+      },
+      "run_directory": "outputs/credit-rebuild-20261029/abbb72c/gigpo"
+    },
+    {
+      "method": "graphgpo",
+      "label": "GraphGPO",
+      "source_commit": "abbb72c25a4666b48bf7fa07269b1a06398d8b7d",
+      "training_rollouts": 96,
+      "evaluation_rollouts": 16,
+      "training_unique_decisions": 126,
+      "training_successes": 44,
+      "evaluation_successes": 7,
+      "optimizer_steps": 12,
+      "audit_verdict": "verified_record_consistency",
+      "check_counts": {
+        "passed": 4060,
+        "missing": 2
+      },
+      "run_directory": "outputs/credit-rebuild-20261029/abbb72c/graphgpo"
+    },
+    {
+      "method": "g2po",
+      "label": "G2PO",
+      "source_commit": "abbb72c25a4666b48bf7fa07269b1a06398d8b7d",
+      "training_rollouts": 96,
+      "evaluation_rollouts": 16,
+      "training_unique_decisions": 162,
+      "training_successes": 43,
+      "evaluation_successes": 6,
+      "optimizer_steps": 12,
+      "audit_verdict": "verified_record_consistency",
+      "check_counts": {
+        "passed": 4875,
+        "missing": 2
+      },
+      "run_directory": "outputs/credit-rebuild-20261029/abbb72c/g2po"
+    },
+    {
+      "method": "graphpo",
+      "label": "GraphPO（本次适配）",
+      "source_commit": "1827013a75bfdd9067bddf78cc41f1d15fcddd1b",
+      "training_rollouts": 124,
+      "evaluation_rollouts": 16,
+      "training_unique_decisions": 229,
+      "training_successes": 54,
+      "evaluation_successes": 5,
+      "optimizer_steps": 47,
+      "audit_verdict": "verified_record_consistency",
+      "check_counts": {
+        "passed": 8616,
+        "missing": 1
+      },
+      "run_directory": "outputs/credit-rebuild-20261029/1827013/graphpo"
+    }
+  ],
+  "implementation_sources": {
+    "gigpo": {
+      "source_file": "repos/Harness-RL-credit-baselines/third_party/gigpo-source.json",
+      "sha256": "efab86ec36f3ded7d85c6c8bf47812fed190dd44efa22369a9dc1098b2c5766d",
+      "repository": "https://github.com/langfengQ/verl-agent",
+      "commit": "20bd331bdbc9026a5668e11362178e10ab7400c8",
+      "paper": "2505.10978v3"
+    },
+    "graphgpo": {
+      "source_file": "repos/Harness-RL-credit-baselines/third_party/graphgpo-source.json",
+      "sha256": "50d88db1b304878ae2c6e805ab39d989bade0d344b5adcff5960f7bac9c85572",
+      "repository": "https://github.com/langfengQ/verl-agent",
+      "commit": "20bd331bdbc9026a5668e11362178e10ab7400c8",
+      "paper": "https://arxiv.org/abs/2605.26684v2"
+    },
+    "g2po": {
+      "source_file": "repos/Harness-RL-credit-baselines/third_party/g2po-source.json",
+      "sha256": "babd58c507c6b3d301836c19775dbccef6d0226a4d8511f5abd541a98fb127f2",
+      "repository": "https://github.com/Nala-YN/G2PO",
+      "commit": "b8ffaf56ad241ce73507908e6ed30209cafd324d",
+      "paper": "04_G2PO_2606.22995v2.pdf"
+    },
+    "graphpo": {
+      "source_file": "repos/Harness-RL-credit-baselines/third_party/graphpo-source.json",
+      "sha256": "a44c4d0a1030778d62876f6e6a0d68af06938244964a1c3e5a871b1498a19559",
+      "repository": null,
+      "commit": null,
+      "paper": "2606.18954v1"
+    }
+  },
+  "supported_observations": [
+    {
+      "method": "episode-only",
+      "finding": "相同前两步取证因后续答案不同，获得不同符号的整条轨迹项。它不能单独说明这些取证动作的因果价值。",
+      "cases": [
+        1
+      ]
+    },
+    {
+      "method": "gigpo",
+      "finding": "相同错误输出和反馈未带来新证据，后一次访问仍因折扣回报更高而获得更高局部优势；当前分组未区分剩余预算。",
+      "cases": [
+        2
+      ]
+    },
+    {
+      "method": "graphgpo",
+      "finding": "四个全失败组共32条轨迹没有产生区分信号；fallback距离不是经过验证的成功距离。另有图项压过正episode项的反例。",
+      "cases": [
+        3,
+        6
+      ]
+    },
+    {
+      "method": "g2po",
+      "finding": "进入最后一轮及共享后继结果能抬高节点分数；重复搜索的NC与EC也可能方向不同，必须检查分项和合计。",
+      "cases": [
+        4,
+        5
+      ]
+    },
+    {
+      "method": "graphpo adaptation",
+      "finding": "当前GTE及阈值把部分终止状态与活动状态、或结果相反的终止状态合并。正优势可能只是高于共享比较组的均值，不是正确性或真实进度证明。",
+      "cases": [
+        7,
+        8
+      ]
+    }
+  ],
+  "limits": [
+    "Episode-only is a visit-weighted GiGPO ablation with invalid-action penalties, not standard episode-weighted GRPO.",
+    "GraphPO uses paper-based code without located official implementation; GTE and constrained extractive summaries are material adaptations from the paper.",
+    "GraphPO has 124 leaf paths over48 task graphs; other methods have96 rollouts over12 rounds. Update counts and compute differ. No method ranking is claimed.",
+    "v3 parsing differs from native DCC; selected examples and protocol-sensitive supplementary examples are distinguished. Static parser comparison is not a native-protocol rerun.",
+    "The source reward is case-sensitive; casefold sensitivity is separate from credit-method observations.",
+    "A positive advantage is a relative training weight, not a causal usefulness label. Fixed-sample credit recomputation does not establish trained or counterfactual task gains.",
+    "Most trajectories end quickly; these observations do not establish performance on full long-horizon tasks."
+  ],
+  "deliverable": {
+    "path": "outputs/credit-rebuild-20261029/comparison/index.html",
+    "sha256": "e393af65cb4cbc23ef2cc64b62c74ca0276439f66c212a597113d776e72898e0",
+    "rollout_cards": 588,
+    "selected_cases": 8,
+    "validation": {
+      "raw_audit_rollouts_and_actions_match": true,
+      "aggregate_counts_match": true,
+      "unique_html_ids": 1663,
+      "html_escape_self_check": true,
+      "external_dependencies": 0,
+      "common_evaluation_task_set": true,
+      "verified_links": 639,
+      "javascript_controls": {
+        "status": "passed",
+        "cards": 588,
+        "method_phase_filter_count": 16,
+        "checks": [
+          "syntax",
+          "method_phase_filter",
+          "keyword_empty_state",
+          "expand_visible_only",
+          "collapse_visible",
+          "case_anchor_reveal"
+        ]
+      },
+      "html_sha256": "e393af65cb4cbc23ef2cc64b62c74ca0276439f66c212a597113d776e72898e0",
+      "html_bytes": 12164764
+    },
+    "visual_review": "Browser automation unavailable; data, HTML links and scripted controls were checked without claiming screenshot review."
+  },
+  "evidence": {
+    "gigpo_steps": {
+      "file": "gigpo_steps.json",
+      "sha256": "ad2e62e4010f199c4d91301d44a6fddc172977c68da782681c863c353877a883",
+      "bytes": 498386
+    },
+    "episode_only": {
+      "file": "episode_only.json",
+      "sha256": "a389bc8d70cbd94657524e51be96dbfaf3c55bef7e46726c7b9914eae9dbfa65",
+      "bytes": 38891
+    },
+    "graphgpo_steps": {
+      "file": "graphgpo_steps.json",
+      "sha256": "42bb46652ccc89a46af5d617dd886e992a8d34ffaad7da243bc8ef71c16a6a64",
+      "bytes": 468114
+    },
+    "graphgpo_all_failure": {
+      "file": "graphgpo_all_failure.json",
+      "sha256": "23d599ac37e512a8dc371ee65d78dced744ebf23f1b720ff14ee04702ddc4b47",
+      "bytes": 36795
+    },
+    "g2po_steps": {
+      "file": "g2po_steps.json",
+      "sha256": "1a490ad2d61c843d92b99e8deb2221c2f7963b515564e31c1fd3eb24ac88184e",
+      "bytes": 3231870
+    },
+    "graphpo_representation": {
+      "file": "graphpo_representation.json",
+      "sha256": "cb6337a74d84e7ad46491982eff60b60fa027f8b37bf527b6225e4d1cd40f505",
+      "bytes": 7994925
+    },
+    "protocol_sensitivity": {
+      "file": "protocol_sensitivity.json",
+      "sha256": "e7feff76503a4d98743effc6b7bdfc2dfa21ff296920037dc066b536b651aa43",
+      "bytes": 1947124
+    },
+    "casefold_sensitivity": {
+      "file": "casefold_sensitivity.json",
+      "sha256": "fb2a404cbe29587d32887215539fdec4d641cdc9197220b0a82ddf7ae8838433",
+      "bytes": 17943
+    },
+    "graphpo_credit": {
+      "file": "graphpo_credit.json",
+      "sha256": "a453518d67dda22661cb6d255284e1b51c90368e9c6129863b704d476523fda9",
+      "bytes": 690056
+    }
+  },
+  "paired_diagnostic": {
+    "path": "outputs/credit-rebuild-20261029/paired-credit-abbb72c-v2.json",
+    "sha256": "0a3fa0c43c7f192e8a1893e1cf2e67784c99e5707063f383e7ec79fd2938d51a",
+    "training": false
+  },
+  "reproduction_files": {
+    "actor_model_manifest.json": "f8e53bdbe469b97795c0d8068f9d4d62367999fc43d66b05f0ad00c38d5c44e4",
+    "build_viewer.py": "7f7547412fdab92c18f5594c90b98b134784dfb41c99f51b35e7bb9d16d7949e",
+    "selected_cases.json": "13f33304c0642b823136d5a9ff040d79f300205b94816ac084cf6f571c09de5e"
+  }
+}
